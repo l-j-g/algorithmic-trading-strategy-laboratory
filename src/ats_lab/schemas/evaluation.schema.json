@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ats-lab://workflow-v2/evaluation/v1",
+  "type": "object",
+  "required": ["schema_version", "experiment_id", "verdict", "summary"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "experiment_id": {"type": "string", "minLength": 1},
+    "verdict": {"enum": ["reject", "revise", "hpo_candidate", "paper_trade_candidate", "inconclusive", "infrastructure_failure", "pass"]},
+    "summary": {"type": "string"},
+    "metrics_summary": {"type": "string"},
+    "next_step": {"type": "string"},
+    "evaluator": {"type": "string"},
+    "evaluated_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

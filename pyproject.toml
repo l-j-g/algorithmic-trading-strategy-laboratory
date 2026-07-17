@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "algorithmic-trading-strategy-laboratory"
+version = "0.1.0"
+description = "A typed, evidence-first workflow for algorithmic trading strategy research."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Algorithmic Trading Strategy Laboratory contributors" }]
+keywords = ["algorithmic-trading", "backtesting", "quantitative-research", "sqlite", "agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = []
+
+[project.scripts]
+ats-lab = "ats_lab.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ats_lab = ["schema.sql", "schemas/*.json"]
+
+[tool.unittest]
+start-directory = "tests"
