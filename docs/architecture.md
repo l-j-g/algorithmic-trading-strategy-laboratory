@@ -22,11 +22,15 @@ Typed JSON contracts --> transactional work queue
                     candidates and synthesis
 ```
 
+See [job synthesis](synthesis.md) for entry-rule lineage and significance gates.
+
 ## Ownership
 
 - Laboratory owns specifications, queue state, evidence, evaluations and views.
 - Execution adapters own communication with a backtesting framework.
 - An external scheduler or agent decides when to invoke short CLI commands.
+- The continuous worker claims work and calls an external JSON adapter; it does
+  not contain backtester, Agent, Memory, or Jesse operations.
 - Memory systems may store durable preferences and conclusions, never locks or
   authoritative experiment results.
 - Markdown and HTML are output formats, not operational databases.
@@ -61,3 +65,9 @@ agent and adapter boundaries. Python dataclasses provide in-process types.
 The CLI emits JSON and performs one bounded operation per invocation. It can be
 called by Agent, Codex, cron, CI or another orchestrator. No agent-specific
 memory format is required.
+
+The optional [Agent and Memory launcher](executor-memory-launcher.md) provides a
+bounded subprocess adapter while preserving these ownership boundaries.
+
+[Resource policy](resource-policy.md) keeps agent calls sparse and delegates
+large RST, HPO and Monte Carlo batches to local Jesse compute.

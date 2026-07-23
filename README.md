@@ -87,6 +87,7 @@ Inspect future work and candidates:
 
 ```bash
 ats-lab queue
+ats-lab reconcile
 ats-lab candidates
 ats-lab candidates --verdict hpo-candidate
 ```
@@ -98,6 +99,78 @@ ats-lab claim --worker research-agent-1
 ```
 
 Every command emits JSON. A second worker cannot claim the same ready item.
+
+### Run a worker
+
+Connect any agent runner through a small JSON stdin/stdout adapter:
+
+```bash
+ats-lab worker --dispatch-command './bin/dispatch-agent' --continuous
+```
+
+When `.ats-lab/config.toml` exists, omit `--dispatch-command`; the worker uses
+the built-in Agent launcher automatically. The command-line flag and
+`ATS_LAB_DISPATCH_COMMAND` remain explicit overrides.
+
+Continuous workers synthesize through Agent when unresolved research chains
+reach the low watermark (five by default). One planner lease emits exactly 25
+chains: eligible controlled improvements first, at least five genuinely new
+concepts, and no more than twenty improvements. A chain may contain significance
+and gated baseline work, so 25 chains can create more than 25 work items. At most
+three work items are ready/running; scheduled overflow is promoted as slots open.
+HPO and paper-trade candidates remain promotion-locked. Use
+`--no-idle-synthesis` for monitor-only waiting.
+
+Each finished research response includes normalized run evidence and an
+evaluation. Both persist together, letting the next cohort learn from metrics,
+failure regimes and next steps without a separate evaluator context load.
+
+```bash
+ats-lab synthesis-status
+```
+
+For compute-rich/token-limited operation, configure `[resources]` in the ignored
+`.ats-lab/config.toml`. See [resource policy](docs/resource-policy.md).
+
+For each claimed item, the command receives a versioned execution request on
+standard input. It must print one JSON object with an `outcome` of `finished`,
+`retry`, or `blocked`. A retry may include `retry_after`; otherwise the worker
+uses a 60-second delay. Blocked and retry results may include `blocker_code`
+and `detail`. Finished research work must include `evidence.run` and
+`evidence.evaluation`.
+
+`--continuous` defaults off, `--idle-sleep` defaults to 30 seconds, and
+`--retry-delay` defaults to 60 seconds. `--max-items N` provides a bounded run
+for supervisors and smoke tests. The dispatch command can also be set with
+`ATS_LAB_DISPATCH_COMMAND`; worker identity uses `ATS_LAB_WORKER_ID`.
+
+The worker owns only queue lifecycle. The adapter owns agent launch and Jesse
+operations, then returns a normalized outcome. Missing adapter configuration
+fails before any work is claimed.
+
+### Reconcile imported queue state
+
+Preview classifications before starting workers:
+
+```bash
+ats-lab reconcile
+```
+
+Default stale threshold: 24 hours. Missing claim metadata on imported
+`running` work also counts as stale. Apply conservative cleanup explicitly:
+
+```bash
+ats-lab reconcile --stale-after-hours 24 --apply
+ats-lab normalize-blockers --apply
+```
+
+`normalize-blockers` returns never-attempted legacy ideas to `scheduled` while
+preserving their former blocker text as readiness requirements. Runtime
+`blocked` remains reserved for work that an executor actually attempted.
+
+Apply blocks stale running work with `stale_worker_claim`. It archives only
+`legacy_blocked` items already backed by an evaluation or terminal run. Other
+blocked work remains actionable. Reconciliation never deletes records.
 
 ## Enqueue an experiment
 
@@ -185,6 +258,19 @@ scheduled -> ready -> running -> finished
                          |-> waiting_retry -> ready
                          |-> blocked
 ```
+
+## Synthesize gated jobs
+
+Create significance-first job chains for new or changed entries:
+
+```bash
+ats-lab synthesize --file idea.json
+```
+
+Unchanged entry rules with exit/sizing/risk-only changes skip the significance
+test. Entry rules use stable fingerprints; `p_value < 0.05` unlocks baseline,
+`0.05–0.10` holds it, and `> 0.10` archives it. See
+[job synthesis](docs/synthesis.md).
 
 Examples:
 

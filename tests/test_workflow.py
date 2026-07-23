@@ -11,7 +11,8 @@ from ats_lab.database import WorkflowDatabase
 from ats_lab.legacy_import import LegacyImporter
 from ats_lab.inventory import build_inventory
 from ats_lab.contracts import evaluation_from_payload, experiment_from_payload, work_item_from_payload
-from ats_lab.models import ExperimentSpec, WorkItem, WorkState
+from ats_lab.models import Evaluation, ExperimentSpec, RunResult, RunStatus, Verdict, WorkItem, WorkState
+from ats_lab.reconcile import apply_reconciliation, build_reconciliation, normalize_unattempted_blockers
 
 
 class WorkflowDatabaseTests(unittest.TestCase):
@@ -61,6 +62,59 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(experiment.routes[0].symbol, "BTC-USDT")
         self.assertEqual(work.state, WorkState.READY)
         self.assertEqual(evaluation.verdict.value, "hpo_candidate")
+
+
+class ReconciliationTests(unittest.TestCase):
+    def test_normalizes_only_unattempted_blockers_and_preserves_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            for item_id, attempts in (("IDEA", 0), ("FAILED", 1)):
+                database.upsert_experiment(ExperimentSpec(id=item_id, strategy_name="Test"))
+                database.upsert_work_item(WorkItem(
+                    id=item_id, experiment_id=item_id, priority=1, state=WorkState.BLOCKED,
+                    attempts=attempts, blocker_code="legacy_blocked", blocker_detail="implementation required",
+                ))
+            preview = normalize_unattempted_blockers(database)
+            self.assertEqual(preview["work_item_ids"], ["IDEA"])
+            applied = normalize_unattempted_blockers(database, apply=True)
+            self.assertEqual(applied["applied"], ["IDEA"])
+            rows = {row["id"]: row for row in database.rows("SELECT * FROM work_items")}
+            self.assertEqual(rows["IDEA"]["state"], "scheduled")
+            self.assertEqual(rows["FAILED"]["state"], "blocked")
+            readiness = json.loads(rows["IDEA"]["specification_json"])["readiness"]
+            self.assertEqual(readiness["detail"], "implementation required")
+
+    def test_classifies_and_applies_conservative_legacy_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            for item_id, state, blocker in (("STALE", WorkState.RUNNING, None),
+                                             ("HISTORY", WorkState.BLOCKED, "legacy_blocked"),
+                                             ("ACTION", WorkState.BLOCKED, "missing_candles")):
+                database.upsert_experiment(ExperimentSpec(id=item_id, strategy_name="Test"))
+                database.upsert_work_item(WorkItem(id=item_id, experiment_id=item_id, priority=1,
+                                                   state=state, blocker_code=blocker))
+            database.add_evaluation(Evaluation(experiment_id="HISTORY", verdict=Verdict.REJECT))
+            result = build_reconciliation(database)
+            self.assertEqual(result["counts"], {"stale_running": 1, "actionable": 1, "historical_blockers": 1})
+            self.assertEqual(database.rows("SELECT state FROM work_items WHERE id='STALE'")[0]["state"], "running")
+            changed = apply_reconciliation(database, result)
+            self.assertEqual(changed["stale_running_blocked"], ["STALE"])
+            states = {row["id"]: row["state"] for row in database.rows("SELECT id, state FROM work_items")}
+            self.assertEqual(states, {"ACTION": "blocked", "HISTORY": "archived", "STALE": "blocked"})
+
+    def test_terminal_run_marks_legacy_blocker_as_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(id="OLD", strategy_name="Test"))
+            database.upsert_work_item(WorkItem(id="OLD", experiment_id="OLD", priority=1,
+                                               state=WorkState.BLOCKED, blocker_code="legacy_blocked"))
+            database.add_run(RunResult(id="run-1", experiment_id="OLD", work_item_id="OLD",
+                                       session_id="session-1", status=RunStatus.STOPPED))
+            result = build_reconciliation(database)
+            self.assertEqual([item["id"] for item in result["historical_blockers"]], ["OLD"])
 
 
 class LegacyImporterTests(unittest.TestCase):
