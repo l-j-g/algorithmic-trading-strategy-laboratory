@@ -93,6 +93,28 @@ CREATE TABLE IF NOT EXISTS events (
     occurred_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS synthesis_cohorts (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('planning','active','drained','failed')),
+    requested_count INTEGER NOT NULL,
+    generated_count INTEGER NOT NULL DEFAULT 0,
+    remaining_at_trigger INTEGER NOT NULL,
+    planned_by TEXT NOT NULL,
+    lease_expires_at TEXT,
+    failure_detail TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS synthesis_cohort_chains (
+    cohort_id TEXT NOT NULL REFERENCES synthesis_cohorts(id),
+    slot INTEGER NOT NULL,
+    lane TEXT NOT NULL CHECK (lane IN ('new_concept','improvement')),
+    source_experiment_id TEXT,
+    work_item_ids_json TEXT NOT NULL,
+    PRIMARY KEY (cohort_id, slot)
+);
+
 CREATE TABLE IF NOT EXISTS migration_sources (
     path TEXT PRIMARY KEY,
     content_hash TEXT NOT NULL,
@@ -103,6 +125,7 @@ CREATE TABLE IF NOT EXISTS migration_sources (
 CREATE INDEX IF NOT EXISTS idx_work_items_queue ON work_items(state, priority, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_evaluations_verdict ON evaluations(verdict, evaluated_at);
+CREATE INDEX IF NOT EXISTS idx_synthesis_cohorts_status ON synthesis_cohorts(status, created_at);
 
 CREATE VIEW IF NOT EXISTS active_queue AS
 SELECT w.id, w.experiment_id, s.name AS strategy, w.priority, w.state,

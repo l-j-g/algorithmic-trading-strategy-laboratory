@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ats-lab://synthesis-request/v1",
+  "type": "object",
+  "required": ["schema_version", "strategy_name", "hypothesis", "entry_rule", "change_scope", "routes"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "strategy_name": {"type": "string", "minLength": 1},
+    "hypothesis": {"type": "string", "minLength": 1},
+    "entry_rule": {"type": "string", "minLength": 1},
+    "change_scope": {"enum": ["new_entry", "entry_changed", "exit_only", "sizing_only", "risk_only", "refactor"]},
+    "parent_entry_fingerprint": {"type": ["string", "null"]},
+    "priority": {"type": "integer", "minimum": 0},
+    "n_simulations": {"type": "integer", "minimum": 2000},
+    "random_seed": {"type": ["integer", "null"]},
+    "action": {"enum": ["new", "revise"]},
+    "source_experiment_id": {"type": ["string", "null"]},
+    "controlled_change": {"type": "string"},
+    "lane": {"enum": ["new_concept", "improvement"]},
+    "archetype": {"type": "string", "minLength": 1},
+    "target_regime": {"type": "string", "minLength": 1},
+    "failure_regime": {"type": "string", "minLength": 1},
+    "edge_thesis": {"type": "string", "minLength": 1},
+    "cohort_id": {"type": ["string", "null"]},
+    "cohort_slot": {"type": ["integer", "null"], "minimum": 0},
+    "routes": {"type": "array", "minItems": 1, "items": {"$ref": "experiment-work-item.schema.json#/$defs/route"}}
+  },
+  "additionalProperties": false
+}
