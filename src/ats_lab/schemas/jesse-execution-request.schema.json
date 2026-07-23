@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://algorithmic-trading-strategy-laboratory/schemas/jesse-execution-request/v1",
+  "type": "object",
+  "required": ["schema_version", "transport", "request_id", "experiment_id", "work_item_id", "operation", "strategy_name", "routes", "parameters", "success_gates", "failure_gates"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "transport": {"const": "jesse_mcp"},
+    "request_id": {"type": "string", "minLength": 1},
+    "experiment_id": {"type": "string", "minLength": 1},
+    "work_item_id": {"type": "string", "minLength": 1},
+    "operation": {"enum": ["backtest", "hpo", "significance", "monte_carlo"]},
+    "strategy_name": {"type": "string", "minLength": 1},
+    "routes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/route"}},
+    "parameters": {"type": "object"},
+    "success_gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}},
+    "failure_gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}}
+  },
+  "$defs": {
+    "route": {
+      "type": "object",
+      "required": ["exchange", "symbol", "timeframe", "start_date", "finish_date"],
+      "properties": {
+        "exchange": {"type": "string", "minLength": 1},
+        "symbol": {"type": "string", "minLength": 1},
+        "timeframe": {"type": "string", "minLength": 1},
+        "start_date": {"type": "string", "minLength": 1},
+        "finish_date": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "gate": {
+      "type": "object",
+      "required": ["name", "operator"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "operator": {"type": "string", "minLength": 1},
+        "threshold": {},
+        "required": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
