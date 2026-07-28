@@ -181,6 +181,10 @@ class WorkflowDatabase:
             rows = connection.execute(
                 """SELECT id FROM work_items
                    WHERE state='scheduled'
+                     AND COALESCE(
+                         json_extract(specification_json, '$.readiness.status'),
+                         'ready'
+                     ) != 'requirements_pending'
                      AND NOT EXISTS (
                          SELECT 1 FROM json_each(work_items.dependencies_json) dependency
                          LEFT JOIN work_items parent ON parent.id=dependency.value

@@ -85,6 +85,30 @@ class ReconciliationTests(unittest.TestCase):
             readiness = json.loads(rows["IDEA"]["specification_json"])["readiness"]
             self.assertEqual(readiness["detail"], "implementation required")
 
+    def test_requirements_pending_items_are_not_promoted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            for item_id, specification in (
+                ("PENDING", {"readiness": {"status": "requirements_pending"}}),
+                ("RUNNABLE", {}),
+            ):
+                database.upsert_experiment(ExperimentSpec(id=item_id, strategy_name="Test"))
+                database.upsert_work_item(WorkItem(
+                    id=item_id,
+                    experiment_id=item_id,
+                    priority=1,
+                    state=WorkState.SCHEDULED,
+                    specification=specification,
+                ))
+            self.assertEqual(database.promote_scheduled_runnable(3), 1)
+            states = {
+                row["id"]: row["state"]
+                for row in database.rows("SELECT id, state FROM work_items")
+            }
+            self.assertEqual(states["PENDING"], "scheduled")
+            self.assertEqual(states["RUNNABLE"], "ready")
+
     def test_classifies_and_applies_conservative_legacy_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
