@@ -60,6 +60,11 @@ SQLite supplies transactions, foreign keys, idempotent imports and queryable
 history without requiring a database service. Versioned JSON Schemas define
 agent and adapter boundaries. Python dataclasses provide in-process types.
 
+The canonical local database is `.ats-lab/laboratory.sqlite3` in this
+repository. It stores experiment specifications, work items, runs, evaluations,
+artifacts, events, and synthesis cohorts. It does not store Jesse candle data or
+strategy source. See [Jesse workspace integration](workspace-integration.md).
+
 ## Agent integration
 
 The CLI emits JSON and performs one bounded operation per invocation. It can be

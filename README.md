@@ -59,6 +59,8 @@ idempotent commands. Memory may supply cross-session memory, but SQLite remains
 the authoritative source for queue and evidence state.
 
 See [architecture](docs/architecture.md) for boundaries and state machines.
+See [Jesse workspace integration](docs/workspace-integration.md) for the exact
+harness, database, repository, and market-data ownership boundary.
 
 ## Requirements
 
