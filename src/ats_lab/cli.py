@@ -17,6 +17,7 @@ from .contracts import evaluation_from_payload, experiment_from_payload, load_js
 from .models import WorkState
 from .reconcile import apply_reconciliation, build_reconciliation, normalize_unattempted_blockers
 from .resources import load_resource_policy
+from .sanitize import apply_sanitize_plan, build_sanitize_plan
 from .synthesis import synthesis_request_from_file, synthesize
 from .worker import CommandDispatcher, Worker
 
@@ -74,6 +75,8 @@ def main() -> int:
     reconcile.add_argument("--apply", action="store_true")
     normalize = sub.add_parser("normalize-blockers", help="Return never-attempted legacy blockers to scheduled backlog.")
     normalize.add_argument("--apply", action="store_true")
+    sanitize = sub.add_parser("sanitize", help="Evaluate terminal evidence and delete dead active queue items.")
+    sanitize.add_argument("--apply", action="store_true")
     synthesis = sub.add_parser("synthesize", help="Create gated jobs from a typed research idea.")
     synthesis.add_argument("--file", type=Path, required=True)
     worker = sub.add_parser("worker", help="Claim and dispatch ready work.")
@@ -180,6 +183,13 @@ def main() -> int:
     elif args.command == "normalize-blockers":
         database.initialize()
         emit(normalize_unattempted_blockers(database, apply=args.apply))
+    elif args.command == "sanitize":
+        database.initialize()
+        plan = build_sanitize_plan(database)
+        plan["applied"] = apply_sanitize_plan(database, plan) if args.apply else False
+        for item in plan["evaluate_finished"]:
+            item.pop("metrics", None)
+        emit(plan)
     elif args.command == "synthesize":
         contract_path = args.file if args.file.is_absolute() else repo / args.file
         request = synthesis_request_from_file(contract_path)

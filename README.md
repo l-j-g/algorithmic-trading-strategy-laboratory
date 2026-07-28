@@ -174,6 +174,25 @@ Apply blocks stale running work with `stale_worker_claim`. It archives only
 `legacy_blocked` items already backed by an evaluation or terminal run. Other
 blocked work remains actionable. Reconciliation never deletes records.
 
+### Sanitize imported queue and history
+
+Preview terminal evidence evaluation and dead-item deletion:
+
+```bash
+ats-lab sanitize
+```
+
+Apply only after taking a SQLite backup:
+
+```bash
+ats-lab sanitize --apply
+```
+
+Sanitation adds deterministic evaluations to finished work with persisted run
+metrics. It deletes blocked, never-attempted work with no run/evaluation
+evidence and empty archived placeholders. Runnable work and all recorded run
+evidence remain intact.
+
 ## Enqueue an experiment
 
 Create `experiment.json`:
