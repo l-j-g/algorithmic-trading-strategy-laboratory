@@ -109,6 +109,20 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(states["PENDING"], "scheduled")
             self.assertEqual(states["RUNNABLE"], "ready")
 
+    def test_requirements_pending_ready_item_cannot_be_claimed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(id="PENDING", strategy_name="Test"))
+            database.upsert_work_item(WorkItem(
+                id="PENDING",
+                experiment_id="PENDING",
+                priority=1,
+                state=WorkState.READY,
+                specification={"readiness": {"status": "requirements_pending"}},
+            ))
+            self.assertIsNone(database.claim_next("worker"))
+
     def test_classifies_and_applies_conservative_legacy_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")

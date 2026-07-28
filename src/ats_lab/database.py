@@ -143,7 +143,13 @@ class WorkflowDatabase:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT * FROM work_items WHERE state = 'ready' ORDER BY priority, created_at, id LIMIT 1"
+                """SELECT * FROM work_items
+                   WHERE state = 'ready'
+                     AND COALESCE(
+                         json_extract(specification_json, '$.readiness.status'),
+                         'ready'
+                     ) != 'requirements_pending'
+                   ORDER BY priority, created_at, id LIMIT 1"""
             ).fetchone()
             if row is None:
                 return None
