@@ -121,7 +121,19 @@ class Worker:
         except Exception as error:  # keep queue recoverable across adapter failures
             result = DispatchResult(outcome="retry", blocker_code="dispatcher_exception", detail=str(error))
 
-        operation = request.get("work_item", {}).get("operation") or request.get("experiment", {}).get("operation")
+        experiment = request.get("experiment", {})
+        operation = request.get("work_item", {}).get("operation") or experiment.get("operation")
+        if not operation:
+            operation = {
+                "baseline": "backtest",
+                "multi_window": "backtest",
+                "cost_sensitivity": "backtest",
+                "out_of_sample": "backtest",
+                "harness_check": "backtest",
+                "significance": "significance",
+                "monte_carlo": "monte_carlo",
+                "hpo": "hpo",
+            }.get(experiment.get("experiment_type"))
         research_evidence: dict[str, Any] | None = None
         if result.outcome == "finished" and operation in {"significance", "backtest", "hpo", "monte_carlo"}:
             try:

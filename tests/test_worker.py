@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
-from ats_lab.models import ExperimentSpec, WorkItem, WorkState
+from ats_lab.models import ExperimentSpec, ExperimentType, WorkItem, WorkState
 from ats_lab.worker import DispatchResult, Worker
 
 
@@ -72,6 +72,28 @@ class WorkerTests(unittest.TestCase):
             run = database.rows("SELECT * FROM runs")[0]
             self.assertEqual(run["session_id"], "session-1")
             self.assertEqual(database.rows("SELECT verdict FROM evaluations")[0]["verdict"], "revise")
+
+    def test_experiment_type_requires_evidence_when_operation_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1", strategy_name="TestStrategy",
+                experiment_type=ExperimentType.BASELINE,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="JOB-1", experiment_id="EXP-1", priority=1,
+                state=WorkState.READY,
+            ))
+            result = Worker(
+                database, FakeDispatcher(DispatchResult(outcome="finished", payload={"outcome": "finished"})),
+                "worker-1", retry_delay_seconds=1,
+            ).run_once()
+            self.assertEqual(result["status"], "waiting_retry")
+            self.assertEqual(
+                database.rows("SELECT blocker_code FROM work_items")[0]["blocker_code"],
+                "invalid_run_evidence",
+            )
 
     def test_dispatch_failure_schedules_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
