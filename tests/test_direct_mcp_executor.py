@@ -539,6 +539,51 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 "WHERE work_item_id='JOB-1'"
             )[0]["replacement_created"], 1)
 
+    def test_existing_replacement_checkpoint_is_adopted_without_new_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["finished"]) as server:
+            dispatcher, database = self.make_dispatcher(tmp, server)
+            fingerprint = dispatcher._fingerprint(batch_request()["requests"][0])
+            with database.connect() as connection:
+                connection.execute(
+                    """INSERT INTO direct_execution_recoveries(
+                           work_item_id,old_session_id,old_state,reason,
+                           replacement_allowed,created_at,updated_at
+                       ) VALUES (?,?,?,?,1,?,?)""",
+                    (
+                        "JOB-1", "old-zombie", "zombie_nonexecuting",
+                        "no execution evidence", "now", "now",
+                    ),
+                )
+                connection.execute(
+                    """INSERT INTO direct_execution_sessions(
+                           work_item_id,experiment_id,session_id,request_fingerprint,
+                           state,created_at,updated_at
+                       ) VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        "JOB-1", "EXP-1", "jesse-session-1", fingerprint,
+                        "start_recovery_failed", "now", "now",
+                    ),
+                )
+
+            result = dispatcher.dispatch(batch_request()).payload["results"][0]
+
+            self.assertEqual(result["outcome"], "finished")
+            self.assertEqual(
+                len([name for name, _ in server.http.tool_calls
+                     if name == "create_backtest_draft"]),
+                0,
+            )
+            recovery = database.rows(
+                "SELECT replacement_reserved,replacement_session_id "
+                "FROM direct_execution_recoveries WHERE work_item_id='JOB-1'"
+            )[0]
+            self.assertEqual(recovery["replacement_reserved"], 1)
+            self.assertEqual(recovery["replacement_session_id"], "jesse-session-1")
+            self.assertEqual(database.rows(
+                "SELECT replacement_created FROM direct_execution_sessions "
+                "WHERE work_item_id='JOB-1'"
+            )[0]["replacement_created"], 1)
+
     def test_source_change_gets_one_bounded_preparation_turn(self) -> None:
         fallback = RecordingFallback()
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["finished"]) as server:

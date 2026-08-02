@@ -511,6 +511,10 @@ class DirectMcpDispatcher:
                     blocker_code="direct_request_changed",
                     detail="persisted Jesse session request fingerprint changed",
                 )
+            if checkpoint is not None:
+                self._adopt_replacement_checkpoint(
+                    work_item_id, str(checkpoint["session_id"]),
+                )
             if checkpoint is None:
                 session_id, replacement, created_now = self._create_or_resume_session(
                     client, request,
@@ -795,6 +799,58 @@ class DirectMcpDispatcher:
             if saved.rowcount != 1:
                 raise McpError("replacement session id persistence failed")
         return session_id, True, True
+
+    def _adopt_replacement_checkpoint(
+        self, work_item_id: str, session_id: str,
+    ) -> bool:
+        """Link a pre-existing replacement checkpoint to its one-shot allowance."""
+        now = utc_now()
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            recovery = connection.execute(
+                """SELECT old_session_id,replacement_allowed,replacement_reserved,
+                          replacement_session_id
+                   FROM direct_execution_recoveries WHERE work_item_id=?""",
+                (work_item_id,),
+            ).fetchone()
+            if recovery is None or recovery["old_session_id"] == session_id:
+                return False
+            if recovery["replacement_session_id"] == session_id:
+                return False
+            if recovery["replacement_reserved"] or recovery["replacement_session_id"]:
+                raise McpError(
+                    "replacement checkpoint conflicts with persisted replacement session"
+                )
+            if not recovery["replacement_allowed"]:
+                raise McpError("replacement session is not allowed")
+            changed = connection.execute(
+                """UPDATE direct_execution_recoveries
+                   SET replacement_reserved=1,replacement_session_id=?,updated_at=?
+                   WHERE work_item_id=? AND replacement_allowed=1
+                     AND replacement_reserved=0 AND replacement_session_id IS NULL""",
+                (session_id, now, work_item_id),
+            )
+            if changed.rowcount != 1:
+                raise McpError("replacement checkpoint adoption changed")
+            checkpoint = connection.execute(
+                """UPDATE direct_execution_sessions SET replacement_created=1,
+                          updated_at=?
+                   WHERE work_item_id=? AND session_id=?""",
+                (now, work_item_id, session_id),
+            )
+            if checkpoint.rowcount != 1:
+                raise McpError("replacement checkpoint disappeared during adoption")
+            connection.execute(
+                """INSERT INTO events(aggregate_type,aggregate_id,event_type,
+                       payload_json,occurred_at) VALUES(
+                       'work_item',?,'replacement_checkpoint_adopted',?,?)""",
+                (work_item_id, json.dumps({
+                    "old_session_id": recovery["old_session_id"],
+                    "replacement_session_id": session_id,
+                    "replacement_sessions_allowed": 1,
+                }, sort_keys=True), now),
+            )
+        return True
 
     def _finished(
         self,
