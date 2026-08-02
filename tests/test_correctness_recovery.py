@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ats_lab.correctness_recovery import (
     backfill_aggregate_route_coverage,
+    classify_recovery_candidates,
     recover_executor_infrastructure_failures,
     recover_partial_batch_retries,
     recover_zombie_execution_sessions,
@@ -353,6 +354,52 @@ class CorrectnessRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(result["changed"], [])
         self.assertEqual(result["rejected"][item_id], "durable_run_exists")
+
+    def test_recovery_audit_classifies_dependencies_infrastructure_and_zombie(self) -> None:
+        for item_id, code, dependencies in (
+            ("DEP", "dependency_blocked", ("MISSING",)),
+            ("INFRA", "direct_mcp_error", ()),
+            ("ZOMBIE", "retry_limit_reached", ()),
+        ):
+            self.database.upsert_experiment(ExperimentSpec(
+                id=item_id, strategy_name=item_id,
+            ))
+            self.database.upsert_work_item(WorkItem(
+                id=item_id, experiment_id=item_id, priority=1,
+                state=WorkState.BLOCKED, blocker_code=code,
+                dependencies=dependencies,
+            ))
+        with self.database.connect() as connection:
+            connection.execute(
+                """INSERT INTO direct_execution_sessions(
+                       work_item_id,experiment_id,session_id,request_fingerprint,
+                       state,created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?)""",
+                ("ZOMBIE", "ZOMBIE", "zombie-session", "fp", "running", "now", "now"),
+            )
+        session = {
+            "status": "running", "updated_at": 1_000,
+            "state": {"results": {
+                "executing": False, "progressbar": {"current": 0},
+                "metrics": {}, "trades": [], "charts": {"equity_curve": []},
+                "exception": {"error": None, "traceback": None},
+            }},
+        }
+        result = classify_recovery_candidates(
+            self.database, {"zombie-session": [session, session]},
+        )
+        self.assertEqual(
+            [row["work_item_id"] for row in result["dependency_only_blockers"]],
+            ["DEP"],
+        )
+        self.assertEqual(
+            [row["work_item_id"] for row in result["infrastructure_transport_failures"]],
+            ["INFRA"],
+        )
+        self.assertEqual(
+            [row["work_item_id"] for row in result["stopped_or_nonstarted_without_evidence"]],
+            ["ZOMBIE"],
+        )
 
     def test_draft_recovery_rejects_any_execution_evidence(self) -> None:
         result = recover_unexecuted_draft_checkpoint(

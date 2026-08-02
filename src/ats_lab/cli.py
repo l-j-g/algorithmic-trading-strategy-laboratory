@@ -36,6 +36,7 @@ from .console import (
 )
 from .correctness_recovery import (
     backfill_aggregate_route_coverage,
+    classify_recovery_candidates,
     recover_executor_infrastructure_failures,
     recover_partial_batch_retries,
     recover_zombie_execution_sessions,
@@ -313,6 +314,10 @@ def main() -> int:
         "--session-id", action="append", required=True, dest="session_ids",
     )
     zombie_recovery.add_argument("--apply", action="store_true")
+    sub.add_parser(
+        "recovery-audit",
+        help="Classify all retry/blocker candidates using persisted and live session evidence.",
+    )
     sanitize = sub.add_parser("sanitize", help="Evaluate terminal evidence and delete dead active queue items.")
     sanitize.add_argument("--apply", action="store_true")
     synthesis = sub.add_parser("synthesize", help="Create gated jobs from a typed research idea.")
@@ -726,6 +731,38 @@ def main() -> int:
             grace_seconds=config.zombie_grace_seconds,
             active_limit=policy.active_ready_limit,
         ))
+    elif args.command == "recovery-audit":
+        database.initialize()
+        config = load_direct_execution_config(repo / ".ats-lab" / "config.toml")
+        session_ids = [
+            row["session_id"] for row in database.rows(
+                """SELECT DISTINCT d.session_id FROM direct_execution_sessions d
+                   JOIN work_items w ON w.id=d.work_item_id
+                   WHERE w.state IN ('waiting_retry','blocked')"""
+            )
+        ]
+        observations = {}
+        observation_degraded = False
+        try:
+            client = McpClient(config.mcp_url, config.timeout_seconds)
+            client.initialize()
+            for session_id in session_ids:
+                observations[session_id] = [
+                    DirectMcpDispatcher._session(client.call_tool(
+                        "get_backtest_session", {"session_id": session_id},
+                    )),
+                    DirectMcpDispatcher._session(client.call_tool(
+                        "get_backtest_session", {"session_id": session_id},
+                    )),
+                ]
+        except Exception:
+            observation_degraded = True
+        result = classify_recovery_candidates(database, observations)
+        emit({
+            "session_observation_degraded": observation_degraded,
+            "counts": {key: len(value) for key, value in result.items()},
+            "categories": result,
+        })
     elif args.command == "sanitize":
         database.initialize()
         plan = build_sanitize_plan(database)

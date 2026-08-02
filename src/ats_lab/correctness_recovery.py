@@ -19,6 +19,99 @@ _PARTIAL_BATCH_MARKERS = (
     "seven work items finished",
 )
 
+_INFRASTRUCTURE_MARKERS = (
+    "transport", "provider", "timeout", "mcp_error", "preflight",
+    "execution_deferred", "zombie", "memory", "executor_failed",
+)
+
+
+def classify_recovery_candidates(
+    database: WorkflowDatabase,
+    observations: Mapping[str, list[dict]] | None = None,
+) -> dict[str, list[dict]]:
+    """Evidence-audit retry/blocker populations without changing workflow state."""
+    observations = observations or {}
+    categories: dict[str, list[dict]] = {
+        "valid_strategy_or_harness_failures": [],
+        "infrastructure_transport_failures": [],
+        "stopped_sessions_that_executed": [],
+        "stopped_or_nonstarted_without_evidence": [],
+        "dependency_only_blockers": [],
+        "irreducible_blockers": [],
+    }
+    rows = database.rows(
+        """SELECT w.id,w.state,w.attempts,w.blocker_code,w.blocker_detail,
+                  w.dependencies_json,d.session_id,d.state AS checkpoint_state,
+                  d.error_text
+           FROM work_items w
+           LEFT JOIN direct_execution_sessions d ON d.work_item_id=w.id
+           WHERE w.state IN ('waiting_retry','blocked') ORDER BY w.state,w.id"""
+    )
+    for row in rows:
+        item = {
+            "work_item_id": row["id"], "state": row["state"],
+            "attempts": row["attempts"], "blocker_code": row["blocker_code"],
+        }
+        dependencies = json.loads(row["dependencies_json"] or "[]")
+        unresolved = []
+        if dependencies:
+            placeholders = ",".join("?" for _ in dependencies)
+            states = {
+                dependency["id"]: dependency["state"]
+                for dependency in database.rows(
+                    f"SELECT id,state FROM work_items WHERE id IN ({placeholders})",
+                    tuple(dependencies),
+                )
+            }
+            unresolved = [
+                dependency for dependency in dependencies
+                if states.get(dependency) not in {"finished", "archived"}
+            ]
+        if unresolved:
+            item["reason"] = "unresolved_dependencies"
+            categories["dependency_only_blockers"].append(item)
+            continue
+        session_id = row["session_id"]
+        samples = observations.get(session_id, []) if session_id else []
+        classification = None
+        if samples:
+            classification = classify_jesse_session(
+                samples[-1], unchanged_observations=len(samples),
+                stale_for_seconds=10**9, grace_seconds=60,
+            )
+        if classification and classification.state == "terminal_failure":
+            item["reason"] = "terminal_failure_with_execution_evidence" if (
+                classification.has_execution_evidence
+            ) else "explicit_terminal_exception"
+            category = (
+                "stopped_sessions_that_executed"
+                if classification.has_execution_evidence
+                else "valid_strategy_or_harness_failures"
+            )
+            categories[category].append(item)
+            continue
+        if classification and classification.state in {
+            "draft_not_started", "zombie_nonexecuting",
+        } and not classification.has_execution_evidence:
+            item["reason"] = classification.state
+            categories["stopped_or_nonstarted_without_evidence"].append(item)
+            continue
+        blocker = " ".join((
+            str(row["blocker_code"] or ""), str(row["blocker_detail"] or ""),
+        )).lower()
+        if any(marker in blocker for marker in _INFRASTRUCTURE_MARKERS):
+            item["reason"] = "infrastructure_marker"
+            categories["infrastructure_transport_failures"].append(item)
+        elif any(marker in blocker for marker in (
+            "jesse_execution_stopped", "harness", "order", "margin", "strategy",
+        )) or row["error_text"]:
+            item["reason"] = "strategy_or_harness_evidence"
+            categories["valid_strategy_or_harness_failures"].append(item)
+        else:
+            item["reason"] = "insufficient_evidence_for_recovery"
+            categories["irreducible_blockers"].append(item)
+    return categories
+
 
 def recover_zombie_execution_sessions(
     database: WorkflowDatabase,
