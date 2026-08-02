@@ -179,6 +179,21 @@ CREATE TABLE IF NOT EXISTS events (
     occurred_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS research_memory_outbox (
+    id INTEGER PRIMARY KEY,
+    learning_fingerprint TEXT NOT NULL UNIQUE,
+    payload_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending','delivered','retry')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    retry_after TEXT,
+    last_error_code TEXT,
+    created_at TEXT NOT NULL,
+    delivered_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_research_memory_outbox_state
+ON research_memory_outbox(state, retry_after, id);
+
 CREATE TABLE IF NOT EXISTS synthesis_cohorts (
     id TEXT PRIMARY KEY,
     status TEXT NOT NULL CHECK (status IN ('planning','active','drained','failed')),

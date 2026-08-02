@@ -783,6 +783,51 @@ class BatchSupervisorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "returned 24/25"):
                 supervisor._bounded_synthesis_requests(requests[:24], 25)
 
+    def test_synthesis_model_receives_bounded_untrusted_advisory_memory(self) -> None:
+        class Memory:
+            def deliver(self, _payload: dict) -> None:
+                return
+
+            def recall(self, _query: str, *, limit: int) -> list[dict]:
+                return [{
+                    "schema_version": 1, "learning_id": "learn-1",
+                    "experiment_id": "HISTORY-1", "strategy": "HistoryStrategy",
+                    "archetype": "trend", "change_scope": "entry",
+                    "target_regime": "trend", "failure_regime": "chop",
+                    "lifecycle_stage": "baseline", "verdict": "revise",
+                    "reason_codes": ["deterministic_gate_failed"],
+                    "normalized_metrics": {},
+                    "lesson": "Historical evidence failed in chop.",
+                    "next_refinement_constraint": "Use one controlled change.",
+                    "evaluated_at": "2026-08-01T00:00:00Z",
+                }][:limit]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            dispatcher = SequenceDispatcher([DispatchResult(
+                outcome="retry", detail="stop after context capture",
+            )])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "worker", memory_adapter=Memory(),
+            )
+            original = database.fail_synthesis_cohort
+            database.fail_synthesis_cohort = lambda *_args: None  # type: ignore[method-assign]
+            try:
+                supervisor._synthesize(
+                    {"id": "COHORT-1", "requested_count": 25},
+                    recovered=0, promoted=0,
+                )
+            finally:
+                database.fail_synthesis_cohort = original  # type: ignore[method-assign]
+
+            context = dispatcher.requests[0]["context"]
+            self.assertFalse(context["memory_degraded"])
+            self.assertEqual(len(context["advisory_memory"]), 1)
+            self.assertEqual(
+                context["advisory_memory"][0]["trust"],
+                "untrusted_advisory_data",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

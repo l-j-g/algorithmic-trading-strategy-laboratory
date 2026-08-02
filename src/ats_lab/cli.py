@@ -43,6 +43,12 @@ from .correctness_recovery import (
 from .models import WorkState
 from .reconcile import apply_reconciliation, build_reconciliation, normalize_unattempted_blockers
 from .resources import load_resource_policy
+from .research_memory import (
+    MemoryProviderConfig,
+    MemoryResearchAdapter,
+    memory_status,
+    sync_memory_outbox,
+)
 from .sanitize import apply_sanitize_plan, build_sanitize_plan
 from .synthesis import synthesis_request_from_file, synthesize
 from .status import hpo_detail_snapshot, operator_status
@@ -127,6 +133,14 @@ def main() -> int:
     queue_parser.add_argument("--state")
     queue_parser.add_argument("--format", choices=("table", "json"), default="table")
     sub.add_parser("synthesis-status")
+    sub.add_parser("memory-status", help="Show ATS research-memory outbox state.")
+    memory_sync = sub.add_parser(
+        "memory-sync", help="Preview or dispatch bounded research-memory outbox records."
+    )
+    memory_mode = memory_sync.add_mutually_exclusive_group(required=True)
+    memory_mode.add_argument("--dry-run", action="store_true")
+    memory_mode.add_argument("--apply", action="store_true")
+    memory_sync.add_argument("--limit", type=int, default=25)
     sub.add_parser(
         "preflight",
         help="Check Docker, Jesse dashboard/MCP, and Memory before execution.",
@@ -339,6 +353,7 @@ def main() -> int:
         "diagnostic-hpo-trial",
         "hpo", "hpo-detail", "timings", "analyzer",
         "requeue-hpo-analysis", "configure-hpo-validation-routes",
+        "memory-status", "memory-sync",
     } and repo == Path.cwd().resolve():
         repo = discover_lab_repo(repo)
     database_path = args.database if args.database.is_absolute() else repo / args.database
@@ -367,6 +382,21 @@ def main() -> int:
         ).check()
         emit(result)
         return 0 if result["healthy"] else 2
+    elif args.command == "memory-status":
+        database.initialize()
+        emit(memory_status(database))
+    elif args.command == "memory-sync":
+        if args.limit < 1 or args.limit > 100:
+            parser.error("memory-sync --limit must be between 1 and 100")
+        database.initialize()
+        adapter = MemoryResearchAdapter(MemoryProviderConfig(
+            base_url=os.environ.get(
+                "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
+            )
+        ))
+        emit(sync_memory_outbox(
+            database, adapter, apply=args.apply, limit=args.limit,
+        ))
     elif args.command == "migrate-legacy":
         emit(LegacyImporter(repo, database).import_all())
     elif args.command == "audit":
@@ -801,6 +831,11 @@ def main() -> int:
                 resource_policy=policy, retry_delay_seconds=args.retry_delay,
                 max_attempts=args.max_attempts,
                 preflight=stack_preflight.check,
+                memory_adapter=MemoryResearchAdapter(MemoryProviderConfig(
+                    base_url=os.environ.get(
+                        "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
+                    )
+                )),
             ).run(
                 continuous=args.continuous, idle_sleep=args.idle_sleep,
                 max_rounds=args.max_rounds,

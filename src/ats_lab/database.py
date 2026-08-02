@@ -1576,6 +1576,8 @@ class WorkflowDatabase:
             self._refresh_run_evidence(connection, run.id)
 
     def add_evaluation(self, evaluation: Evaluation) -> None:
+        from .research_memory import enqueue_learning
+
         with self.connect() as connection:
             connection.execute("DELETE FROM evaluations WHERE experiment_id = ? AND evaluator = ?", (evaluation.experiment_id, evaluation.evaluator))
             connection.execute(
@@ -1588,9 +1590,16 @@ class WorkflowDatabase:
             self._refresh_experiment_evidence(
                 connection, evaluation.experiment_id,
             )
+            if connection.execute(
+                "SELECT 1 FROM normalized_evidence WHERE experiment_id=? LIMIT 1",
+                (evaluation.experiment_id,),
+            ).fetchone():
+                enqueue_learning(connection, evaluation)
 
     def add_run_and_evaluation(self, run: RunResult, evaluation: Evaluation, source_path: str = "") -> None:
         """Persist evidence and its research verdict in one transaction."""
+        from .research_memory import enqueue_learning
+
         if run.experiment_id != evaluation.experiment_id:
             raise ValueError("run and evaluation experiment_id must match")
         with self.connect() as connection:
@@ -1624,6 +1633,7 @@ class WorkflowDatabase:
                  evaluation.evaluated_at),
             )
             self._refresh_run_evidence(connection, run.id)
+            enqueue_learning(connection, evaluation)
 
     def claim_next(self, worker_id: str) -> dict | None:
         with self.connect() as connection:
@@ -1776,6 +1786,8 @@ class WorkflowDatabase:
 
     def finalize_batch_evaluation(self, evaluation: Evaluation) -> dict:
         """Persist one evaluation and finish its awaiting work item atomically."""
+        from .research_memory import enqueue_learning
+
         now = utc_now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1800,6 +1812,7 @@ class WorkflowDatabase:
             self._refresh_experiment_evidence(
                 connection, evaluation.experiment_id,
             )
+            enqueue_learning(connection, evaluation)
             connection.execute(
                 """UPDATE work_items SET state='finished',blocker_code=NULL,blocker_detail=NULL,
                    claimed_by=NULL,claimed_at=NULL,updated_at=? WHERE id=?""",

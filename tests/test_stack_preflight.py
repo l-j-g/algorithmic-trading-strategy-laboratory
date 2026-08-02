@@ -118,3 +118,28 @@ class StackPreflightTests(unittest.TestCase):
         self.assertIn("ats_reader", flattened)
         self.assertIn("jesse_readonly", flattened)
         self.assertFalse(any("shell" in key for key in flattened))
+
+    def test_memory_outage_is_reported_but_does_not_block_canonical_work(self) -> None:
+        def run(command, **_kwargs):
+            stdout = "ok"
+            if "inspect" in command:
+                stdout = "true"
+            elif "pg_isready" in command:
+                stdout = "accepting connections"
+            elif "SELECT 1" in command[-1]:
+                stdout = "1"
+            elif "pg_catalog.pg_tables" in command[-1]:
+                stdout = "backtestsession\ncandle\nsignificancetestsession\n"
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        def probe(name, url, _kind):
+            return {
+                "name": name,
+                "status": "failed" if name == "memory_api" else "healthy",
+                "url": url,
+            }
+
+        result = StackPreflight(command_runner=run, endpoint_probe=probe).check()
+        self.assertTrue(result["healthy"])
+        self.assertTrue(result["memory_degraded"])
+        self.assertEqual(result["degraded_checks"], ["memory_api"])

@@ -136,6 +136,13 @@ class CliEvidenceTests(unittest.TestCase):
         self.assertEqual(payload[0]["sharpe_ratio"], 1.5)
         self.assertNotIn("raw_secret", payload[0])
 
+    def test_memory_status_and_dry_run_are_local_and_bounded(self) -> None:
+        status = json.loads(self.invoke("memory-status"))
+        preview = json.loads(self.invoke("memory-sync", "--dry-run", "--limit", "3"))
+        self.assertEqual(status, {"delivered": 0, "pending": 1, "retry": 0})
+        self.assertFalse(preview["apply"])
+        self.assertEqual(preview["eligible"], 1)
+
     def test_raw_evidence_requires_diagnostic_export(self) -> None:
         payload = json.loads(self.invoke("diagnostic-export", "RUN-1"))
 

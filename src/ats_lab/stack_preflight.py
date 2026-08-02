@@ -108,10 +108,19 @@ class StackPreflight:
                          "detail": type(error).__name__}
             checks.append(check)
             if check.get("status") != "healthy":
+                if name == "memory_api":
+                    check["status"] = "degraded"
+                    check["detail"] = "advisory memory unavailable; SQLite-only mode"
+                    return {
+                        "healthy": True,
+                        "memory_degraded": True,
+                        "degraded_checks": ["memory_api"],
+                        "checks": checks,
+                    }
                 return self._failure(
                     checks, name, f"{name} unavailable at {url}",
                 )
-        return {"healthy": True, "checks": checks}
+        return {"healthy": True, "memory_degraded": False, "checks": checks}
 
     def _postgres_exec(self, *command: str) -> list[str]:
         return ["docker", "exec", self.postgres_container, *command]

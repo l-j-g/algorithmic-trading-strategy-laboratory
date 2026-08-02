@@ -24,6 +24,11 @@ from .models import (
     WorkState,
 )
 from .resources import ResourcePolicy
+from .research_memory import (
+    ResearchMemoryAdapter,
+    compact_advisory_memory,
+    sync_memory_outbox,
+)
 from .status import operator_status
 from .worker import DispatchResult, Dispatcher
 
@@ -52,6 +57,7 @@ class BatchSupervisor:
         max_attempts: int = 5,
         sleep: Callable[[float], None] = time.sleep,
         preflight: Callable[[], dict[str, Any]] | None = None,
+        memory_adapter: ResearchMemoryAdapter | None = None,
     ):
         self.database = database
         self.dispatcher = dispatcher
@@ -61,6 +67,7 @@ class BatchSupervisor:
         self.max_attempts = max_attempts
         self.sleep = sleep
         self.preflight = preflight
+        self.memory_adapter = memory_adapter
         self.started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self._recovered = False
 
@@ -860,6 +867,11 @@ class BatchSupervisor:
                         item["id"], float(max(p_values)),
                         self.resource_policy.active_ready_limit,
                     )
+        if self.memory_adapter is not None:
+            sync_memory_outbox(
+                self.database, self.memory_adapter, apply=True,
+                limit=max(1, len(finalized)),
+            )
         return finalized
 
     def _analysis_failure(
@@ -909,13 +921,20 @@ class BatchSupervisor:
             "synthesizing",
             detail={"cohort_id": cohort["id"], "requested": cohort["requested_count"]},
         )
+        context = build_batch_context(
+            self.database, policy=self.resource_policy,
+        )
+        if self.memory_adapter is None:
+            context.update({"advisory_memory": [], "memory_degraded": True})
+        else:
+            context.update(compact_advisory_memory(
+                self.memory_adapter, context,
+            ))
         dispatch = self._dispatch({
             "schema_version": 1,
             "task_type": "synthesize_batch",
             "cohort": cohort,
-            "context": build_batch_context(
-                self.database, policy=self.resource_policy,
-            ),
+            "context": context,
         })
         payload = dispatch.payload or {}
         evidence = payload.get("evidence")
