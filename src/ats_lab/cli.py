@@ -11,7 +11,11 @@ from pathlib import Path
 
 from .audit import build_audit, render_markdown
 from .database import WorkflowDatabase
-from .direct_mcp_executor import DirectMcpDispatcher, load_direct_execution_config
+from .direct_mcp_executor import (
+    DirectMcpDispatcher,
+    McpClient,
+    load_direct_execution_config,
+)
 from .dashboard import serve as serve_dashboard
 from .inventory import build_inventory, render_markdown as render_inventory
 from .legacy_import import LegacyImporter
@@ -34,6 +38,7 @@ from .correctness_recovery import (
     backfill_aggregate_route_coverage,
     recover_executor_infrastructure_failures,
     recover_partial_batch_retries,
+    recover_zombie_execution_sessions,
 )
 from .models import WorkState
 from .reconcile import apply_reconciliation, build_reconciliation, normalize_unattempted_blockers
@@ -286,6 +291,14 @@ def main() -> int:
     )
     executor_recovery.add_argument("--apply", action="store_true")
     executor_recovery.add_argument("--worker", default="ats-lab-supervisor")
+    zombie_recovery = sub.add_parser(
+        "recover-zombie-sessions",
+        help="Inspect and recover explicit evidence-free Jesse session checkpoints.",
+    )
+    zombie_recovery.add_argument(
+        "--session-id", action="append", required=True, dest="session_ids",
+    )
+    zombie_recovery.add_argument("--apply", action="store_true")
     sanitize = sub.add_parser("sanitize", help="Evaluate terminal evidence and delete dead active queue items.")
     sanitize.add_argument("--apply", action="store_true")
     synthesis = sub.add_parser("synthesize", help="Create gated jobs from a typed research idea.")
@@ -660,6 +673,27 @@ def main() -> int:
         policy = load_resource_policy(repo / ".ats-lab" / "config.toml")
         emit(recover_executor_infrastructure_failures(
             database, apply=args.apply, worker_id=args.worker,
+            active_limit=policy.active_ready_limit,
+        ))
+    elif args.command == "recover-zombie-sessions":
+        database.initialize()
+        config = load_direct_execution_config(repo / ".ats-lab" / "config.toml")
+        client = McpClient(config.mcp_url, config.timeout_seconds)
+        client.initialize()
+        observations = {}
+        for session_id in sorted(set(args.session_ids)):
+            observations[session_id] = [
+                DirectMcpDispatcher._session(client.call_tool(
+                    "get_backtest_session", {"session_id": session_id},
+                )),
+                DirectMcpDispatcher._session(client.call_tool(
+                    "get_backtest_session", {"session_id": session_id},
+                )),
+            ]
+        policy = load_resource_policy(repo / ".ats-lab" / "config.toml")
+        emit(recover_zombie_execution_sessions(
+            database, observations, apply=args.apply,
+            grace_seconds=config.zombie_grace_seconds,
             active_limit=policy.active_ready_limit,
         ))
     elif args.command == "sanitize":

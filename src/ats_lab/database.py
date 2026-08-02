@@ -82,6 +82,25 @@ class WorkflowDatabase:
             }
             if "raw_result_json" not in run_columns:
                 connection.execute("ALTER TABLE runs ADD COLUMN raw_result_json TEXT")
+            checkpoint_columns = {
+                row["name"] for row in connection.execute(
+                    "PRAGMA table_info(direct_execution_sessions)"
+                ).fetchall()
+            }
+            checkpoint_additions = {
+                "first_observed_at": "TEXT",
+                "last_observed_at": "TEXT",
+                "last_jesse_updated_at": "TEXT",
+                "last_progress": "REAL",
+                "unchanged_observations": "INTEGER NOT NULL DEFAULT 0",
+                "recovery_attempted": "INTEGER NOT NULL DEFAULT 0",
+                "replacement_created": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, declaration in checkpoint_additions.items():
+                if name not in checkpoint_columns:
+                    connection.execute(
+                        f"ALTER TABLE direct_execution_sessions ADD COLUMN {name} {declaration}"
+                    )
             migration = connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (SCHEMA_VERSION, utc_now()),

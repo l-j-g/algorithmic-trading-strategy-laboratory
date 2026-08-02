@@ -70,6 +70,25 @@ CREATE TABLE IF NOT EXISTS direct_execution_sessions (
     state TEXT NOT NULL,
     metrics_json TEXT,
     error_text TEXT,
+    first_observed_at TEXT,
+    last_observed_at TEXT,
+    last_jesse_updated_at TEXT,
+    last_progress REAL,
+    unchanged_observations INTEGER NOT NULL DEFAULT 0,
+    recovery_attempted INTEGER NOT NULL DEFAULT 0,
+    replacement_created INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS direct_execution_recoveries (
+    work_item_id TEXT PRIMARY KEY REFERENCES work_items(id),
+    old_session_id TEXT NOT NULL UNIQUE,
+    old_state TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    replacement_allowed INTEGER NOT NULL CHECK (replacement_allowed IN (0,1)),
+    replacement_reserved INTEGER NOT NULL DEFAULT 0 CHECK (replacement_reserved IN (0,1)),
+    replacement_session_id TEXT UNIQUE,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

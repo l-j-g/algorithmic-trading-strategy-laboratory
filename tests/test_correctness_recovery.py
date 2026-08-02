@@ -9,6 +9,7 @@ from ats_lab.correctness_recovery import (
     backfill_aggregate_route_coverage,
     recover_executor_infrastructure_failures,
     recover_partial_batch_retries,
+    recover_zombie_execution_sessions,
     recover_verified_margin_sizing_blocker,
     recover_unexecuted_draft_checkpoint,
 )
@@ -256,6 +257,102 @@ class CorrectnessRecoveryTests(unittest.TestCase):
             "SELECT COUNT(*) n FROM events WHERE aggregate_id=? "
             "AND event_type='unexecuted_draft_checkpoint_archived'", (item_id,),
         )[0]["n"], 1)
+
+    def test_zombie_recovery_dry_run_apply_and_repeat_are_evidence_safe(self) -> None:
+        item_id = "ZOMBIE-JOB"
+        session_id = "zombie-session"
+        self.database.upsert_experiment(ExperimentSpec(
+            id=item_id, strategy_name="FrozenStrategy",
+        ))
+        self.database.upsert_work_item(WorkItem(
+            id=item_id, experiment_id=item_id, priority=1,
+            state=WorkState.BLOCKED, attempts=4,
+            blocker_code="retry_limit_reached",
+            blocker_detail="jesse_execution_deferred after repeated polls",
+        ))
+        with self.database.connect() as connection:
+            connection.execute(
+                """INSERT INTO direct_execution_sessions(
+                       work_item_id,experiment_id,session_id,request_fingerprint,
+                       state,created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?)""",
+                (item_id, item_id, session_id, "fingerprint", "running", "now", "now"),
+            )
+        session = {
+            "id": session_id, "status": "running", "updated_at": 1_000,
+            "execution_duration": None,
+            "state": {"results": {
+                "executing": False, "progressbar": {"current": 0},
+                "metrics": {}, "trades": [], "charts": {"equity_curve": []},
+                "exception": {"error": None, "traceback": None},
+            }},
+        }
+        observations = {session_id: [session, dict(session)]}
+
+        preview = recover_zombie_execution_sessions(
+            self.database, observations, apply=False, grace_seconds=0,
+        )
+        self.assertEqual(len(preview["planned"]), 1)
+        self.assertEqual(self.database.rows(
+            "SELECT state,attempts FROM work_items WHERE id=?", (item_id,),
+        )[0], {"state": "blocked", "attempts": 4})
+
+        applied = recover_zombie_execution_sessions(
+            self.database, observations, apply=True, grace_seconds=0,
+        )
+        again = recover_zombie_execution_sessions(
+            self.database, observations, apply=True, grace_seconds=0,
+        )
+        self.assertEqual(applied["changed"], [item_id])
+        self.assertEqual(again["already_recovered"], [item_id])
+        self.assertEqual(again["changed"], [])
+        self.assertEqual(self.database.rows(
+            "SELECT state,attempts FROM work_items WHERE id=?", (item_id,),
+        )[0], {"state": "ready", "attempts": 0})
+        recovery = self.database.rows(
+            "SELECT replacement_allowed,replacement_session_id "
+            "FROM direct_execution_recoveries WHERE work_item_id=?", (item_id,),
+        )[0]
+        self.assertEqual(recovery["replacement_allowed"], 1)
+        self.assertIsNone(recovery["replacement_session_id"])
+
+    def test_zombie_recovery_never_invalidates_durable_terminal_evidence(self) -> None:
+        item_id = "VALID-JOB"
+        session_id = "valid-session"
+        self.database.upsert_experiment(ExperimentSpec(
+            id=item_id, strategy_name="ValidStrategy",
+        ))
+        self.database.upsert_work_item(WorkItem(
+            id=item_id, experiment_id=item_id, priority=1,
+            state=WorkState.BLOCKED, attempts=4,
+        ))
+        with self.database.connect() as connection:
+            connection.execute(
+                """INSERT INTO direct_execution_sessions(
+                       work_item_id,experiment_id,session_id,request_fingerprint,
+                       state,created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?)""",
+                (item_id, item_id, session_id, "fingerprint", "running", "now", "now"),
+            )
+        self.database.add_run(RunResult(
+            id="RUN-VALID", experiment_id=item_id, work_item_id=item_id,
+            session_id=session_id, status=RunStatus.FINISHED,
+            metrics={"net_profit_percentage": 1.0},
+        ))
+        session = {
+            "id": session_id, "status": "running", "updated_at": 1_000,
+            "state": {"results": {
+                "executing": False, "progressbar": {"current": 0},
+                "metrics": {}, "trades": [], "charts": {"equity_curve": []},
+                "exception": {"error": None, "traceback": None},
+            }},
+        }
+        result = recover_zombie_execution_sessions(
+            self.database, {session_id: [session, session]},
+            apply=True, grace_seconds=0,
+        )
+        self.assertEqual(result["changed"], [])
+        self.assertEqual(result["rejected"][item_id], "durable_run_exists")
 
     def test_draft_recovery_rejects_any_execution_evidence(self) -> None:
         result = recover_unexecuted_draft_checkpoint(

@@ -14,6 +14,7 @@ from ats_lab.direct_mcp_executor import (
     DirectExecutionConfig,
     DirectMcpDispatcher,
     McpClient,
+    classify_jesse_session,
     load_direct_execution_config,
 )
 from ats_lab.models import ExperimentSpec, WorkItem, WorkState
@@ -178,6 +179,54 @@ def batch_request(*, change_scope: str = "") -> dict:
 
 
 class DirectMcpExecutorTests(unittest.TestCase):
+    def test_session_classifier_distinguishes_active_zombie_draft_failure_and_success(self) -> None:
+        active = {
+            "status": "running", "updated_at": 1_000,
+            "state": {"results": {"executing": True, "progressbar": {"current": 2}}},
+        }
+        zombie = {
+            "status": "running", "updated_at": 1_000,
+            "execution_duration": None,
+            "state": {"results": {
+                "executing": False, "progressbar": {"current": 0},
+                "metrics": {}, "trades": [], "charts": {"equity_curve": []},
+                "exception": {"error": None, "traceback": None},
+            }},
+        }
+        draft = {"status": "draft", "state": {"results": {}}}
+        stopped = {
+            "status": "stopped", "execution_duration": 3.2,
+            "state": {"results": {
+                "executing": False,
+                "exception": {"error": "mechanical failure", "traceback": None},
+            }},
+        }
+        finished = {
+            "status": "finished", "metrics": {"total": 10},
+            "state": {"results": {"executing": False}},
+        }
+
+        self.assertEqual(classify_jesse_session(active).state, "active_execution")
+        self.assertEqual(
+            classify_jesse_session(zombie, unchanged_observations=1,
+                                   stale_for_seconds=300, grace_seconds=60).state,
+            "temporarily_nonterminal",
+        )
+        self.assertEqual(
+            classify_jesse_session(zombie, unchanged_observations=2,
+                                   stale_for_seconds=300, grace_seconds=60).state,
+            "zombie_nonexecuting",
+        )
+        self.assertEqual(classify_jesse_session(draft).state, "draft_not_started")
+        self.assertEqual(classify_jesse_session(stopped).state, "terminal_failure")
+        self.assertEqual(classify_jesse_session(finished).state, "terminal_success")
+
+    def test_malformed_session_fails_closed(self) -> None:
+        self.assertEqual(
+            classify_jesse_session({"status": "running", "state": {}}).state,
+            "malformed_session",
+        )
+
     def make_dispatcher(
         self,
         root: str,
@@ -431,7 +480,64 @@ class DirectMcpExecutorTests(unittest.TestCase):
             dispatcher, _ = self.make_dispatcher(tmp, server, max_polls=2)
             timed_out = dispatcher.dispatch(batch_request()).payload["results"][0]
             self.assertEqual(timed_out["outcome"], "retry")
-            self.assertEqual(timed_out["blocker_code"], "jesse_poll_timeout")
+            self.assertEqual(timed_out["blocker_code"], "jesse_execution_deferred")
+
+    def test_active_poll_slice_is_deferred_without_strategy_attempt_charge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["running"]) as server:
+            dispatcher, database = self.make_dispatcher(tmp, server, max_polls=1)
+            result = dispatcher.dispatch(batch_request()).payload["results"][0]
+            self.assertEqual(result["outcome"], "retry")
+            self.assertEqual(result["blocker_code"], "jesse_execution_deferred")
+            self.assertFalse(result["attempt_charged"])
+            checkpoint = database.rows(
+                "SELECT state,unchanged_observations FROM direct_execution_sessions "
+                "WHERE work_item_id='JOB-1'"
+            )[0]
+            self.assertEqual(checkpoint["state"], "active_execution")
+            self.assertGreaterEqual(checkpoint["unchanged_observations"], 1)
+
+    def test_recovered_zombie_creates_exactly_one_replacement_across_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "running", "finished"]
+        ) as server:
+            dispatcher, database = self.make_dispatcher(tmp, server, max_polls=1)
+            with database.connect() as connection:
+                connection.execute(
+                    """INSERT INTO direct_execution_recoveries(
+                           work_item_id,old_session_id,old_state,reason,
+                           replacement_allowed,created_at,updated_at
+                       ) VALUES (?,?,?,?,1,?,?)""",
+                    (
+                        "JOB-1", "old-zombie", "zombie_nonexecuting",
+                        "no execution evidence", "now", "now",
+                    ),
+                )
+            first = dispatcher.dispatch(batch_request()).payload["results"][0]
+            self.assertEqual(first["blocker_code"], "jesse_execution_deferred")
+            second = DirectMcpDispatcher(
+                database,
+                DirectExecutionConfig(
+                    enabled=True, mcp_url=server.url, max_polls=2,
+                    poll_initial_seconds=0, poll_max_seconds=0,
+                ),
+                sleep=lambda _seconds: None,
+            ).dispatch(batch_request()).payload["results"][0]
+            self.assertEqual(second["outcome"], "finished")
+            self.assertEqual(
+                len([name for name, _ in server.http.tool_calls
+                     if name == "create_backtest_draft"]),
+                1,
+            )
+            recovery = database.rows(
+                "SELECT replacement_reserved,replacement_session_id "
+                "FROM direct_execution_recoveries WHERE work_item_id='JOB-1'"
+            )[0]
+            self.assertEqual(recovery["replacement_reserved"], 1)
+            self.assertEqual(recovery["replacement_session_id"], "jesse-session-1")
+            self.assertEqual(database.rows(
+                "SELECT replacement_created FROM direct_execution_sessions "
+                "WHERE work_item_id='JOB-1'"
+            )[0]["replacement_created"], 1)
 
     def test_source_change_gets_one_bounded_preparation_turn(self) -> None:
         fallback = RecordingFallback()

@@ -30,7 +30,11 @@ from .worker import DispatchResult, Dispatcher
 
 INFRASTRUCTURE_BLOCKERS = frozenset({
     "executor_provider_failed", "executor_timeout", "executor_start_failed",
-    "executor_failed",
+    "executor_failed", "direct_mcp_error", "malformed_jesse_session",
+    "invalid_jesse_metrics", "jesse_execution_deferred",
+    "jesse_draft_not_started", "jesse_start_recovery_failed",
+    "jesse_zombie_recovery_pending", "jesse_zombie_recovery_required",
+    "memory_unavailable", "memory_delivery_failed", "memory_recall_failed",
 })
 
 

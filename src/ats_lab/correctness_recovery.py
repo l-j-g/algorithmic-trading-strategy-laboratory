@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Iterable
+from datetime import datetime, timezone
+from typing import Iterable, Mapping
 
 from .database import WorkflowDatabase
+from .direct_mcp_executor import DirectMcpDispatcher, classify_jesse_session
 from .gates import evaluate_gates
 from .models import utc_now
 from .resources import ResourcePolicy
@@ -16,6 +18,146 @@ _PARTIAL_BATCH_MARKERS = (
     "significance-test session remains running",
     "seven work items finished",
 )
+
+
+def recover_zombie_execution_sessions(
+    database: WorkflowDatabase,
+    observations: Mapping[str, list[dict]],
+    *,
+    apply: bool = False,
+    grace_seconds: float = 60,
+    active_limit: int = 5,
+) -> dict:
+    """Invalidate only repeatedly observed non-executing sessions without evidence."""
+    planned: list[dict] = []
+    rejected: dict[str, str] = {}
+    already_recovered: list[str] = []
+    for session_id, samples in sorted(observations.items()):
+        rows = database.rows(
+            """SELECT w.id AS work_item_id,w.state,w.attempts,w.blocker_code,
+                      d.session_id,d.state AS checkpoint_state
+               FROM direct_execution_sessions d
+               JOIN work_items w ON w.id=d.work_item_id
+               WHERE d.session_id=?""",
+            (session_id,),
+        )
+        recovery = database.rows(
+            """SELECT work_item_id FROM direct_execution_recoveries
+               WHERE old_session_id=?""",
+            (session_id,),
+        )
+        if recovery:
+            already_recovered.append(recovery[0]["work_item_id"])
+            continue
+        if not rows:
+            rejected[session_id] = "checkpoint_not_found"
+            continue
+        row = rows[0]
+        if len(samples) < 2:
+            rejected[row["work_item_id"]] = "repeated_observation_required"
+            continue
+        signatures = []
+        for sample in samples[-2:]:
+            state = sample.get("state") if isinstance(sample.get("state"), dict) else {}
+            results = state.get("results") if isinstance(state.get("results"), dict) else {}
+            progress = results.get("progressbar")
+            signatures.append((
+                sample.get("status"), sample.get("updated_at") or sample.get("updatedAt"),
+                results.get("executing"),
+                progress.get("current") if isinstance(progress, dict) else results.get("progress"),
+            ))
+        if signatures[0] != signatures[1]:
+            rejected[row["work_item_id"]] = "session_observation_changed"
+            continue
+        updated = samples[-1].get("updated_at") or samples[-1].get("updatedAt")
+        updated_seconds = DirectMcpDispatcher._timestamp_seconds(updated)
+        stale_for = (
+            max(0.0, datetime.now(timezone.utc).timestamp() - updated_seconds)
+            if updated_seconds is not None else 0.0
+        )
+        classification = classify_jesse_session(
+            samples[-1], unchanged_observations=2,
+            stale_for_seconds=stale_for, grace_seconds=grace_seconds,
+        )
+        if classification.state != "zombie_nonexecuting":
+            rejected[row["work_item_id"]] = classification.state
+            continue
+        if classification.has_execution_evidence:
+            rejected[row["work_item_id"]] = "session_has_execution_evidence"
+            continue
+        if database.rows(
+            "SELECT 1 FROM runs WHERE work_item_id=? LIMIT 1",
+            (row["work_item_id"],),
+        ):
+            rejected[row["work_item_id"]] = "durable_run_exists"
+            continue
+        if row["state"] not in {"blocked", "waiting_retry"}:
+            rejected[row["work_item_id"]] = "work_item_not_recoverable"
+            continue
+        planned.append({
+            "work_item_id": row["work_item_id"],
+            "old_session_id": session_id,
+            "old_state": classification.state,
+            "transition": f"{row['state']}->scheduled",
+            "attempts_reset": int(row["attempts"] or 0),
+            "replacement_allowance": 1,
+            "reason": "repeated unchanged non-executing Jesse session without evidence",
+        })
+
+    changed: list[str] = []
+    if apply and planned:
+        now = utc_now()
+        with database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for item in planned:
+                work_item_id = item["work_item_id"]
+                connection.execute(
+                    """INSERT INTO direct_execution_recoveries(
+                           work_item_id,old_session_id,old_state,reason,
+                           replacement_allowed,created_at,updated_at
+                       ) VALUES (?,?,?,?,1,?,?)""",
+                    (
+                        work_item_id, item["old_session_id"], item["old_state"],
+                        item["reason"], now, now,
+                    ),
+                )
+                deleted = connection.execute(
+                    """DELETE FROM direct_execution_sessions
+                       WHERE work_item_id=? AND session_id=?""",
+                    (work_item_id, item["old_session_id"]),
+                )
+                changed_row = connection.execute(
+                    """UPDATE work_items SET state='scheduled',attempts=0,
+                              retry_after=NULL,blocker_code=NULL,blocker_detail=NULL,
+                              claimed_by=NULL,claimed_at=NULL,updated_at=?
+                       WHERE id=? AND state IN ('blocked','waiting_retry')""",
+                    (now, work_item_id),
+                )
+                if deleted.rowcount != 1 or changed_row.rowcount != 1:
+                    raise RuntimeError(
+                        f"concurrent zombie recovery state change: {work_item_id}"
+                    )
+                connection.execute(
+                    """INSERT INTO events(aggregate_type,aggregate_id,event_type,
+                           payload_json,occurred_at) VALUES(
+                           'work_item',?,'zombie_execution_session_recovered',?,?)""",
+                    (work_item_id, json.dumps({
+                        "old_session_id": item["old_session_id"],
+                        "old_state": item["old_state"],
+                        "reason": item["reason"],
+                        "attempts_reset": item["attempts_reset"],
+                        "replacement_allowance": 1,
+                    }, sort_keys=True), now),
+                )
+                changed.append(work_item_id)
+        promoted = database.promote_scheduled_runnable(active_limit)
+    else:
+        promoted = 0
+    return {
+        "apply": apply, "planned": planned, "changed": changed,
+        "already_recovered": sorted(already_recovered),
+        "rejected": rejected, "promoted": promoted,
+    }
 
 
 def recover_executor_infrastructure_failures(

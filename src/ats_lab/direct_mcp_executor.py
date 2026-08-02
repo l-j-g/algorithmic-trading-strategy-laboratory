@@ -13,6 +13,7 @@ import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .database import WorkflowDatabase
@@ -41,6 +42,8 @@ class DirectExecutionConfig:
     max_polls: int = 3
     dashboard_api_base_url: str = "http://127.0.0.1:9000"
     dashboard_display_base_url: str = "http://127.0.0.1:9000/#/backtest"
+    zombie_grace_seconds: float = 60
+    zombie_unchanged_observations: int = 2
 
     def __post_init__(self) -> None:
         if not self.mcp_url:
@@ -51,6 +54,142 @@ class DirectExecutionConfig:
             raise ValueError("jesse_executor polling intervals must be non-negative")
         if self.max_polls < 1:
             raise ValueError("jesse_executor.max_polls must be positive")
+        if self.zombie_grace_seconds < 0:
+            raise ValueError("jesse_executor.zombie_grace_seconds must be non-negative")
+        if self.zombie_unchanged_observations < 2:
+            raise ValueError(
+                "jesse_executor.zombie_unchanged_observations must be at least 2"
+            )
+
+
+@dataclass(frozen=True)
+class SessionClassification:
+    state: str
+    public_status: str
+    executing: bool | None
+    progress: float | None
+    jesse_updated_at: str | None
+    has_execution_evidence: bool
+    error: str | None = None
+
+
+def _results(session: dict[str, Any]) -> dict[str, Any] | None:
+    state = session.get("state")
+    if not isinstance(state, dict):
+        return None
+    results = state.get("results")
+    return results if isinstance(results, dict) else None
+
+
+def _progress(results: dict[str, Any]) -> float | None:
+    value: Any = results.get("progress")
+    progressbar = results.get("progressbar")
+    if value is None and isinstance(progressbar, dict):
+        value = progressbar.get("current")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _metrics(session: dict[str, Any], results: dict[str, Any] | None) -> Any:
+    if "metrics" in session:
+        return session.get("metrics")
+    return results.get("metrics") if results is not None else None
+
+
+def _execution_error(
+    session: dict[str, Any], results: dict[str, Any] | None,
+) -> str | None:
+    for value in (session.get("exception"), session.get("error"), session.get("traceback")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    nested = results.get("exception") if results is not None else None
+    if isinstance(nested, dict):
+        for key in ("error", "traceback"):
+            value = nested.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if isinstance(nested, str) and nested.strip():
+        return nested.strip()
+    return None
+
+
+def _evidence_flags(
+    session: dict[str, Any], results: dict[str, Any] | None,
+) -> tuple[bool, bool, bool, bool]:
+    metrics = _metrics(session, results)
+    trades = session.get("trades")
+    if trades is None and results is not None:
+        trades = results.get("trades")
+    equity = session.get("equity_curve")
+    charts = results.get("charts") if results is not None else None
+    if equity is None and isinstance(charts, dict):
+        equity = charts.get("equity_curve")
+    duration = session.get("execution_duration")
+    return (
+        isinstance(metrics, dict) and bool(metrics),
+        isinstance(trades, list) and bool(trades),
+        isinstance(equity, list) and bool(equity),
+        isinstance(duration, (int, float)) and not isinstance(duration, bool),
+    )
+
+
+def classify_jesse_session(
+    session: dict[str, Any], *, unchanged_observations: int = 0,
+    stale_for_seconds: float = 0, grace_seconds: float = 60,
+    required_unchanged_observations: int = 2,
+) -> SessionClassification:
+    """Classify one bounded Jesse observation without treating timeout as failure."""
+    state = session.get("state")
+    status = str(
+        session.get("status")
+        or (state.get("status") if isinstance(state, dict) else "")
+        or "unknown"
+    ).lower()
+    results = _results(session)
+    executing = results.get("executing") if results is not None else None
+    executing = executing if isinstance(executing, bool) else None
+    progress = _progress(results) if results is not None else None
+    updated = session.get("updated_at") or session.get("updatedAt")
+    updated_text = str(updated) if updated is not None else None
+    evidence = _evidence_flags(session, results)
+    has_evidence = any(evidence)
+    error = _execution_error(session, results)
+    base = dict(
+        public_status=status, executing=executing, progress=progress,
+        jesse_updated_at=updated_text, has_execution_evidence=has_evidence,
+        error=error,
+    )
+    if status == "finished":
+        metrics = _metrics(session, results)
+        return SessionClassification(
+            state="terminal_success" if isinstance(metrics, dict)
+            else "malformed_session", **base,
+        )
+    if status in TERMINAL:
+        if status == "draft":
+            return SessionClassification(state="draft_not_started", **base)
+        return SessionClassification(state="terminal_failure", **base)
+    if status == "draft":
+        return SessionClassification(state="draft_not_started", **base)
+    if results is None or executing is None:
+        return SessionClassification(state="malformed_session", **base)
+    if executing:
+        return SessionClassification(state="active_execution", **base)
+    if error:
+        return SessionClassification(state="terminal_failure", **base)
+    if status == "running" and not has_evidence and (progress is None or progress == 0):
+        proven = (
+            unchanged_observations >= required_unchanged_observations
+            and stale_for_seconds >= grace_seconds
+        )
+        return SessionClassification(
+            state="zombie_nonexecuting" if proven else "temporarily_nonterminal",
+            **base,
+        )
+    if status in {"running", "pending", "queued", "starting"}:
+        return SessionClassification(state="temporarily_nonterminal", **base)
+    return SessionClassification(state="malformed_session", **base)
 
 
 def load_direct_execution_config(path: Any) -> DirectExecutionConfig:
@@ -64,6 +203,7 @@ def load_direct_execution_config(path: Any) -> DirectExecutionConfig:
         "enabled", "mcp_url", "timeout_seconds", "poll_initial_seconds",
         "poll_max_seconds", "max_polls", "dashboard_api_base_url",
         "dashboard_display_base_url",
+        "zombie_grace_seconds", "zombie_unchanged_observations",
     }
     unknown = set(section) - allowed
     if unknown:
@@ -372,14 +512,30 @@ class DirectMcpDispatcher:
                     detail="persisted Jesse session request fingerprint changed",
                 )
             if checkpoint is None:
-                session_id = self._create(client, request)
+                session_id, replacement, created_now = self._create_or_resume_session(
+                    client, request,
+                )
                 self._save_checkpoint(
                     work_item_id, experiment_id, session_id, fingerprint, "draft",
                 )
-                session = self._start_and_verify(client, session_id)
+                if replacement:
+                    with self.database.connect() as connection:
+                        connection.execute(
+                            """UPDATE direct_execution_sessions
+                               SET replacement_created=1 WHERE work_item_id=?""",
+                            (work_item_id,),
+                        )
+                if created_now:
+                    session = self._start_and_verify(client, session_id)
+                else:
+                    session = self._session(client.call_tool(
+                        "get_backtest_session", {"session_id": session_id},
+                    ))
+                    if self._status(session) == "draft":
+                        session = self._start_and_verify(client, session_id)
             else:
                 session_id = checkpoint["session_id"]
-                if checkpoint["state"] == "finished":
+                if checkpoint["state"] in {"finished", "terminal_success"}:
                     metrics = json.loads(checkpoint["metrics_json"] or "{}")
                     return self._finished(client, request, session_id, metrics, polls)
                 session = self._session(client.call_tool(
@@ -400,50 +556,66 @@ class DirectMcpDispatcher:
                         "draft",
                     )
                     session = self._start_and_verify(client, session_id)
-            observed_status = self._status(session)
-            self._save_checkpoint(
-                work_item_id, experiment_id, session_id, fingerprint,
-                observed_status,
+            classification = self._observe_session(
+                work_item_id, experiment_id, session_id, fingerprint, session,
             )
             delay = self.config.poll_initial_seconds
-            last_status = observed_status
             for polls in range(1, self.config.max_polls + 1):
-                if polls > 1 or last_status not in TERMINAL | {"finished"}:
+                if polls > 1 or classification.state not in {
+                    "terminal_success", "terminal_failure",
+                }:
                     session = self._session(client.call_tool(
                         "get_backtest_session", {"session_id": session_id},
                     ))
-                    last_status = self._status(session)
-                    self._save_checkpoint(
+                    classification = self._observe_session(
                         work_item_id, experiment_id, session_id, fingerprint,
-                        last_status,
+                        session,
                     )
-                if last_status == "finished":
-                    metrics = session.get("metrics")
+                if classification.state == "terminal_success":
+                    metrics = _metrics(session, _results(session))
                     if not isinstance(metrics, dict):
                         return self._record_and_return(
                             client, work_item_id, polls, "retry",
                             blocker_code="invalid_jesse_metrics",
                             detail="terminal Jesse session metrics must be object",
+                            attempt_charged=False,
                         )
                     self._save_checkpoint(
                         work_item_id, experiment_id, session_id, fingerprint,
-                        "finished", metrics=metrics,
+                        "terminal_success", metrics=metrics,
                     )
                     return self._finished(
                         client, request, session_id, metrics, polls,
                     )
-                if last_status in TERMINAL:
-                    detail = str(
-                        session.get("exception") or session.get("error")
-                        or f"Jesse session terminal status {last_status}"
+                if classification.state == "terminal_failure":
+                    detail = classification.error or (
+                        "Jesse session terminal status "
+                        f"{classification.public_status}"
                     )
                     self._save_checkpoint(
                         work_item_id, experiment_id, session_id, fingerprint,
-                        last_status, error=detail,
+                        "terminal_failure", error=detail,
                     )
                     return self._record_and_return(
                         client, work_item_id, polls, "retry",
-                        blocker_code=f"jesse_execution_{last_status}", detail=detail,
+                        blocker_code=(
+                            f"jesse_execution_{classification.public_status}"
+                        ),
+                        detail=detail, attempt_charged=True,
+                    )
+                if classification.state == "malformed_session":
+                    return self._record_and_return(
+                        client, work_item_id, polls, "retry",
+                        blocker_code="malformed_jesse_session",
+                        detail="Jesse session response lacks required execution state",
+                        attempt_charged=False,
+                    )
+                if classification.state == "draft_not_started":
+                    return self._record_and_return(
+                        client, work_item_id, polls, "retry",
+                        blocker_code="jesse_draft_not_started",
+                        detail=f"session {session_id} has not started",
+                        attempt_charged=False,
                     )
                 if polls < self.config.max_polls:
                     self.sleep(delay)
@@ -451,11 +623,37 @@ class DirectMcpDispatcher:
                         self.config.poll_max_seconds,
                         max(delay * 2, self.config.poll_initial_seconds),
                     )
-            outcome = "retry"
+            if classification.state == "zombie_nonexecuting":
+                checkpoint = self._checkpoint(work_item_id) or {}
+                if not checkpoint.get("recovery_attempted"):
+                    self._mark_recovery_attempted(work_item_id)
+                    client.call_tool("run_backtest", {"session_id": session_id})
+                    return self._record_and_return(
+                        client, work_item_id, polls, "retry",
+                        blocker_code="jesse_zombie_recovery_pending",
+                        detail=(
+                            f"session {session_id} non-executing; one start "
+                            "reconciliation requested"
+                        ),
+                        attempt_charged=False,
+                    )
+                return self._record_and_return(
+                    client, work_item_id, polls, "retry",
+                    blocker_code="jesse_zombie_recovery_required",
+                    detail=(
+                        f"session {session_id} remains non-executing after one "
+                        "reconciliation"
+                    ),
+                    attempt_charged=False,
+                )
             return self._record_and_return(
-                client, work_item_id, polls, outcome,
-                blocker_code="jesse_poll_timeout",
-                detail=f"session {session_id} non-terminal after {polls} polls",
+                client, work_item_id, polls, "retry",
+                blocker_code="jesse_execution_deferred",
+                detail=(
+                    f"session {session_id} {classification.state} after "
+                    f"bounded {polls}-poll slice"
+                ),
+                attempt_charged=False,
             )
         except (KeyError, TypeError, ValueError, McpError, OSError) as error:
             checkpoint = self._checkpoint(work_item_id)
@@ -468,10 +666,12 @@ class DirectMcpDispatcher:
                 return self._record_and_return(
                     client, work_item_id, polls, "retry",
                     blocker_code="jesse_start_recovery_failed", detail=str(error),
+                    attempt_charged=False,
                 )
             return self._record_and_return(
                 client, work_item_id, polls, "retry",
                 blocker_code="direct_mcp_error", detail=str(error),
+                attempt_charged=False,
             )
 
     def _start_and_verify(
@@ -551,6 +751,51 @@ class DirectMcpDispatcher:
             raise McpError("create_backtest_draft returned no session id")
         return str(session_id)
 
+    def _create_or_resume_session(
+        self, client: McpClient, request: dict[str, Any],
+    ) -> tuple[str, bool, bool]:
+        work_item_id = str(request["work_item_id"])
+        rows = self.database.rows(
+            """SELECT replacement_allowed,replacement_reserved,
+                      replacement_session_id
+               FROM direct_execution_recoveries WHERE work_item_id=?""",
+            (work_item_id,),
+        )
+        if not rows:
+            return self._create(client, request), False, True
+        recovery = rows[0]
+        if recovery["replacement_session_id"]:
+            return str(recovery["replacement_session_id"]), True, False
+        if not recovery["replacement_allowed"]:
+            raise McpError("replacement session is not allowed")
+        if recovery["replacement_reserved"]:
+            raise McpError(
+                "replacement reservation has no persisted session id; manual reconciliation required"
+            )
+        now = utc_now()
+        with self.database.connect() as connection:
+            reserved = connection.execute(
+                """UPDATE direct_execution_recoveries
+                   SET replacement_reserved=1,updated_at=?
+                   WHERE work_item_id=? AND replacement_allowed=1
+                     AND replacement_reserved=0 AND replacement_session_id IS NULL""",
+                (now, work_item_id),
+            )
+            if reserved.rowcount != 1:
+                raise McpError("replacement session reservation changed")
+        session_id = self._create(client, request)
+        with self.database.connect() as connection:
+            saved = connection.execute(
+                """UPDATE direct_execution_recoveries
+                   SET replacement_session_id=?,updated_at=?
+                   WHERE work_item_id=? AND replacement_reserved=1
+                     AND replacement_session_id IS NULL""",
+                (session_id, utc_now(), work_item_id),
+            )
+            if saved.rowcount != 1:
+                raise McpError("replacement session id persistence failed")
+        return session_id, True, True
+
     def _finished(
         self,
         client: McpClient,
@@ -587,11 +832,14 @@ class DirectMcpDispatcher:
         *,
         blocker_code: str,
         detail: str,
+        attempt_charged: bool | None = None,
     ) -> dict[str, Any]:
         result = {
             "work_item_id": work_item_id, "outcome": outcome,
             "blocker_code": blocker_code, "detail": detail,
         }
+        if attempt_charged is not None:
+            result["attempt_charged"] = attempt_charged
         self._telemetry(client, work_item_id, outcome, polls, result)
         return result
 
@@ -625,6 +873,100 @@ class DirectMcpDispatcher:
             (work_item_id,),
         )
         return rows[0] if rows else None
+
+    @staticmethod
+    def _timestamp_seconds(value: object) -> float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            return numeric / 1000 if numeric > 10_000_000_000 else numeric
+        if isinstance(value, str) and value:
+            try:
+                return datetime.fromisoformat(
+                    value.replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                return None
+        return None
+
+    def _observe_session(
+        self,
+        work_item_id: str,
+        experiment_id: str,
+        session_id: str,
+        fingerprint: str,
+        session: dict[str, Any],
+    ) -> SessionClassification:
+        previous = self._checkpoint(work_item_id) or {}
+        results = _results(session)
+        progress = _progress(results) if results is not None else None
+        updated = session.get("updated_at") or session.get("updatedAt")
+        updated_text = str(updated) if updated is not None else None
+        same = (
+            previous.get("last_jesse_updated_at") == updated_text
+            and previous.get("last_progress") == progress
+        )
+        unchanged = (
+            int(previous.get("unchanged_observations") or 0) + 1
+            if same else 1
+        )
+        observed_at = utc_now()
+        updated_seconds = self._timestamp_seconds(updated)
+        if updated_seconds is None:
+            updated_seconds = self._timestamp_seconds(
+                previous.get("first_observed_at") or observed_at
+            )
+        stale_for = max(
+            0.0,
+            datetime.now(timezone.utc).timestamp() - (updated_seconds or 0.0),
+        )
+        classification = classify_jesse_session(
+            session,
+            unchanged_observations=unchanged,
+            stale_for_seconds=stale_for,
+            grace_seconds=self.config.zombie_grace_seconds,
+            required_unchanged_observations=(
+                self.config.zombie_unchanged_observations
+            ),
+        )
+        with self.database.connect() as connection:
+            connection.execute(
+                """INSERT INTO direct_execution_sessions(
+                       work_item_id,experiment_id,session_id,request_fingerprint,
+                       state,first_observed_at,last_observed_at,
+                       last_jesse_updated_at,last_progress,unchanged_observations,
+                       created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(work_item_id) DO UPDATE SET
+                       state=excluded.state,
+                       first_observed_at=COALESCE(
+                           direct_execution_sessions.first_observed_at,
+                           excluded.first_observed_at
+                       ),
+                       last_observed_at=excluded.last_observed_at,
+                       last_jesse_updated_at=excluded.last_jesse_updated_at,
+                       last_progress=excluded.last_progress,
+                       unchanged_observations=excluded.unchanged_observations,
+                       updated_at=excluded.updated_at""",
+                (
+                    work_item_id, experiment_id, session_id, fingerprint,
+                    classification.state, observed_at, observed_at, updated_text,
+                    progress, unchanged, observed_at, observed_at,
+                ),
+            )
+        return classification
+
+    def _mark_recovery_attempted(self, work_item_id: str) -> None:
+        with self.database.connect() as connection:
+            changed = connection.execute(
+                """UPDATE direct_execution_sessions SET recovery_attempted=1,
+                          updated_at=?
+                   WHERE work_item_id=? AND recovery_attempted=0""",
+                (utc_now(), work_item_id),
+            )
+            if changed.rowcount != 1:
+                raise McpError("zombie reconciliation already attempted")
 
     def _preparation_complete(self, request: dict[str, Any]) -> bool:
         rows = self.database.rows(
