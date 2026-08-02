@@ -310,8 +310,10 @@ def sync_memory_outbox(
     return result
 
 
-def _recall_query(context: Mapping[str, Any]) -> str:
-    terms: list[str] = []
+def _recall_queries(context: Mapping[str, Any]) -> list[str]:
+    strategy_terms: list[str] = []
+    regime_terms: list[str] = []
+    refinement_terms: list[str] = []
     for collection in (
         "improvement_candidates", "scheduled_candidates", "concept_learnings",
     ):
@@ -323,15 +325,34 @@ def _recall_query(context: Mapping[str, Any]) -> str:
                 specification = json.loads(specification) if isinstance(specification, str) else specification
             except json.JSONDecodeError:
                 specification = {}
-            for value in (
-                item.get("strategy"), item.get("archetype"), item.get("target_regime"),
-                item.get("failure_regime"), item.get("source_experiment_id"),
-                specification.get("change_scope") if isinstance(specification, dict) else None,
-                item.get("verdict"),
-            ):
-                if value:
-                    terms.append(" ".join(str(value).split())[:120])
-    return "ATS strategy learnings " + " ".join(dict.fromkeys(terms))[:1200]
+            groups = (
+                (strategy_terms, (item.get("strategy"), item.get("archetype"))),
+                (regime_terms, (item.get("target_regime"), item.get("failure_regime"))),
+                (refinement_terms, (
+                    item.get("source_experiment_id"),
+                    specification.get("change_scope") if isinstance(specification, dict) else None,
+                    item.get("verdict"),
+                )),
+            )
+            for target, values in groups:
+                for value in values:
+                    if value:
+                        target.append(" ".join(str(value).split())[:120])
+            for evidence in item.get("evidence", []) if isinstance(item.get("evidence"), list) else []:
+                if isinstance(evidence, dict) and evidence.get("finding"):
+                    refinement_terms.append(
+                        " ".join(str(evidence["finding"]).split())[:160]
+                    )
+    queries = []
+    for prefix, terms in (
+        ("ATS strategy learning", strategy_terms),
+        ("ATS regime evidence", regime_terms),
+        ("ATS refinement evidence", refinement_terms),
+    ):
+        unique = " ".join(dict.fromkeys(terms))[:600]
+        if unique:
+            queries.append(f"{prefix} {unique}")
+    return queries or ["ATS evidence-derived strategy learning"]
 
 
 def compact_advisory_memory(
@@ -352,15 +373,23 @@ def compact_advisory_memory(
         for item in (context.get(collection) or [])
         if isinstance(item, dict) and item.get(key)
     }
-    try:
-        recalled = adapter.recall(_recall_query(context), limit=max_items * 3)
-    except Exception:
-        return {"advisory_memory": [], "memory_degraded": True}
-    if not isinstance(recalled, list):
+    recalled: list[dict[str, Any]] = []
+    recall_failed = False
+    for query in _recall_queries(context):
+        try:
+            batch = adapter.recall(query, limit=max_items * 2)
+        except Exception:
+            recall_failed = True
+            continue
+        if not isinstance(batch, list):
+            recall_failed = True
+            continue
+        recalled.extend(item for item in batch if isinstance(item, dict))
+    if not recalled and recall_failed:
         return {"advisory_memory": [], "memory_degraded": True}
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
-    degraded = False
+    degraded = recall_failed
     for raw in recalled:
         if not isinstance(raw, dict) or not _RECALL_REQUIRED <= set(raw):
             degraded = True
