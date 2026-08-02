@@ -22,6 +22,10 @@ tool, not a requirement to wrap every function.
 - `WorkflowDatabase`: canonical transaction boundary.
 - `BatchSupervisor`: application orchestration boundary.
 - `DirectMcpDispatcher`: Jesse execution adapter.
+- `ExecutionDispositionPolicy`: pure transient/analyzable/operator classifier.
+- `ExecutionFailureRecorder`: atomic durable-failure to analysis transition.
+- `TerminalFailureRecovery`: bounded legacy retry-limit migration.
+- `ExecutionAnalysisInputBuilder`: safe success/failure analyzer contracts.
 - `MemoryResearchAdapter`: advisory-memory adapter.
 - Terminal UI: typed value objects, projection repository, renderer, controller,
   and public façade in separate modules.
@@ -32,8 +36,8 @@ These are refactoring targets, not permission for a whole-codebase rewrite:
 
 1. Extract CLI parser construction and domain command handlers from `cli.py`
    behind a command protocol while preserving every existing invocation.
-2. Split supervisor execution, analysis, HPO, and synthesis policies behind
-   typed collaborators; keep the supervisor as coordinator.
+2. Continue splitting HPO and synthesis policy behind typed collaborators;
+   execution disposition and analysis-input policy are already extracted.
 3. Introduce one typed HPO lifecycle enum shared by status, dashboard, console,
    supervisor, and persistence adapters.
 4. Split large read projections from `WorkflowDatabase`; keep writes and

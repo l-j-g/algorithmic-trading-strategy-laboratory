@@ -470,11 +470,11 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 1,
             )
 
-    def test_terminal_failure_and_timeout_have_retry_blockers(self) -> None:
+    def test_terminal_failure_is_analyzable_while_timeout_retries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["stopped"]) as server:
             dispatcher, _ = self.make_dispatcher(tmp, server)
             failed = dispatcher.dispatch(batch_request()).payload["results"][0]
-            self.assertEqual(failed["outcome"], "retry")
+            self.assertEqual(failed["outcome"], "blocked")
             self.assertEqual(failed["blocker_code"], "jesse_execution_stopped")
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["running"]) as server:
             dispatcher, _ = self.make_dispatcher(tmp, server, max_polls=2)

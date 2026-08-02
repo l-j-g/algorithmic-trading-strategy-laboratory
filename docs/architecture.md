@@ -11,9 +11,10 @@ Typed JSON contracts --> transactional work queue
                               |
                               v
                       execution adapter
-                              |
-                              v
-                        run evidence
+                         /         \
+                        v           v
+              metric evidence   failure evidence
+                         \         /
                               |
                               v
                          evaluation
@@ -43,7 +44,8 @@ Work state:
 scheduled -> ready -> running -> finished
                          |
                          +-> waiting_retry -> ready
-                         +-> blocked
+                         +-> failure evidence -> evaluation -> finished
+                         +-> blocked (operator requirement only)
 ```
 
 Research verdict:
@@ -53,6 +55,10 @@ reject | revise | inconclusive | hpo_candidate | paper_trade_candidate
 ```
 
 Execution completion and research quality are intentionally independent.
+Poor metrics and terminal strategy/harness failures both reach evaluation.
+Analysis chooses `revise` or `reject`; neither remains an active queue blocker.
+Only transient infrastructure retries and explicit operator requirements block
+progression.
 
 ## Storage
 

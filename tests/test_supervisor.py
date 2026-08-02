@@ -167,8 +167,9 @@ class BatchSupervisorTests(unittest.TestCase):
             }
             analysis = self.analysis_result()
             analysis.payload["evaluations"] = analysis.payload["evaluations"][1:]
+            dispatcher = SequenceDispatcher([execution, analysis])
             supervisor = BatchSupervisor(
-                database, SequenceDispatcher([execution, analysis]), "batch-worker",
+                database, dispatcher, "batch-worker",
                 resource_policy=ResourcePolicy(synthesis_low_watermark=0),
             )
 
@@ -291,8 +292,9 @@ class BatchSupervisorTests(unittest.TestCase):
             run["status"] = "running"
             run["raw_result"]["status"] = "running"
             analysis = self.analysis_result()
+            dispatcher = SequenceDispatcher([execution, analysis])
             supervisor = BatchSupervisor(
-                database, SequenceDispatcher([execution, analysis]), "batch-worker",
+                database, dispatcher, "batch-worker",
                 resource_policy=ResourcePolicy(synthesis_low_watermark=0),
             )
 
@@ -303,10 +305,14 @@ class BatchSupervisorTests(unittest.TestCase):
             )[0]
             self.assertIsNone(persisted["route_json"])
             evaluation = database.rows(
-                "SELECT metrics_summary FROM evaluations WHERE experiment_id='EXP-1'"
+                """SELECT verdict,metrics_summary FROM evaluations
+                   WHERE experiment_id='EXP-1'"""
             )[0]
             summary = json.loads(evaluation["metrics_summary"])
-            self.assertIn("failed=route_completion", summary[0]["finding"])
+            self.assertEqual(evaluation["verdict"], "revise")
+            self.assertNotIn("finding", summary[0])
+            analyzed = dispatcher.requests[1]["executions"][0]
+            self.assertEqual(analyzed["execution"]["status"], "running")
 
     def test_partial_retry_persists_terminal_members_and_retries_only_unfinished(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -608,11 +614,13 @@ class BatchSupervisorTests(unittest.TestCase):
                 "run_id": "RUN-1",
                 "work_item_id": "JOB-1",
                 "experiment_id": "EXP-1",
+                "run_status": "finished",
             })
 
             self.assertEqual(set(compact), {
-                "work_item_id", "experiment_id", "evidence",
+                "work_item_id", "experiment_id", "execution", "evidence",
             })
+            self.assertEqual(compact["execution"], {"status": "finished"})
             evidence = compact["evidence"][0]
             self.assertEqual(evidence["symbol"], "BTC-USDT")
             self.assertEqual(evidence["net_profit_percentage"], 12.5)
@@ -620,6 +628,112 @@ class BatchSupervisorTests(unittest.TestCase):
             self.assertNotIn("metrics", evidence)
             self.assertNotIn("route_runs", str(compact))
             self.assertNotIn("unneeded", str(compact))
+
+    def test_terminal_strategy_failure_flows_through_analysis_not_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-CHILD", strategy_name="StrategyChild",
+            ))
+            database.upsert_work_item(WorkItem(
+                id="JOB-CHILD", experiment_id="EXP-CHILD", priority=3,
+                state=WorkState.SCHEDULED, dependencies=("JOB-1",),
+            ))
+            execution = self.execution_result()
+            execution.payload["results"][0] = {
+                "work_item_id": "JOB-1",
+                "outcome": "blocked",
+                "blocker_code": "jesse_execution_stopped",
+                "detail": "qty cannot be 0",
+            }
+            analysis = self.analysis_result()
+            dispatcher = SequenceDispatcher([execution, analysis])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            result = supervisor.run_round()
+
+            states = {
+                row["id"]: row["state"] for row in database.rows(
+                    "SELECT id,state FROM work_items"
+                )
+            }
+            failure = dispatcher.requests[1]["executions"][0]
+            run = database.rows(
+                "SELECT status,error_json FROM runs WHERE work_item_id='JOB-1'"
+            )[0]
+            self.assertEqual(result["status"], "batch_complete")
+            self.assertEqual(states["JOB-1"], "finished")
+            self.assertEqual(states["JOB-CHILD"], "archived")
+            self.assertEqual(run["status"], "stopped")
+            self.assertIn("qty cannot be 0", run["error_json"])
+            self.assertEqual(
+                failure["execution"]["failure"]["kind"],
+                "strategy_or_harness",
+            )
+            self.assertEqual(failure["evidence"], [])
+
+    def test_legacy_retry_limit_is_recovered_into_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            with database.connect() as connection:
+                connection.execute(
+                    """UPDATE work_items SET state='blocked',attempts=4,
+                       blocker_code='retry_limit_reached',
+                       blocker_detail=? WHERE id='JOB-1'""",
+                    ("jesse_execution_stopped after 5 attempts: qty cannot be 0",),
+                )
+                connection.execute(
+                    """UPDATE work_items SET state='blocked',
+                       blocker_code='missing_exit_framework',
+                       blocker_detail='strategy has no explicit exit'
+                       WHERE id='JOB-2'"""
+                )
+            analysis = DispatchResult(outcome="finished", payload={
+                "outcome": "finished",
+                "evaluations": [{
+                    "experiment_id": "EXP-1", "verdict": "reject",
+                    "finding": "Execution harness is not viable.",
+                    "next_action": "Discard this strategy chain.",
+                }, {
+                    "experiment_id": "EXP-2", "verdict": "revise",
+                    "finding": "One bounded exit implementation is viable.",
+                    "next_action": "Add one explicit exit framework.",
+                }],
+            })
+            dispatcher = SequenceDispatcher([analysis])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(
+                    analysis_cohort_max=8, synthesis_low_watermark=0,
+                ),
+            )
+
+            result = supervisor.run_round()
+
+            items = database.rows(
+                "SELECT id,state,blocker_code FROM work_items ORDER BY id"
+            )
+            evaluations = database.rows(
+                "SELECT experiment_id,verdict FROM evaluations ORDER BY experiment_id"
+            )
+            self.assertEqual(result["status"], "batch_complete")
+            self.assertTrue(all(row["state"] == "finished" for row in items))
+            self.assertTrue(all(row["blocker_code"] is None for row in items))
+            self.assertEqual(evaluations, [
+                {"experiment_id": "EXP-1", "verdict": "reject"},
+                {"experiment_id": "EXP-2", "verdict": "revise"},
+            ])
+            self.assertEqual(
+                dispatcher.requests[0]["executions"][0]["execution"]["failure"]["code"],
+                "jesse_execution_stopped",
+            )
+            self.assertEqual(
+                dispatcher.requests[0]["executions"][1]["execution"]["failure"]["code"],
+                "missing_exit_framework",
+            )
 
     def test_analysis_cohorts_are_balanced_four_to_eight_and_split_hpo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

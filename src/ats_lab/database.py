@@ -1556,25 +1556,83 @@ class WorkflowDatabase:
 
     def add_run(self, run: RunResult, source_path: str = "") -> None:
         with self.connect() as connection:
-            connection.execute(
-                """INSERT INTO runs(id, experiment_id, work_item_id, session_id, status, route_json,
-                   dashboard_url, metrics_json, raw_result_json, error_json, started_at, finished_at, source_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id,
-                   status=excluded.status,route_json=excluded.route_json,
-                   dashboard_url=excluded.dashboard_url,
-                   metrics_json=excluded.metrics_json,
-                   raw_result_json=excluded.raw_result_json, error_json=excluded.error_json,
-                   started_at=excluded.started_at,finished_at=excluded.finished_at,
-                   source_path=excluded.source_path""",
-                (run.id, run.experiment_id, run.work_item_id, run.session_id or None, run.status.value,
-                 json.dumps(_route_payload(run.route)) if run.route else None, run.dashboard_url,
-                 json.dumps(run.metrics) if run.metrics is not None else None,
-                 json.dumps(run.raw_result) if run.raw_result is not None else None,
-                 json.dumps(run.error) if run.error is not None else None,
-                 run.started_at, run.finished_at, source_path),
-            )
+            self._upsert_run(connection, run, source_path)
             self._refresh_run_evidence(connection, run.id)
+
+    @staticmethod
+    def _upsert_run(
+        connection: sqlite3.Connection,
+        run: RunResult,
+        source_path: str = "",
+    ) -> None:
+        connection.execute(
+            """INSERT INTO runs(id, experiment_id, work_item_id, session_id, status, route_json,
+               dashboard_url, metrics_json, raw_result_json, error_json, started_at, finished_at, source_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id,
+               status=excluded.status,route_json=excluded.route_json,
+               dashboard_url=excluded.dashboard_url,
+               metrics_json=excluded.metrics_json,
+               raw_result_json=excluded.raw_result_json, error_json=excluded.error_json,
+               started_at=excluded.started_at,finished_at=excluded.finished_at,
+               source_path=excluded.source_path""",
+            (
+                run.id, run.experiment_id, run.work_item_id,
+                run.session_id or None, run.status.value,
+                json.dumps(_route_payload(run.route)) if run.route else None,
+                run.dashboard_url,
+                json.dumps(run.metrics) if run.metrics is not None else None,
+                json.dumps(run.raw_result) if run.raw_result is not None else None,
+                json.dumps(run.error) if run.error is not None else None,
+                run.started_at, run.finished_at, source_path,
+            ),
+        )
+
+    def add_failure_run_awaiting_evaluation(
+        self,
+        run: RunResult,
+        *,
+        batch_id: str,
+        worker_id: str,
+    ) -> None:
+        """Persist terminal evidence and analysis transition atomically."""
+        if not run.work_item_id:
+            raise ValueError("failure run requires work_item_id")
+        now = utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state FROM work_items WHERE id=?", (run.work_item_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown work item: {run.work_item_id}")
+            if row["state"] not in {
+                WorkState.RUNNING.value, WorkState.BLOCKED.value,
+            }:
+                raise ValueError(
+                    f"cannot analyze execution failure from {row['state']}"
+                )
+            self._upsert_run(connection, run)
+            self._refresh_run_evidence(connection, run.id)
+            connection.execute(
+                """UPDATE work_items SET state='running',claimed_by=?,claimed_at=?,
+                   blocker_code='awaiting_batch_evaluation',blocker_detail=?,
+                   retry_after=NULL,updated_at=? WHERE id=?""",
+                (worker_id, now, batch_id, now, run.work_item_id),
+            )
+            connection.execute(
+                """INSERT INTO events(
+                       aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                   ) VALUES('work_item',?,'execution_failure_queued_for_analysis',?,?)""",
+                (
+                    run.work_item_id,
+                    json.dumps({
+                        "from": row["state"], "to": "running",
+                        "batch_id": batch_id, "run_id": run.id,
+                    }, sort_keys=True),
+                    now,
+                ),
+            )
 
     def add_evaluation(self, evaluation: Evaluation) -> None:
         from .research_memory import enqueue_learning
@@ -1706,19 +1764,61 @@ class WorkflowDatabase:
         """Return completed executions awaiting the isolated analysis turn."""
         query = """SELECT w.id AS work_item_id,w.experiment_id,w.blocker_detail AS batch_id,
                           e.specification_json AS experiment_json,
-                          r.id AS run_id,r.session_id,r.route_json,r.dashboard_url,
+                          r.id AS run_id,r.session_id,r.status AS run_status,
+                          r.route_json,r.dashboard_url,
                           r.metrics_json,r.error_json,r.started_at,r.finished_at
                    FROM work_items w
                    JOIN experiments e ON e.id=w.experiment_id
                    JOIN runs r ON r.work_item_id=w.id
                    WHERE w.state='running'
-                     AND w.blocker_code='awaiting_batch_evaluation'"""
+                     AND w.blocker_code='awaiting_batch_evaluation'
+                     AND r.id=(
+                         SELECT latest.id FROM runs latest
+                         WHERE latest.work_item_id=w.id
+                         ORDER BY COALESCE(latest.finished_at,'' ) DESC,
+                                  latest.rowid DESC LIMIT 1
+                     )"""
         parameters: tuple = ()
         if worker_id:
             query += " AND w.claimed_by=?"
             parameters = (worker_id,)
         query += " ORDER BY w.blocker_detail,w.priority,w.created_at,w.id"
         return self.rows(query, parameters)
+
+    def archive_scheduled_dependents(
+        self, work_item_id: str, *, reason: str,
+    ) -> int:
+        """Close obsolete children after parent execution cannot be evaluated."""
+        now = utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT child.id FROM work_items child
+                   JOIN json_each(child.dependencies_json) dependency
+                     ON dependency.value=?
+                   WHERE child.state='scheduled'""",
+                (work_item_id,),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    """UPDATE work_items SET state='archived',blocker_code=NULL,
+                       blocker_detail=NULL,updated_at=?
+                       WHERE id=? AND state='scheduled'""",
+                    (now, row["id"]),
+                )
+                connection.execute(
+                    """INSERT INTO events(
+                           aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                       ) VALUES('work_item',?,'dependent_archived',?,?)""",
+                    (
+                        row["id"],
+                        json.dumps({
+                            "dependency": work_item_id, "reason": reason,
+                        }, sort_keys=True),
+                        now,
+                    ),
+                )
+            return len(rows)
 
     def requeue_finished_evaluation(
         self,

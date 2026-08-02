@@ -10,10 +10,18 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from .analysis_input import ExecutionAnalysisInputBuilder
 from .batch_synthesis import apply_batch, build_batch_context
 from .contracts import evaluation_from_payload
 from .database import WorkflowDatabase
 from .evidence import NormalizedEvidence
+from .execution_disposition import (
+    INFRASTRUCTURE_FAILURE_CODES,
+    ExecutionDispositionPolicy,
+    ExecutionFailureRecorder,
+    ExecutionRoute,
+    TerminalFailureRecovery,
+)
 from .gates import GateDecision, evaluate_gates
 from .models import (
     Evaluation,
@@ -34,14 +42,7 @@ from .status import operator_status
 from .worker import DispatchResult, Dispatcher
 
 
-INFRASTRUCTURE_BLOCKERS = frozenset({
-    "executor_provider_failed", "executor_timeout", "executor_start_failed",
-    "executor_failed", "direct_mcp_error", "malformed_jesse_session",
-    "invalid_jesse_metrics", "jesse_execution_deferred",
-    "jesse_draft_not_started", "jesse_start_recovery_failed",
-    "jesse_zombie_recovery_pending", "jesse_zombie_recovery_required",
-    "memory_unavailable", "memory_delivery_failed", "memory_recall_failed",
-})
+INFRASTRUCTURE_BLOCKERS = INFRASTRUCTURE_FAILURE_CODES
 
 
 class BatchSupervisor:
@@ -59,6 +60,10 @@ class BatchSupervisor:
         sleep: Callable[[float], None] = time.sleep,
         preflight: Callable[[], dict[str, Any]] | None = None,
         memory_adapter: ResearchMemoryAdapter | None = None,
+        disposition_policy: ExecutionDispositionPolicy | None = None,
+        failure_recorder: ExecutionFailureRecorder | None = None,
+        analysis_input_builder: ExecutionAnalysisInputBuilder | None = None,
+        terminal_failure_recovery: TerminalFailureRecovery | None = None,
     ):
         self.database = database
         self.dispatcher = dispatcher
@@ -69,6 +74,19 @@ class BatchSupervisor:
         self.sleep = sleep
         self.preflight = preflight
         self.memory_adapter = memory_adapter
+        self.disposition_policy = (
+            disposition_policy or ExecutionDispositionPolicy()
+        )
+        self.failure_recorder = failure_recorder or ExecutionFailureRecorder(
+            database, worker_id,
+        )
+        self.analysis_input_builder = (
+            analysis_input_builder or ExecutionAnalysisInputBuilder()
+        )
+        self.terminal_failure_recovery = (
+            terminal_failure_recovery
+            or TerminalFailureRecovery(database, self.failure_recorder)
+        )
         self.started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self._recovered = False
 
@@ -133,6 +151,21 @@ class BatchSupervisor:
             self._recovered = True
         else:
             recovered = 0
+        recovery_batch = f"ANALYZE-FAILURES-{uuid.uuid4().hex[:12].upper()}"
+        recovered_failures = self.terminal_failure_recovery.recover(
+            batch_id=recovery_batch,
+            limit=self.resource_policy.analysis_cohort_max,
+        )
+        if recovered_failures:
+            pending_failures = [
+                row for row in self.database.pending_batch_evaluation(
+                    self.worker_id,
+                )
+                if row["batch_id"] == recovery_batch
+            ]
+            return self._analyze_pending(
+                pending_failures, recovered=recovered, promoted=0,
+            )
         self.database.refresh_synthesis_cohorts()
         promoted = self.database.promote_due_retries()
         promoted += self.database.promote_scheduled_runnable(
@@ -311,20 +344,34 @@ class BatchSupervisor:
                         item, "invalid_execution_result", str(error),
                     )
                     terminal.append({"work_item_id": item["id"], "state": "retry"})
-            elif outcome == "blocked":
-                self.database.transition_work_item(
-                    item["id"], WorkState.BLOCKED, allowed_from=(WorkState.RUNNING,),
-                    blocker_code=result.get("blocker_code") or "executor_blocked",
-                    blocker_detail=result.get("detail") or "executor blocked work",
-                )
-                terminal.append({"work_item_id": item["id"], "state": "blocked"})
             else:
-                self._retry_or_block(
-                    item, result.get("blocker_code") or "executor_retry",
-                    result.get("detail") or "executor requested retry",
-                    result.get("retry_after"),
-                )
-                terminal.append({"work_item_id": item["id"], "state": "retry"})
+                disposition = self.disposition_policy.classify(result)
+                if disposition.route is ExecutionRoute.ANALYSIS:
+                    self.failure_recorder.record(
+                        item, disposition, batch_id=batch_id,
+                    )
+                    awaiting.append(item["id"])
+                    terminal.append({
+                        "work_item_id": item["id"], "state": "analysis",
+                    })
+                elif disposition.route is ExecutionRoute.OPERATOR:
+                    self.database.transition_work_item(
+                        item["id"], WorkState.BLOCKED,
+                        allowed_from=(WorkState.RUNNING,),
+                        blocker_code=disposition.code,
+                        blocker_detail=disposition.detail,
+                    )
+                    terminal.append({
+                        "work_item_id": item["id"], "state": "operator",
+                    })
+                else:
+                    self._retry_or_block(
+                        item, disposition.code, disposition.detail,
+                        result.get("retry_after"),
+                    )
+                    terminal.append({
+                        "work_item_id": item["id"], "state": "retry",
+                    })
         if not awaiting:
             return {
                 "status": "batch_terminal", "batch_id": batch_id, "results": terminal,
@@ -810,9 +857,18 @@ class BatchSupervisor:
                 row for row in rows
                 if row["experiment_id"] == payload_item.get("experiment_id")
             )
-            normalized, gates = self._gated_evidence(run_row)
+            execution_failed = (
+                run_row.get("run_status") != RunStatus.FINISHED.value
+            )
+            if execution_failed:
+                normalized = self._normalized_evidence(run_row)
+                gates = None
+            else:
+                normalized, gates = self._gated_evidence(run_row)
             payload_item["metrics_summary"] = json.dumps(
-                [item.to_compact_dict() for item in normalized],
+                self.analysis_input_builder.metrics_summary(
+                    run_row, normalized,
+                ),
                 separators=(",", ":"), sort_keys=True,
             )
             missing = [
@@ -823,22 +879,39 @@ class BatchSupervisor:
                 raise ValueError(
                     "batch evaluation missing fields: " + ", ".join(missing)
                 )
-            lifecycle_verdict = self._deterministic_verdict(normalized)
-            if lifecycle_verdict is not None:
-                payload_item["verdict"] = lifecycle_verdict
-            elif gates.failed:
-                payload_item["verdict"] = Verdict.REJECT
             evaluation = evaluation_from_payload(payload_item)
+            lifecycle_verdict = self._deterministic_verdict(normalized)
+            if execution_failed:
+                self.analysis_input_builder.validate_failure_verdict(
+                    run_row, evaluation.verdict,
+                )
+            elif lifecycle_verdict is not None:
+                evaluation = replace(
+                    evaluation, verdict=lifecycle_verdict,
+                )
+            elif gates is not None and gates.failed:
+                evaluation = replace(
+                    evaluation, verdict=Verdict.REJECT,
+                )
             operation = self._operation(run_row)
-            if operation == "significance" and lifecycle_verdict is None:
+            if (
+                not execution_failed
+                and operation == "significance"
+                and lifecycle_verdict is None
+            ):
                 raise ValueError(
                     "significance batch evaluation requires normalized "
                     "significance_p_value"
                 )
-            validated.append((evaluation, operation, normalized))
+            validated.append((
+                evaluation, operation, normalized, execution_failed,
+                run_row["work_item_id"],
+            ))
 
         finalized = []
-        for evaluation, operation, normalized in validated:
+        for (
+            evaluation, operation, normalized, execution_failed, work_item_id,
+        ) in validated:
             persistence_started = time.perf_counter()
             item = self.database.finalize_batch_evaluation(evaluation)
             persistence_ms = (
@@ -849,6 +922,11 @@ class BatchSupervisor:
                 state="finished",
             )
             finalized.append(item["id"])
+            if execution_failed:
+                self.database.archive_scheduled_dependents(
+                    work_item_id,
+                    reason=f"parent_execution_{evaluation.verdict.value}",
+                )
             if (
                 evaluation.verdict is Verdict.HPO_CANDIDATE
                 and operation != "hpo"
@@ -858,7 +936,7 @@ class BatchSupervisor:
                     evaluation.experiment_id, item["id"],
                     objective_name="sharpe_ratio",
                 )
-            if operation == "significance":
+            if operation == "significance" and not execution_failed:
                 p_values = [
                     evidence.significance_p_value for evidence in normalized
                     if evidence.significance_p_value is not None
@@ -1220,12 +1298,12 @@ class BatchSupervisor:
         ], gates
 
     def _compact_execution(self, row: dict) -> dict[str, Any]:
-        evidence, _ = self._gated_evidence(row)
-        return {
-            "work_item_id": row["work_item_id"],
-            "experiment_id": row["experiment_id"],
-            "evidence": [item.to_compact_dict() for item in evidence],
-        }
+        evidence = (
+            self._gated_evidence(row)[0]
+            if row.get("run_status") == RunStatus.FINISHED.value
+            else self._normalized_evidence(row)
+        )
+        return self.analysis_input_builder.build(row, evidence)
 
     def _operation(self, row: dict) -> str:
         work = self.database.rows(

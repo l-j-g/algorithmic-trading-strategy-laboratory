@@ -110,6 +110,9 @@ claim jobs, change queue state, or become run evidence.
 - Timeout: retry as `executor_timeout`.
 - Invalid agent response: retry as `invalid_executor_result`.
 - Request larger than 1 MB: blocked as `request_too_large`.
+- Terminal strategy/harness execution: durable failed-run evidence, then
+  analysis decides `revise` or `reject`.
+- Active Jesse session: transient defer without charging strategy attempts.
 
 Supervisor owns final queue transitions for every result. Durable executions
 awaiting analysis remain resumable after analyzer failure.

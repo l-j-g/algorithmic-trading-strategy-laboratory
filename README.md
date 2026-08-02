@@ -504,7 +504,9 @@ scheduled -> ready -> running -> finished
                          |
                          +-> waiting_retry -> ready
                          |
-                         +-> blocked
+                         +-> failed run -> analysis -> finished
+                         |
+                         +-> blocked (operator requirement only)
 ```
 
 | State | Meaning |
@@ -513,7 +515,7 @@ scheduled -> ready -> running -> finished
 | `ready` | May be claimed by supervisor |
 | `running` | Claimed execution or completed run awaiting batch analysis |
 | `waiting_retry` | Transient failure with bounded backoff |
-| `blocked` | Permanent constraint or human decision required |
+| `blocked` | External constraint or explicit human decision required |
 | `finished` | Execution and evaluation durable |
 | `archived` | Terminal history, not future work |
 
@@ -568,8 +570,15 @@ Inspect:
 research/automation/ats_lab.sh queue
 ```
 
-Retries use exponential delay and stop at configured attempt limit. Repeated
-failure becomes `blocked` with `retry_limit_reached`.
+Transient infrastructure failures use bounded backoff without changing research
+quality. Terminal strategy or harness failures persist as failed-run evidence
+and pass directly to isolated analysis. Analysis returns `revise` for one
+bounded fix or parameter change, otherwise `reject`. Both finish the original
+work item; neither remains an active queue blocker.
+
+Legacy retry-limit and strategy/harness blocker rows are recovered into this
+analysis path in bounded cohorts. Do not manually requeue them for another
+identical execution.
 
 ### Blocked item
 

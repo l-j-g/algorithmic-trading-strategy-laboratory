@@ -601,11 +601,11 @@ class DirectMcpDispatcher:
                         "terminal_failure", error=detail,
                     )
                     return self._record_and_return(
-                        client, work_item_id, polls, "retry",
+                        client, work_item_id, polls, "blocked",
                         blocker_code=(
                             f"jesse_execution_{classification.public_status}"
                         ),
-                        detail=detail, attempt_charged=True,
+                        detail=detail,
                     )
                 if classification.state == "malformed_session":
                     return self._record_and_return(
