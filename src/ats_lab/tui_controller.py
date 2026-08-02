@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import curses
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from .database import WorkflowDatabase
+from .loop_control import LoopControl, SupervisorLoopControl
 from .tui_renderer import ScreenRenderer, TuiRenderer
 from .tui_repository import TuiDataSource, TuiRepository
-from .tui_types import Action, CONTROL_TARGETS, TuiState, View
+from .tui_types import Action, TuiState, View
 
 
 def row_count(model: dict[str, Any], view: View) -> int:
@@ -65,7 +67,7 @@ def handle_key(state: TuiState, key: int, available_rows: int) -> Action | None:
         return Action.PAUSE
     elif key == ord("r"):
         state.confirm_stop = False
-        return Action.RESUME
+        return Action.START
     elif key == ord("s"):
         if state.confirm_stop:
             state.confirm_stop = False
@@ -87,6 +89,8 @@ class TuiController:
         interval: float = 1.0,
         repository: TuiDataSource | None = None,
         renderer: ScreenRenderer | None = None,
+        loop_control: LoopControl | None = None,
+        repo: Path | None = None,
     ) -> None:
         if interval <= 0:
             raise ValueError("TUI interval must be positive")
@@ -94,6 +98,9 @@ class TuiController:
         self.interval = interval
         self.repository = repository or TuiRepository(database)
         self.renderer = renderer or TuiRenderer()
+        self.loop_control = loop_control or SupervisorLoopControl(
+            database, repo or database.path.parent,
+        )
         self.state = TuiState()
 
     def run(self, screen: Any) -> int:
@@ -129,21 +136,35 @@ class TuiController:
             )
             if action is Action.QUIT:
                 return 0
-            if action in CONTROL_TARGETS:
-                desired = CONTROL_TARGETS[action]
-                self.database.set_control_state(
-                    desired, updated_by=f"tui:{action.value}",
-                )
-                self.state.message = f"Control set to {desired}"
-                model = None
-            elif key not in (-1, ord("s")):
+            try:
+                if action is Action.START:
+                    result = self.loop_control.start()
+                    self.state.message = (
+                        f"LOOP {result.state}  pid={result.process_id or '—'}  "
+                        f"repaired_retries={result.repaired_retry_schedules}"
+                    )
+                    model = None
+                elif action is Action.PAUSE:
+                    result = self.loop_control.pause()
+                    self.state.message = f"LOOP {result.state}"
+                    model = None
+                elif action is Action.STOP:
+                    self.loop_control.stop()
+                    self.state.message = "LOOP graceful stop requested"
+                    model = None
+            except Exception as error:
+                self.state.message = f"LOOP ERROR {type(error).__name__}"
+            if key not in (-1, ord("s")):
                 self.state.confirm_stop = False
 
 
 def run_tui(
     database: WorkflowDatabase,
     *,
+    repo: Path | None = None,
     interval: float = 1.0,
     wrapper: Callable[[Callable[[Any], int]], int] = curses.wrapper,
 ) -> int:
-    return wrapper(TuiController(database, interval=interval).run)
+    return wrapper(TuiController(
+        database, repo=repo, interval=interval,
+    ).run)

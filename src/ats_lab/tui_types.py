@@ -65,8 +65,8 @@ class ColumnMode(IntEnum):
 
 class Action(StrEnum):
     QUIT = "quit"
+    START = "start"
     PAUSE = "pause"
-    RESUME = "resume"
     STOP = "stop"
 
 
@@ -75,12 +75,6 @@ class ControlState(StrEnum):
     PAUSED = "paused"
     STOP_REQUESTED = "stop_requested"
 
-
-CONTROL_TARGETS = {
-    Action.PAUSE: ControlState.PAUSED,
-    Action.RESUME: ControlState.RUNNING,
-    Action.STOP: ControlState.STOP_REQUESTED,
-}
 
 QUEUE_STATE_ORDER = (
     WorkState.RUNNING,
@@ -127,27 +121,3 @@ class TuiState:
 class TuiLine:
     text: str
     role: Role = Role.NORMAL
-
-
-@dataclass(frozen=True)
-class ColumnSpec:
-    key: str
-    label: str
-    width: int
-    minimum_mode: ColumnMode = ColumnMode.COMPACT
-
-
-ORG_COLUMNS = (
-    ColumnSpec("item", "ITEM", 31),
-    ColumnSpec("state", "STATE", 15),
-    ColumnSpec("priority", "PRI", 4),
-    ColumnSpec("experiment_type", "TYPE", 14, ColumnMode.STANDARD),
-    ColumnSpec("strategy", "STRATEGY", 25),
-    ColumnSpec("symbol", "SYMBOL", 11, ColumnMode.WIDE),
-    ColumnSpec("timeframe", "TF", 5, ColumnMode.WIDE),
-    ColumnSpec("verdict", "VERDICT", 22, ColumnMode.STANDARD),
-    ColumnSpec("net_profit_percentage", "NET%", 9, ColumnMode.WIDE),
-    ColumnSpec("sharpe_ratio", "SHARPE", 8, ColumnMode.WIDE),
-    ColumnSpec("trade_count", "TRADES", 7, ColumnMode.WIDE),
-    ColumnSpec("next", "NEXT / BLOCKER", 38),
-)

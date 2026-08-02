@@ -19,6 +19,7 @@ from .direct_mcp_executor import (
 from .dashboard import serve as serve_dashboard
 from .inventory import build_inventory, render_markdown as render_inventory
 from .legacy_import import LegacyImporter
+from .loop_control import SupervisorLoopControl
 from .contracts import evaluation_from_payload, experiment_from_payload, load_json, work_item_from_payload
 from .console import (
     distinct_candidate_evidence,
@@ -247,6 +248,17 @@ def main() -> int:
         "tui", help="Open full-screen color operator UI with keyboard navigation."
     )
     tui.add_argument("--interval", type=float, default=1.0)
+    loop = sub.add_parser(
+        "loop", help="Start, pause, stop, or inspect the supervisor process."
+    )
+    loop_sub = loop.add_subparsers(dest="loop_command", required=True)
+    loop_start = loop_sub.add_parser("start", help="Start or resume the research loop.")
+    loop_start.add_argument("--idle-sleep", type=float, default=30.0)
+    loop_start.add_argument("--retry-delay", type=float, default=60.0)
+    loop_start.add_argument("--format", choices=("table", "json"), default="table")
+    for name in ("status", "pause", "stop"):
+        command = loop_sub.add_parser(name)
+        command.add_argument("--format", choices=("table", "json"), default="table")
     control = sub.add_parser("control", help="Pause, resume, or gracefully stop supervisor.")
     control.add_argument("action", choices=("status", "pause", "resume", "stop"))
     control.add_argument("--format", choices=("table", "json"), default="table")
@@ -458,7 +470,7 @@ def main() -> int:
         "hpo", "hpo-detail", "timings", "analyzer",
         "requeue-hpo-analysis", "configure-hpo-validation-routes",
         "memory-status", "memory-sync", "memory", "memory-backfill",
-        "home", "next", "doctor", "preflight", "recovery-audit", "tui",
+        "home", "next", "doctor", "preflight", "recovery-audit", "tui", "loop",
     } and repo == Path.cwd().resolve():
         repo = discover_lab_repo(
             repo, fallback=Path(__file__).resolve().parents[2],
@@ -639,9 +651,39 @@ def main() -> int:
             parser.error("tui requires an interactive terminal; use ats-lab monitor")
         database.initialize()
         try:
-            return run_tui(database, interval=args.interval)
+            return run_tui(database, repo=repo, interval=args.interval)
         except KeyboardInterrupt:
             return 130
+    elif args.command == "loop":
+        database.initialize()
+        idle_sleep = getattr(args, "idle_sleep", 30.0)
+        retry_delay = getattr(args, "retry_delay", 60.0)
+        if idle_sleep < 0 or retry_delay < 0:
+            parser.error("loop sleep values must be non-negative")
+        lifecycle = SupervisorLoopControl(
+            database, repo,
+            idle_sleep=idle_sleep,
+            retry_delay=retry_delay,
+        )
+        result = {
+            "start": lifecycle.start,
+            "status": lifecycle.status,
+            "pause": lifecycle.pause,
+            "stop": lifecycle.stop,
+        }[args.loop_command]().to_dict()
+        if args.format == "json":
+            emit(result)
+        else:
+            print(
+                f"LOOP {str(result['state']).upper()}  "
+                f"pid={result['process_id'] or '—'}  "
+                f"phase={result['phase']}  control={result['control']}"
+            )
+            if result["repaired_retry_schedules"]:
+                print(
+                    "REPAIRED retry_schedules="
+                    f"{result['repaired_retry_schedules']}"
+                )
     elif args.command == "control":
         database.initialize()
         if args.action == "status":

@@ -29,6 +29,7 @@ from .research_memory import (
     compact_advisory_memory,
     sync_memory_outbox,
 )
+from .retry_schedule import resolve_retry_after
 from .status import operator_status
 from .worker import DispatchResult, Dispatcher
 
@@ -1154,10 +1155,9 @@ class BatchSupervisor:
         self, item: dict, code: str, detail: str, retry_after: str | None = None,
     ) -> None:
         if code in INFRASTRUCTURE_BLOCKERS:
-            when = retry_after or (
-                datetime.now(timezone.utc)
-                + timedelta(seconds=self.retry_delay_seconds)
-            ).isoformat().replace("+00:00", "Z")
+            when = resolve_retry_after(
+                retry_after, default_seconds=self.retry_delay_seconds,
+            )
             self.database.defer_infrastructure_retry(
                 item["id"], blocker_code=code,
                 blocker_detail=detail, retry_after=when,
@@ -1172,9 +1172,7 @@ class BatchSupervisor:
             )
             return
         delay = self.retry_delay_seconds * (2 ** max(0, next_attempt - 1))
-        when = retry_after or (
-            datetime.now(timezone.utc) + timedelta(seconds=delay)
-        ).isoformat().replace("+00:00", "Z")
+        when = resolve_retry_after(retry_after, default_seconds=delay)
         self.database.transition_work_item(
             item["id"], WorkState.WAITING_RETRY, allowed_from=(WorkState.RUNNING,),
             blocker_code=code, blocker_detail=detail, retry_after=when,
@@ -1376,6 +1374,7 @@ class BatchSupervisor:
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         rounds = 0
+        self.database.repair_relative_retry_schedules()
         self._runtime("starting")
         while True:
             result = self.run_round()

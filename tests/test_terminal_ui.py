@@ -19,6 +19,7 @@ from ats_lab.terminal_ui import (
     handle_key,
     render_tui,
 )
+from ats_lab.loop_control import LoopStatus
 
 
 class TerminalUiTests(unittest.TestCase):
@@ -61,7 +62,7 @@ class TerminalUiTests(unittest.TestCase):
         self.assertTrue(all(len(line.text) <= 42 for line in narrow))
         column_text = "\n".join(line.text for line in columns)
         self.assertIn("* READY (1)", column_text)
-        self.assertIn("NET%", column_text)
+        self.assertIn("NET %", column_text)
         self.assertIn("SHARPE", column_text)
         self.assertIn("JOB-1", column_text)
 
@@ -85,7 +86,7 @@ class TerminalUiTests(unittest.TestCase):
         self.assertTrue(state.confirm_stop)
         self.assertIs(handle_key(state, ord("s"), 3), Action.STOP)
         self.assertIs(handle_key(state, ord("p"), 3), Action.PAUSE)
-        self.assertIs(handle_key(state, ord("r"), 3), Action.RESUME)
+        self.assertIs(handle_key(state, ord("r"), 3), Action.START)
         self.assertIs(handle_key(state, ord("q"), 3), Action.QUIT)
 
     def test_controller_depends_on_replaceable_repository_and_renderer(self) -> None:
@@ -113,7 +114,7 @@ class TerminalUiTests(unittest.TestCase):
 
             class FakeScreen:
                 drawn = []
-                keys = [ord("p"), ord("q")]
+                keys = [ord("r"), ord("p"), ord("s"), ord("s"), ord("q")]
 
                 def keypad(self, value):
                     return None
@@ -127,18 +128,39 @@ class TerminalUiTests(unittest.TestCase):
                 def getch(self):
                     return self.keys.pop(0)
 
+            class FakeLoopControl:
+                calls = []
+
+                def start(self):
+                    self.calls.append("start")
+                    return LoopStatus("started", 123, "starting", "running")
+
+                def pause(self):
+                    self.calls.append("pause")
+                    return LoopStatus("paused", 123, "idle", "paused")
+
+                def stop(self):
+                    self.calls.append("stop")
+                    return LoopStatus(
+                        "stop_requested", 123, "idle", "stop_requested",
+                    )
+
+                def status(self):
+                    return LoopStatus("running", 123, "idle", "running")
+
+            lifecycle = FakeLoopControl()
             controller = TuiController(
                 database, repository=FakeRepository(), renderer=FakeRenderer(),
+                loop_control=lifecycle,
             )
             screen = FakeScreen()
 
             result = controller.run(screen)
 
-            control = database.control_status()["desired_state"]
 
         self.assertEqual(result, 0)
         self.assertEqual(screen.drawn, [TuiLine("fake")])
-        self.assertEqual(control, "paused")
+        self.assertEqual(lifecycle.calls, ["start", "pause", "stop"])
 
 
 if __name__ == "__main__":

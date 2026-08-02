@@ -26,6 +26,7 @@ from .models import (
     WorkState,
     utc_now,
 )
+from .retry_schedule import resolve_retry_after
 
 
 _EVIDENCE_COLUMNS = tuple(NormalizedEvidence.__dataclass_fields__)
@@ -1927,6 +1928,39 @@ class WorkflowDatabase:
                 (now, now),
             )
             return cursor.rowcount
+
+    def repair_relative_retry_schedules(self) -> int:
+        """Convert legacy HTTP Retry-After seconds into comparable timestamps."""
+        now = utc_now()
+        repaired = 0
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT id,retry_after FROM work_items
+                   WHERE state='waiting_retry' AND retry_after IS NOT NULL"""
+            ).fetchall()
+            for row in rows:
+                value = str(row["retry_after"]).strip()
+                try:
+                    float(value)
+                except ValueError:
+                    continue
+                normalized = resolve_retry_after(
+                    value, default_seconds=0,
+                )
+                connection.execute(
+                    """UPDATE work_items SET retry_after=?,updated_at=?
+                       WHERE id=? AND state='waiting_retry'""",
+                    (normalized, now, row["id"]),
+                )
+                connection.execute(
+                    """INSERT INTO events(
+                           aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                       ) VALUES('work_item',?,'retry_schedule_normalized','{}',?)""",
+                    (row["id"], now),
+                )
+                repaired += 1
+        return repaired
 
     def defer_infrastructure_retry(
         self, work_item_id: str, *, blocker_code: str,

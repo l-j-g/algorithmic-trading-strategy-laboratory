@@ -4,11 +4,18 @@ from __future__ import annotations
 import curses
 from typing import Any, Protocol
 
+from .terminal_table import FittedTable
+from .tui_tables import (
+    ACTIVE_COLUMNS,
+    CANDIDATE_COLUMNS,
+    HPO_COLUMNS,
+    MEMORY_COLUMNS,
+    ORG_COLUMNS,
+    QUEUE_COLUMNS,
+)
 from .tui_types import (
     ColumnMode,
-    ColumnSpec,
     MEMORY_STATE_ROLES,
-    ORG_COLUMNS,
     Role,
     STATE_ROLES,
     TuiLine,
@@ -34,6 +41,14 @@ def _clip(value: object, width: int) -> str:
     if width <= 0:
         return ""
     return text if len(text) <= width else text[: max(1, width - 1)] + "…"
+
+
+def _clip_line(value: object, width: int) -> str:
+    """Clip a composed screen line without destroying column padding."""
+    text = str(value)
+    if width <= 0:
+        return ""
+    return text if len(text) <= width else text[:max(1, width - 1)] + "…"
 
 
 def _columns(values: list[tuple[object, int]], width: int) -> str:
@@ -72,11 +87,16 @@ def _header(model: dict[str, Any], state: TuiState, width: int) -> list[TuiLine]
     snapshot = model["snapshot"]
     runtime = snapshot.get("supervisor") or {}
     control = snapshot.get("control") or {}
-    health = "HEALTHY" if snapshot.get("healthy") else "ATTENTION"
-    role = Role.HEALTHY if snapshot.get("healthy") else Role.ERROR
+    progress = str(snapshot.get("progress_state") or "healthy").upper()
+    role = {
+        "RUNNING": Role.RUNNING,
+        "READY": Role.READY,
+        "STALLED": Role.ERROR,
+        "WAITING": Role.WARNING,
+    }.get(progress, Role.HEALTHY if snapshot.get("healthy") else Role.ERROR)
     title = _columns([
         ("ATS LAB", 10),
-        (health, 12),
+        (progress, 12),
         (f"supervisor:{runtime.get('phase') or 'not_reported'}", 24),
         (f"control:{control.get('desired_state') or 'running'}", 22),
         (snapshot.get("checked_at"), max(0, width - 71)),
@@ -86,7 +106,12 @@ def _header(model: dict[str, Any], state: TuiState, width: int) -> list[TuiLine]
         else f" {view.value + 1} {view.label} "
         for view in View
     )
-    return [TuiLine(title, role), TuiLine(_clip(tabs, width), Role.TABS)]
+    controls = "[R START LOOP]  [P PAUSE]  [S,S STOP LOOP]  [Q CLOSE UI]"
+    return [
+        TuiLine(title, role),
+        TuiLine(_clip_line(tabs, width), Role.TABS),
+        TuiLine(_clip_line(controls, width), Role.COMMAND),
+    ]
 
 
 def _overview(
@@ -117,12 +142,14 @@ def _overview(
         TuiLine(f"RUN   {guidance['command']}", Role.COMMAND),
         TuiLine(""),
         TuiLine("ACTIVE WORK", Role.SECTION),
+        TuiLine(FittedTable(ACTIVE_COLUMNS, width).render_header(), Role.TABLE_HEADER),
     ]
+    active_table = FittedTable(ACTIVE_COLUMNS, width)
     for row in (snapshot.get("active_items") or [])[:max(1, height - len(lines) - 2)]:
-        lines.append(TuiLine(_columns([
-            (row.get("state"), 15), (row.get("priority"), 5),
-            (row.get("strategy"), 28), (row.get("id"), max(20, width - 50)),
-        ], width), STATE_ROLES.get(str(row.get("state")), Role.NORMAL)))
+        lines.append(TuiLine(
+            active_table.render_row(row),
+            STATE_ROLES.get(str(row.get("state")), Role.NORMAL),
+        ))
     if not snapshot.get("active_items"):
         lines.append(TuiLine("No active work.", Role.MUTED))
     return lines
@@ -133,22 +160,16 @@ def _queue(model: dict[str, Any], state: TuiState, width: int, height: int) -> l
     detail_height = 5 if state.show_detail and rows else 0
     available = max(1, height - 3 - detail_height)
     visible, selected = _selected_window(rows, state, available)
+    table = FittedTable(QUEUE_COLUMNS, width)
     lines = [
         TuiLine(f"QUEUE  {len(rows)} unresolved jobs", Role.SECTION),
-        TuiLine(_columns([
-            ("STATE", 15), ("PRI", 5), ("STRATEGY", 28),
-            ("JOB", max(18, width - 75)), ("TRIES", 6), ("BLOCKER", 22),
-        ], width), Role.TABLE_HEADER),
+        TuiLine(table.render_header(), Role.TABLE_HEADER),
     ]
     for index, row in visible:
         role = Role.SELECTED if index == selected else STATE_ROLES.get(
             str(row.get("state")), Role.NORMAL,
         )
-        lines.append(TuiLine(_columns([
-            (row.get("state"), 15), (row.get("priority"), 5),
-            (row.get("strategy"), 28), (row.get("id"), max(18, width - 75)),
-            (row.get("attempts"), 6), (row.get("blocker_code"), 22),
-        ], width), role))
+        lines.append(TuiLine(table.render_row(row), role))
     if not rows:
         lines.append(TuiLine("No unresolved queue items.", Role.MUTED))
     if detail_height and rows:
@@ -170,23 +191,16 @@ def _queue(model: dict[str, Any], state: TuiState, width: int, height: int) -> l
 def _candidates(model: dict[str, Any], state: TuiState, width: int, height: int) -> list[TuiLine]:
     rows = model["candidates"]
     visible, selected = _selected_window(rows, state, max(1, height - 2))
+    table = FittedTable(CANDIDATE_COLUMNS, width)
     lines = [
         TuiLine(f"CANDIDATES  {len(rows)}", Role.SECTION),
-        TuiLine(_columns([
-            ("VERDICT", 23), ("STRATEGY", 27), ("STAGE", 14),
-            ("NET %", 9), ("DD %", 9), ("SHARPE", 9),
-            ("EXPERIMENT", max(18, width - 97)),
-        ], width), Role.TABLE_HEADER),
+        TuiLine(table.render_header(), Role.TABLE_HEADER),
     ]
     for index, row in visible:
-        lines.append(TuiLine(_columns([
-            (row.get("verdict"), 23), (row.get("strategy"), 27),
-            (row.get("lifecycle_stage"), 14),
-            (row.get("net_profit_percentage"), 9),
-            (row.get("max_drawdown_percentage"), 9),
-            (row.get("sharpe_ratio"), 9),
-            (row.get("experiment_id"), max(18, width - 97)),
-        ], width), Role.SELECTED if index == selected else Role.CANDIDATE))
+        lines.append(TuiLine(
+            table.render_row(row),
+            Role.SELECTED if index == selected else Role.CANDIDATE,
+        ))
     if not rows:
         lines.append(TuiLine("No promotion or revision candidates.", Role.MUTED))
     return lines
@@ -195,21 +209,16 @@ def _candidates(model: dict[str, Any], state: TuiState, width: int, height: int)
 def _hpo(model: dict[str, Any], state: TuiState, width: int, height: int) -> list[TuiLine]:
     rows = model["hpo"]
     visible, selected = _selected_window(rows, state, max(1, height - 2))
+    table = FittedTable(HPO_COLUMNS, width)
     lines = [
         TuiLine(f"HPO LIFECYCLE  {len(rows)} studies", Role.SECTION),
-        TuiLine(_columns([
-            ("STATE", 23), ("STRATEGY", 27), ("DONE", 7),
-            ("TRIALS", 8), ("SELECT", 8), ("STUDY", 26),
-            ("NEXT", max(18, width - 105)),
-        ], width), Role.TABLE_HEADER),
+        TuiLine(table.render_header(), Role.TABLE_HEADER),
     ]
     for index, row in visible:
-        lines.append(TuiLine(_columns([
-            (row.get("lifecycle_state"), 23), (row.get("strategy"), 27),
-            (row.get("completed_trial_count"), 7), (row.get("trial_count"), 8),
-            (row.get("selected_trial_count"), 8), (row.get("study_id"), 26),
-            (row.get("next_action"), max(18, width - 105)),
-        ], width), Role.SELECTED if index == selected else Role.HPO))
+        lines.append(TuiLine(
+            table.render_row(row),
+            Role.SELECTED if index == selected else Role.HPO,
+        ))
     if not rows:
         lines.append(TuiLine("No HPO studies.", Role.MUTED))
     return lines
@@ -220,6 +229,7 @@ def _memory(model: dict[str, Any], state: TuiState, width: int, height: int) -> 
     rows = model["memories"]
     visible, selected = _selected_window(rows, state, max(1, height - 4))
     ready = not counts.get("pending") and not counts.get("retry")
+    table = FittedTable(MEMORY_COLUMNS, width)
     lines = [
         TuiLine("RESEARCH MEMORY", Role.SECTION),
         TuiLine(
@@ -227,84 +237,13 @@ def _memory(model: dict[str, Any], state: TuiState, width: int, height: int) -> 
             f"pending={counts.get('pending', 0)}  retry={counts.get('retry', 0)}",
             Role.HEALTHY if ready else Role.WARNING,
         ),
-        TuiLine(_columns([
-            ("STATE", 12), ("STRATEGY", 28), ("STAGE", 16),
-            ("VERDICT", 23), ("TRIES", 7), ("CREATED", max(20, width - 91)),
-        ], width), Role.TABLE_HEADER),
+        TuiLine(table.render_header(), Role.TABLE_HEADER),
     ]
     for index, row in visible:
-        lines.append(TuiLine(_columns([
-            (row.get("state"), 12), (row.get("strategy"), 28),
-            (row.get("lifecycle_stage"), 16), (row.get("verdict"), 23),
-            (row.get("attempts"), 7), (row.get("created_at"), max(20, width - 91)),
-        ], width), Role.SELECTED if index == selected else MEMORY_STATE_ROLES.get(
+        lines.append(TuiLine(table.render_row(row), Role.SELECTED if index == selected else MEMORY_STATE_ROLES.get(
             str(row.get("state")), Role.NORMAL,
         )))
     return lines
-
-
-_REQUIRED_ORG_COLUMNS = {"item", "state", "strategy", "next"}
-_ORG_COLUMN_DROP_ORDER = (
-    "experiment_type",
-    "symbol",
-    "timeframe",
-    "trade_count",
-    "verdict",
-    "priority",
-    "net_profit_percentage",
-    "sharpe_ratio",
-)
-_ORG_COLUMN_MINIMUM_WIDTHS = {
-    "item": 16,
-    "state": 11,
-    "strategy": 16,
-    "next": 14,
-}
-
-
-def _fit_org_columns(
-    mode: ColumnMode, width: int,
-) -> tuple[ColumnSpec, ...]:
-    specs = [spec for spec in ORG_COLUMNS if spec.minimum_mode <= mode]
-
-    def total() -> int:
-        return sum(spec.width for spec in specs) + max(0, len(specs) - 1)
-
-    if total() > width:
-        over = total() - width
-        adjusted: list[ColumnSpec] = []
-        for spec in specs:
-            minimum = _ORG_COLUMN_MINIMUM_WIDTHS.get(spec.key, spec.width)
-            reduction = min(over, max(0, spec.width - minimum))
-            adjusted.append(ColumnSpec(
-                spec.key, spec.label, spec.width - reduction, spec.minimum_mode,
-            ))
-            over -= reduction
-        specs = adjusted
-    for key in _ORG_COLUMN_DROP_ORDER:
-        if total() <= width:
-            break
-        specs = [spec for spec in specs if spec.key != key]
-    while total() > width:
-        removable = next(
-            (spec for spec in reversed(specs)
-             if spec.key not in _REQUIRED_ORG_COLUMNS),
-            None,
-        )
-        if removable is None:
-            break
-        specs.remove(removable)
-    return tuple(specs)
-
-
-def _org_row(
-    row: dict[str, Any], specs: tuple[ColumnSpec, ...], width: int,
-    *, header: bool = False,
-) -> str:
-    return _columns([
-        (spec.label if header else row.get(spec.key), spec.width)
-        for spec in specs
-    ], width)
 
 
 def _columns_view(
@@ -323,14 +262,18 @@ def _columns_view(
         if fitted_capacity >= row_capacity:
             break
         row_capacity = fitted_capacity
-    specs = _fit_org_columns(state.column_mode, width)
+    columns = tuple(
+        item.column for item in ORG_COLUMNS
+        if item.minimum_mode <= state.column_mode
+    )
+    table = FittedTable(columns, width)
     lines = [
         TuiLine(
             f"ORG COLUMNS  profile={state.column_mode.label}  "
             "press c to cycle",
             Role.SECTION,
         ),
-        TuiLine(_org_row({}, specs, width, header=True), Role.TABLE_HEADER),
+        TuiLine(table.render_header(), Role.TABLE_HEADER),
     ]
     counts: dict[str, int] = {}
     for row in rows:
@@ -348,7 +291,7 @@ def _columns_view(
         item = dict(row)
         item["item"] = "  " + str(item.get("item") or "")
         lines.append(TuiLine(
-            _org_row(item, specs, width),
+            table.render_row(item),
             Role.SELECTED if index == selected else STATE_ROLES.get(
                 row_state, Role.NORMAL,
             ),
@@ -383,20 +326,21 @@ class TuiRenderer:
         if state.show_help:
             help_lines = [
                 "KEYS", "1-6 / ←→ views    ↑↓ select    PgUp/PgDn scroll",
-                "Enter/d details    p pause    r resume    s,s stop",
+                "Enter/d details    r start loop    p pause    s,s stop loop",
                 "c column profile    g top    G bottom    ? help    q quit",
             ]
             lines = lines[:2] + [TuiLine(item, Role.HELP) for item in help_lines]
         footer = state.message or (
-            "1-6 views  ↑↓ select  c columns  Enter detail  p pause  "
-            "r resume  s stop  ? help  q quit"
+            "R start loop  P pause  S,S stop loop  1-6 views  c columns  "
+            "? help  Q close UI"
         )
         lines = lines[:max(0, height - 1)]
         while len(lines) < height - 1:
             lines.append(TuiLine(""))
-        lines.append(TuiLine(_clip(footer, width), Role.FOOTER))
+        lines.append(TuiLine(_clip_line(footer, width), Role.FOOTER))
         return [
-            TuiLine(_clip(line.text, width), line.role) for line in lines[:height]
+            TuiLine(_clip_line(line.text, width), line.role)
+            for line in lines[:height]
         ]
 
     @staticmethod

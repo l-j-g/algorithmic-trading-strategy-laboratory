@@ -124,7 +124,9 @@ def render_monitor(snapshot: dict) -> str:
     recent_timing = next(iter(hpo.get("recent_timings", [])), None)
     cohort = synthesis.get("latest_cohort")
     states = snapshot["work_states"]
-    health = "HEALTHY" if snapshot["healthy"] else "ATTENTION"
+    health = str(snapshot.get("progress_state") or (
+        "healthy" if snapshot["healthy"] else "attention"
+    )).upper()
     lines = [
         f"ATS LAB  {snapshot['checked_at']}",
         (

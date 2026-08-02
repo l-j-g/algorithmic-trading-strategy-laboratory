@@ -108,13 +108,23 @@ def operator_status(
         (cutoff,),
     )[0]
     stale_claims = int(stale["count"])
+    retry_rows = database.rows(
+        """SELECT retry_after FROM work_items
+           WHERE state='waiting_retry' AND retry_after IS NOT NULL"""
+    )
+    invalid_retry_schedules = sum(
+        1 for row in retry_rows
+        if str(row["retry_after"]).strip().replace(".", "", 1).isdigit()
+    )
     latest_event = database.rows("SELECT MAX(occurred_at) AS at FROM events")[0]["at"]
     synthesis = database.synthesis_status()
     hpo = hpo_lifecycle_snapshot(database)
     ready = int(states.get("ready", 0))
     running = int(states.get("running", 0))
     scheduled = int(states.get("scheduled", 0))
-    if stale_claims:
+    if invalid_retry_schedules:
+        next_action = "repair_retry_schedules"
+    elif stale_claims:
         next_action = "recover_or_inspect_running_claim"
     elif awaiting:
         next_action = "resume_batch_analysis"
@@ -128,8 +138,17 @@ def operator_status(
         next_action = "synthesize_cohort"
     else:
         next_action = "idle"
+    progress_state = (
+        "stalled" if stale_claims or invalid_retry_schedules
+        else "running" if running_claims
+        else "ready" if ready
+        else "waiting" if scheduled or states.get("waiting_retry", 0)
+        else "idle"
+    )
     return {
-        "healthy": not bool(stale_claims),
+        "healthy": not bool(stale_claims or invalid_retry_schedules),
+        "progress_state": progress_state,
+        "invalid_retry_schedules": invalid_retry_schedules,
         "checked_at": now.isoformat().replace("+00:00", "Z"),
         "database": str(database.path),
         "work_states": states,

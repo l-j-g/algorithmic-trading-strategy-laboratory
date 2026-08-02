@@ -5,19 +5,20 @@ from .tui_repository import TuiDataSource, TuiRepository, build_tui_model
 from .tui_types import (
     Action,
     ColumnMode,
-    ColumnSpec,
     ControlState,
     Role,
     TuiLine,
     TuiState,
     View,
 )
+from .terminal_table import Alignment, FittedTable, TableColumn
 
 __all__ = [
     "Action",
+    "Alignment",
     "ColumnMode",
-    "ColumnSpec",
     "ControlState",
+    "FittedTable",
     "Role",
     "ScreenRenderer",
     "TuiController",
@@ -26,6 +27,7 @@ __all__ = [
     "TuiRenderer",
     "TuiRepository",
     "TuiState",
+    "TableColumn",
     "View",
     "build_tui_model",
     "handle_key",

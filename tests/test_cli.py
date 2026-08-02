@@ -167,6 +167,21 @@ class CliEvidenceTests(unittest.TestCase):
         self.assertIn("ats-lab monitor --watch", text)
         self.assertIn("Use ats-lab <command> --help", text)
 
+    def test_loop_status_is_human_readable(self) -> None:
+        status = type("Status", (), {
+            "to_dict": lambda self: {
+                "state": "running", "process_id": 123,
+                "phase": "idle", "control": "running",
+                "repaired_retry_schedules": 0,
+            },
+        })()
+        with patch("ats_lab.cli.SupervisorLoopControl") as lifecycle:
+            lifecycle.return_value.status.return_value = status
+            output = self.invoke("loop", "status")
+
+        self.assertIn("LOOP RUNNING", output)
+        self.assertIn("pid=123", output)
+
     def test_candidates_deduplicate_atomic_evidence_by_experiment(self) -> None:
         human = self.invoke("candidates")
         payload = json.loads(self.invoke("candidates", "--format", "json"))

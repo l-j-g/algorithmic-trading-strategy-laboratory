@@ -252,7 +252,15 @@ research/automation/ats_lab.sh supervisor
 Continuous operation:
 
 ```bash
-research/automation/ats_lab.sh supervisor --continuous
+ats-lab loop start
+```
+
+Inspect, pause, or stop it from any directory:
+
+```bash
+ats-lab loop status
+ats-lab loop pause
+ats-lab loop stop
 ```
 
 Bounded continuous run:
@@ -266,17 +274,16 @@ research/automation/ats_lab.sh supervisor \
 Prefer graceful CLI stop:
 
 ```bash
-research/automation/ats_lab.sh control stop
+ats-lab loop stop
 ```
 
 Supervisor finishes current execution plus required analysis, then exits before
 claiming another batch. Completed run evidence stays durable.
 
-Resume after graceful stop:
+Start again after graceful stop:
 
 ```bash
-research/automation/ats_lab.sh control resume
-research/automation/ats_lab.sh supervisor --continuous
+ats-lab loop start
 ```
 
 ## Most effective operating pattern
@@ -288,10 +295,10 @@ Use this sequence:
 3. Start ATS dashboard.
 4. Run one supervisor round as smoke test.
 5. Confirm completed runs and evaluations appear.
-6. Start `supervisor --continuous`.
+6. Run `ats-lab loop start`.
 7. Run `monitor --watch` or `console` in another terminal.
 8. Pause before inspecting or changing blocked requirements.
-9. Use graceful `control stop`; do not kill active Jesse/Agent subprocesses.
+9. Use graceful `ats-lab loop stop`; do not kill active Jesse/Agent subprocesses.
 
 Avoid:
 

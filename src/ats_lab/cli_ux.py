@@ -15,7 +15,10 @@ START HERE
   ats-lab monitor --watch         Stream plain-text progress
 
 DAILY OPERATION
-  ats-lab supervisor --continuous Run the canonical research loop
+  ats-lab loop start              Start or resume canonical research loop
+  ats-lab loop status             Show actual process and control state
+  ats-lab loop pause              Pause loop without ending process
+  ats-lab loop stop               Gracefully stop loop process
   ats-lab control status          Show supervisor control state
   ats-lab control pause|resume|stop
   ats-lab queue [--state STATE]   Inspect work
@@ -59,6 +62,13 @@ def next_guidance(
             "reason": "running claims have exceeded the recovery threshold",
             "command": "ats-lab recover-claims",
         }
+    invalid_retries = int(snapshot.get("invalid_retry_schedules", 0) or 0)
+    if invalid_retries:
+        return {
+            "action": "Start loop and repair retry schedules",
+            "reason": f"{invalid_retries} relative retry values cannot mature",
+            "command": "ats-lab loop start",
+        }
     if not snapshot.get("healthy", True):
         return {
             "action": "Inspect workflow health",
@@ -70,14 +80,14 @@ def next_guidance(
         return {
             "action": "Resume supervisor control",
             "reason": "research control is paused",
-            "command": "ats-lab control resume",
+            "command": "ats-lab loop start",
         }
     phase = str(runtime.get("phase") or "not_reported")
     if desired == "stop_requested" and active:
         return {
             "action": "Resume research control",
             "reason": "work remains but supervisor stop is requested",
-            "command": "ats-lab control resume",
+            "command": "ats-lab loop start",
         }
     if int(memory.get("retry", 0) or 0):
         return {
@@ -117,14 +127,14 @@ def next_guidance(
         return {
             "action": "Resume batch analysis",
             "reason": "finished execution evidence awaits evaluation",
-            "command": "ats-lab supervisor --continuous",
+            "command": "ats-lab loop start",
         }
     if next_action in {"monitor_running_batch", "execute_batch"}:
         if phase in {"stopped", "not_reported"}:
             return {
                 "action": "Start the canonical supervisor",
                 "reason": "runnable research work exists without an active supervisor",
-                "command": "ats-lab supervisor --continuous",
+                "command": "ats-lab loop start",
             }
         return {
             "action": "Monitor the running research batch",
@@ -141,7 +151,7 @@ def next_guidance(
         return {
             "action": "Run cohort replenishment",
             "reason": "runnable research chains reached the synthesis watermark",
-            "command": "ats-lab supervisor --continuous",
+            "command": "ats-lab loop start",
         }
     return {
         "action": "Review strongest candidates",
