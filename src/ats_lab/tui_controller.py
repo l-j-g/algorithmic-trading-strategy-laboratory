@@ -18,6 +18,7 @@ def row_count(model: dict[str, Any], view: View) -> int:
         View.CANDIDATES: model["candidates"],
         View.HPO: model["hpo"],
         View.MEMORY: model["memories"],
+        View.COLUMNS: model["columns"],
     }
     return len(rows[view])
 
@@ -33,7 +34,7 @@ def handle_key(state: TuiState, key: int, available_rows: int) -> Action | None:
         return None
     if key in (ord("q"), ord("Q")):
         return Action.QUIT
-    if ord("1") <= key <= ord("5"):
+    if ord("1") <= key <= ord("6"):
         state.view = View(key - ord("1"))
         state.selected = state.scroll = 0
     elif key == curses.KEY_LEFT:
@@ -56,6 +57,9 @@ def handle_key(state: TuiState, key: int, available_rows: int) -> Action | None:
         state.selected = max(0, available_rows - 1)
     elif key in (10, 13, ord("d")):
         state.show_detail = not state.show_detail
+    elif key == ord("c"):
+        state.column_mode = state.column_mode.next()
+        state.message = f"Column profile: {state.column_mode.label}"
     elif key == ord("p"):
         state.confirm_stop = False
         return Action.PAUSE

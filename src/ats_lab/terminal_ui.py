@@ -2,10 +2,21 @@
 from .tui_controller import TuiController, handle_key, row_count, run_tui
 from .tui_renderer import ScreenRenderer, TuiRenderer, render_tui
 from .tui_repository import TuiDataSource, TuiRepository, build_tui_model
-from .tui_types import Action, ControlState, Role, TuiLine, TuiState, View
+from .tui_types import (
+    Action,
+    ColumnMode,
+    ColumnSpec,
+    ControlState,
+    Role,
+    TuiLine,
+    TuiState,
+    View,
+)
 
 __all__ = [
     "Action",
+    "ColumnMode",
+    "ColumnSpec",
     "ControlState",
     "Role",
     "ScreenRenderer",

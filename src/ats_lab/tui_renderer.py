@@ -5,7 +5,10 @@ import curses
 from typing import Any, Protocol
 
 from .tui_types import (
+    ColumnMode,
+    ColumnSpec,
     MEMORY_STATE_ROLES,
+    ORG_COLUMNS,
     Role,
     STATE_ROLES,
     TuiLine,
@@ -240,6 +243,121 @@ def _memory(model: dict[str, Any], state: TuiState, width: int, height: int) -> 
     return lines
 
 
+_REQUIRED_ORG_COLUMNS = {"item", "state", "strategy", "next"}
+_ORG_COLUMN_DROP_ORDER = (
+    "experiment_type",
+    "symbol",
+    "timeframe",
+    "trade_count",
+    "verdict",
+    "priority",
+    "net_profit_percentage",
+    "sharpe_ratio",
+)
+_ORG_COLUMN_MINIMUM_WIDTHS = {
+    "item": 16,
+    "state": 11,
+    "strategy": 16,
+    "next": 14,
+}
+
+
+def _fit_org_columns(
+    mode: ColumnMode, width: int,
+) -> tuple[ColumnSpec, ...]:
+    specs = [spec for spec in ORG_COLUMNS if spec.minimum_mode <= mode]
+
+    def total() -> int:
+        return sum(spec.width for spec in specs) + max(0, len(specs) - 1)
+
+    if total() > width:
+        over = total() - width
+        adjusted: list[ColumnSpec] = []
+        for spec in specs:
+            minimum = _ORG_COLUMN_MINIMUM_WIDTHS.get(spec.key, spec.width)
+            reduction = min(over, max(0, spec.width - minimum))
+            adjusted.append(ColumnSpec(
+                spec.key, spec.label, spec.width - reduction, spec.minimum_mode,
+            ))
+            over -= reduction
+        specs = adjusted
+    for key in _ORG_COLUMN_DROP_ORDER:
+        if total() <= width:
+            break
+        specs = [spec for spec in specs if spec.key != key]
+    while total() > width:
+        removable = next(
+            (spec for spec in reversed(specs)
+             if spec.key not in _REQUIRED_ORG_COLUMNS),
+            None,
+        )
+        if removable is None:
+            break
+        specs.remove(removable)
+    return tuple(specs)
+
+
+def _org_row(
+    row: dict[str, Any], specs: tuple[ColumnSpec, ...], width: int,
+    *, header: bool = False,
+) -> str:
+    return _columns([
+        (spec.label if header else row.get(spec.key), spec.width)
+        for spec in specs
+    ], width)
+
+
+def _columns_view(
+    model: dict[str, Any], state: TuiState, width: int, height: int,
+) -> list[TuiLine]:
+    rows = model["columns"]
+    row_capacity = max(1, height - 2)
+    while True:
+        visible, selected = _selected_window(rows, state, row_capacity)
+        visible_groups = sum(
+            1 for index, (_, row) in enumerate(visible)
+            if index == 0
+            or row.get("state") != visible[index - 1][1].get("state")
+        )
+        fitted_capacity = max(1, height - 2 - visible_groups)
+        if fitted_capacity >= row_capacity:
+            break
+        row_capacity = fitted_capacity
+    specs = _fit_org_columns(state.column_mode, width)
+    lines = [
+        TuiLine(
+            f"ORG COLUMNS  profile={state.column_mode.label}  "
+            "press c to cycle",
+            Role.SECTION,
+        ),
+        TuiLine(_org_row({}, specs, width, header=True), Role.TABLE_HEADER),
+    ]
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("state") or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    previous_state: str | None = None
+    for index, row in visible:
+        row_state = str(row.get("state") or "unknown")
+        if row_state != previous_state:
+            lines.append(TuiLine(
+                f"* {row_state.replace('_', ' ').upper()} ({counts[row_state]})",
+                Role.GROUP,
+            ))
+            previous_state = row_state
+        item = dict(row)
+        item["item"] = "  " + str(item.get("item") or "")
+        lines.append(TuiLine(
+            _org_row(item, specs, width),
+            Role.SELECTED if index == selected else STATE_ROLES.get(
+                row_state, Role.NORMAL,
+            ),
+        ))
+    if not rows:
+        lines.append(TuiLine("No unresolved work for column view.", Role.MUTED))
+    return lines
+
+
 class TuiRenderer:
     """Responsive semantic renderer; curses color is applied only at the edge."""
 
@@ -249,6 +367,7 @@ class TuiRenderer:
         View.CANDIDATES: _candidates,
         View.HPO: _hpo,
         View.MEMORY: _memory,
+        View.COLUMNS: _columns_view,
     }
 
     def render(
@@ -263,14 +382,14 @@ class TuiRenderer:
         ))
         if state.show_help:
             help_lines = [
-                "KEYS", "1-5 / ←→ views    ↑↓ select    PgUp/PgDn scroll",
+                "KEYS", "1-6 / ←→ views    ↑↓ select    PgUp/PgDn scroll",
                 "Enter/d details    p pause    r resume    s,s stop",
-                "g top    G bottom    ? close help    q quit",
+                "c column profile    g top    G bottom    ? help    q quit",
             ]
             lines = lines[:2] + [TuiLine(item, Role.HELP) for item in help_lines]
         footer = state.message or (
-            "1-5 views  ↑↓ select  Enter detail  p pause  r resume  "
-            "s stop  ? help  q quit"
+            "1-6 views  ↑↓ select  c columns  Enter detail  p pause  "
+            "r resume  s stop  ? help  q quit"
         )
         lines = lines[:max(0, height - 1)]
         while len(lines) < height - 1:
@@ -292,6 +411,7 @@ class TuiRenderer:
             Role.DETAIL: curses.A_DIM,
             Role.FOOTER: curses.A_REVERSE,
             Role.HELP: curses.A_BOLD,
+            Role.GROUP: curses.A_BOLD,
         }
         if not curses.has_colors():
             return attrs

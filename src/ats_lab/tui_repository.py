@@ -27,16 +27,17 @@ class TuiRepository:
             for index, state in enumerate(QUEUE_STATE_ORDER)
         )
         queue = self.database.rows(
-            f"""SELECT id,strategy,priority,state,attempts,retry_after,
-                      blocker_code,blocker_detail,created_at
-               FROM active_queue
-               ORDER BY CASE state {queue_order} ELSE 99 END,
-                        priority,created_at,id LIMIT 500"""
+            f"""SELECT q.id,q.experiment_id,q.strategy,q.priority,q.state,
+                      q.attempts,q.retry_after,q.blocker_code,q.blocker_detail,
+                      q.created_at,e.experiment_type,e.archetype
+               FROM active_queue q JOIN experiments e ON e.id=q.experiment_id
+               ORDER BY CASE q.state {queue_order} ELSE 99 END,
+                        q.priority,q.created_at,q.id LIMIT 500"""
         )
+        all_evidence = self.database.query_normalized_evidence(limit=5000)
         candidates = [
-            item.to_dict() for item in distinct_candidate_evidence(
-                self.database.query_normalized_evidence(limit=5000)
-            )
+            item.to_dict()
+            for item in distinct_candidate_evidence(all_evidence)
         ]
         verdict_rank = {
             verdict.value: index
@@ -56,12 +57,36 @@ class TuiRepository:
                FROM research_memory_outbox ORDER BY id DESC LIMIT 500"""
         )
         memory = memory_status(self.database)
+        latest_evidence: dict[str, dict[str, Any]] = {}
+        for evidence in all_evidence:
+            latest_evidence.setdefault(
+                evidence.experiment_id, evidence.to_dict(),
+            )
+        columns = []
+        for queue_item in queue:
+            evidence = latest_evidence.get(queue_item["experiment_id"], {})
+            columns.append({
+                **queue_item,
+                "item": queue_item["id"],
+                "symbol": evidence.get("symbol"),
+                "timeframe": evidence.get("timeframe"),
+                "verdict": evidence.get("verdict"),
+                "net_profit_percentage": evidence.get("net_profit_percentage"),
+                "sharpe_ratio": evidence.get("sharpe_ratio"),
+                "trade_count": evidence.get("trade_count"),
+                "next": (
+                    queue_item.get("blocker_detail")
+                    or evidence.get("next_action")
+                    or queue_item.get("blocker_code")
+                ),
+            })
         return {
             "snapshot": snapshot,
             "queue": queue,
             "candidates": candidates,
             "hpo": hpo,
             "memories": memories,
+            "columns": columns,
             "memory": memory,
             "guidance": next_guidance(snapshot, memory),
         }

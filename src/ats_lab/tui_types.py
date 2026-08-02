@@ -13,9 +13,12 @@ class View(IntEnum):
     CANDIDATES = 2
     HPO = 3
     MEMORY = 4
+    COLUMNS = 5
 
     @property
     def label(self) -> str:
+        if self is View.HPO:
+            return "HPO"
         return self.name.replace("_", " ").title()
 
 
@@ -44,6 +47,20 @@ class Role(StrEnum):
     PENDING = "pending"
     RETRY = "retry"
     DELIVERED = "delivered"
+    GROUP = "group"
+
+
+class ColumnMode(IntEnum):
+    COMPACT = 0
+    STANDARD = 1
+    WIDE = 2
+
+    @property
+    def label(self) -> str:
+        return self.name.lower()
+
+    def next(self) -> ColumnMode:
+        return ColumnMode((self + 1) % len(ColumnMode))
 
 
 class Action(StrEnum):
@@ -103,9 +120,34 @@ class TuiState:
     show_detail: bool = True
     confirm_stop: bool = False
     message: str = ""
+    column_mode: ColumnMode = ColumnMode.STANDARD
 
 
 @dataclass(frozen=True)
 class TuiLine:
     text: str
     role: Role = Role.NORMAL
+
+
+@dataclass(frozen=True)
+class ColumnSpec:
+    key: str
+    label: str
+    width: int
+    minimum_mode: ColumnMode = ColumnMode.COMPACT
+
+
+ORG_COLUMNS = (
+    ColumnSpec("item", "ITEM", 31),
+    ColumnSpec("state", "STATE", 15),
+    ColumnSpec("priority", "PRI", 4),
+    ColumnSpec("experiment_type", "TYPE", 14, ColumnMode.STANDARD),
+    ColumnSpec("strategy", "STRATEGY", 25),
+    ColumnSpec("symbol", "SYMBOL", 11, ColumnMode.WIDE),
+    ColumnSpec("timeframe", "TF", 5, ColumnMode.WIDE),
+    ColumnSpec("verdict", "VERDICT", 22, ColumnMode.STANDARD),
+    ColumnSpec("net_profit_percentage", "NET%", 9, ColumnMode.WIDE),
+    ColumnSpec("sharpe_ratio", "SHARPE", 8, ColumnMode.WIDE),
+    ColumnSpec("trade_count", "TRADES", 7, ColumnMode.WIDE),
+    ColumnSpec("next", "NEXT / BLOCKER", 38),
+)

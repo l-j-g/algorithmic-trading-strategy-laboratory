@@ -9,6 +9,7 @@ from ats_lab.database import WorkflowDatabase
 from ats_lab.models import ExperimentSpec, WorkItem, WorkState
 from ats_lab.terminal_ui import (
     Action,
+    ColumnMode,
     Role,
     TuiController,
     TuiLine,
@@ -46,6 +47,11 @@ class TerminalUiTests(unittest.TestCase):
             narrow = render_tui(
                 model, TuiState(view=View.QUEUE), width=42, height=10,
             )
+            columns = render_tui(
+                model, TuiState(
+                    view=View.COLUMNS, column_mode=ColumnMode.WIDE,
+                ), width=180, height=20,
+            )
 
         self.assertEqual(len(overview), 20)
         self.assertTrue(all(len(line.text) <= 80 for line in overview))
@@ -53,12 +59,22 @@ class TerminalUiTests(unittest.TestCase):
         self.assertTrue(any("JOB-1" in line.text for line in queue))
         self.assertTrue(any(line.role is Role.SELECTED for line in queue))
         self.assertTrue(all(len(line.text) <= 42 for line in narrow))
+        column_text = "\n".join(line.text for line in columns)
+        self.assertIn("* READY (1)", column_text)
+        self.assertIn("NET%", column_text)
+        self.assertIn("SHARPE", column_text)
+        self.assertIn("JOB-1", column_text)
 
     def test_navigation_and_controls_use_typed_actions(self) -> None:
         state = TuiState()
 
         self.assertIsNone(handle_key(state, ord("2"), 3))
         self.assertIs(state.view, View.QUEUE)
+        handle_key(state, ord("6"), 3)
+        self.assertIs(state.view, View.COLUMNS)
+        original_mode = state.column_mode
+        handle_key(state, ord("c"), 3)
+        self.assertIsNot(state.column_mode, original_mode)
         handle_key(state, curses.KEY_DOWN, 3)
         self.assertEqual(state.selected, 1)
         handle_key(state, ord("?"), 3)
@@ -81,6 +97,7 @@ class TerminalUiTests(unittest.TestCase):
                     return {
                         "snapshot": {}, "queue": [], "candidates": [],
                         "hpo": [], "memories": [], "memory": {},
+                        "columns": [],
                         "guidance": {},
                     }
 
