@@ -490,6 +490,18 @@ class MemoryResearchAdapter:
         )
         return response if isinstance(response, list) else []
 
+    def _messages_by_fingerprint(self, learning_id: str) -> list[dict[str, Any]]:
+        workspace = self._quoted(self.config.workspace_id)
+        session = self._quoted(self.config.session_id)
+        response = self._request(
+            "POST",
+            f"/v3/workspaces/{workspace}/sessions/{session}/messages/list?page=1&size=5",
+            {"filters": {"metadata": {"learning_fingerprint": learning_id}}},
+        )
+        if not isinstance(response, dict) or not isinstance(response.get("items"), list):
+            return []
+        return [item for item in response["items"] if isinstance(item, dict)]
+
     @staticmethod
     def _payload_from_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
         content = message.get("content")
@@ -507,7 +519,7 @@ class MemoryResearchAdapter:
     def deliver(self, payload: dict[str, Any]) -> None:
         self._ensure_namespace()
         learning_id = str(payload["learning_id"])
-        for message in self._search(learning_id, 5):
+        for message in self._messages_by_fingerprint(learning_id):
             existing = self._payload_from_message(message)
             if existing and existing.get("learning_id") == learning_id:
                 return

@@ -19,6 +19,7 @@ from ats_lab.models import (
     WorkState,
 )
 from ats_lab.research_memory import (
+    MemoryResearchAdapter,
     compact_advisory_memory,
     memory_status,
     sync_memory_outbox,
@@ -245,6 +246,42 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertTrue(unavailable["memory_degraded"])
         self.assertEqual(malformed["advisory_memory"], [])
         self.assertTrue(malformed["memory_degraded"])
+
+    def test_memory_adapter_uses_message_filter_for_idempotency_then_search_for_recall(self) -> None:
+        class RecordingMemory(MemoryResearchAdapter):
+            def __init__(self) -> None:
+                super().__init__(api_key=None)
+                self.messages: list[dict] = []
+                self.paths: list[str] = []
+
+            def _request(self, method: str, path: str, payload: dict | None = None):
+                self.paths.append(path)
+                if path.endswith("/messages"):
+                    message = payload["messages"][0]
+                    self.messages.append(message)
+                    return [message]
+                if "/messages/list" in path:
+                    fingerprint = payload["filters"]["metadata"]["learning_fingerprint"]
+                    return {"items": [
+                        message for message in self.messages
+                        if message["metadata"]["learning_fingerprint"] == fingerprint
+                    ], "total": len(self.messages), "page": 1, "size": 5, "pages": 1}
+                if path.endswith("/search"):
+                    return self.messages
+                return {}
+
+        adapter = RecordingMemory()
+        payload = {
+            "schema_version": 1, "learning_id": "fingerprint-1",
+            "experiment_id": "EXP", "strategy": "Strategy",
+        }
+        adapter.deliver(payload)
+        adapter.deliver(payload)
+        recalled = adapter.recall("Strategy", limit=5)
+        self.assertEqual(len(adapter.messages), 1)
+        self.assertEqual(recalled, [payload])
+        self.assertTrue(any("/messages/list" in path for path in adapter.paths))
+        self.assertTrue(any(path.endswith("/search") for path in adapter.paths))
 
 
 if __name__ == "__main__":
