@@ -67,6 +67,7 @@ from .synthesis import synthesis_request_from_file, synthesize
 from .status import hpo_detail_snapshot, operator_status
 from .stack_preflight import StackPreflight
 from .supervisor import BatchSupervisor
+from .terminal_ui import run_tui
 from .worker import CommandDispatcher, Worker
 
 
@@ -242,6 +243,10 @@ def main() -> int:
     monitor = sub.add_parser("monitor", help="Show human-readable terminal progress.")
     monitor.add_argument("--watch", action="store_true")
     monitor.add_argument("--interval", type=float, default=5.0)
+    tui = sub.add_parser(
+        "tui", help="Open full-screen color operator UI with keyboard navigation."
+    )
+    tui.add_argument("--interval", type=float, default=1.0)
     control = sub.add_parser("control", help="Pause, resume, or gracefully stop supervisor.")
     control.add_argument("action", choices=("status", "pause", "resume", "stop"))
     control.add_argument("--format", choices=("table", "json"), default="table")
@@ -453,7 +458,7 @@ def main() -> int:
         "hpo", "hpo-detail", "timings", "analyzer",
         "requeue-hpo-analysis", "configure-hpo-validation-routes",
         "memory-status", "memory-sync", "memory", "memory-backfill",
-        "home", "next", "doctor", "preflight", "recovery-audit",
+        "home", "next", "doctor", "preflight", "recovery-audit", "tui",
     } and repo == Path.cwd().resolve():
         repo = discover_lab_repo(
             repo, fallback=Path(__file__).resolve().parents[2],
@@ -627,6 +632,16 @@ def main() -> int:
                 watch_monitor(database, interval=args.interval)
             except KeyboardInterrupt:
                 return 130
+    elif args.command == "tui":
+        if args.interval <= 0:
+            parser.error("tui --interval must be positive")
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            parser.error("tui requires an interactive terminal; use ats-lab monitor")
+        database.initialize()
+        try:
+            return run_tui(database, interval=args.interval)
+        except KeyboardInterrupt:
+            return 130
     elif args.command == "control":
         database.initialize()
         if args.action == "status":

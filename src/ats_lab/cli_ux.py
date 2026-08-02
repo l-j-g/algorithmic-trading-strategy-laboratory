@@ -11,7 +11,8 @@ START HERE
   ats-lab                         Show health, queue, memory, and next command
   ats-lab doctor                  Check Docker, Jesse, Memory, and workflow state
   ats-lab next                    Show one recommended next action
-  ats-lab monitor --watch         Follow live research progress
+  ats-lab tui                     Open color keyboard-driven operator UI
+  ats-lab monitor --watch         Stream plain-text progress
 
 DAILY OPERATION
   ats-lab supervisor --continuous Run the canonical research loop
@@ -188,7 +189,7 @@ def render_home(
         "",
         render_guidance(guidance),
         "",
-        "DETAIL  ats-lab status    CHECK  ats-lab doctor    HELP  ats-lab help",
+        "TUI  ats-lab tui    DETAIL  ats-lab status    HELP  ats-lab help",
     ))
 
 

@@ -19,9 +19,20 @@ command. For deeper checks or live progress:
 ```bash
 ats-lab doctor
 ats-lab next
+ats-lab tui
 ats-lab monitor --watch
 ats-lab help
 ```
+
+`ats-lab tui` is the normal interactive view: color status, responsive columns,
+constant refresh, numbered views, arrow-key navigation, selected-row details,
+and keyboard supervisor controls. Press `?` inside it for keys and `q` to exit.
+The plain `monitor --watch` stream remains available for logs, piping, and
+minimal terminals.
+
+See [terminal UI](docs/terminal-ui.md) for keys and reusable component
+boundaries. See [maintainability](docs/maintainability.md) for SOLID conventions
+and bounded refactoring order.
 
 The installed CLI discovers the canonical ATS Lab checkout automatically.
 Use `--repo` and `--database` only when intentionally targeting another lab.
