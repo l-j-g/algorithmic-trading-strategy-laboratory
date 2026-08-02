@@ -34,6 +34,16 @@ from .console import (
     run_console,
     watch_monitor,
 )
+from .cli_ux import (
+    ROOT_HELP,
+    next_guidance,
+    render_doctor,
+    render_guidance,
+    render_home,
+    render_memory_init,
+    render_memory_status,
+    render_memory_sync,
+)
 from .correctness_recovery import (
     backfill_aggregate_route_coverage,
     classify_recovery_candidates,
@@ -110,24 +120,65 @@ def emit_progress(value: object) -> None:
     emit(compact)
 
 
-def discover_lab_repo(start: Path) -> Path:
+class AtsLabArgumentParser(argparse.ArgumentParser):
+    """Keep root help useful while preserving detailed command help."""
+
+    def format_help(self) -> str:
+        if self.prog == "ats-lab":
+            return ROOT_HELP
+        return super().format_help()
+
+
+def discover_lab_repo(start: Path, fallback: Path | None = None) -> Path:
     """Return the nearest parent containing ATS Lab configuration."""
     resolved = start.resolve()
-    return next(
+    found = next(
         (
-            candidate
-            for candidate in (resolved, *resolved.parents)
+            candidate for candidate in (resolved, *resolved.parents)
             if (candidate / ".ats-lab" / "config.toml").is_file()
+        ), None,
+    )
+    if found is not None:
+        return found
+    if fallback is not None and (
+        fallback / ".ats-lab" / "config.toml"
+    ).is_file():
+        return fallback.resolve()
+    return resolved
+
+
+def build_stack_preflight(repo: Path) -> StackPreflight:
+    config = load_direct_execution_config(repo / ".ats-lab" / "config.toml")
+    return StackPreflight(
+        dashboard_url=config.dashboard_api_base_url,
+        mcp_url=config.mcp_url,
+        postgres_container=os.environ.get(
+            "ATS_LAB_JESSE_POSTGRES_CONTAINER", "postgres",
         ),
-        resolved,
+        postgres_user=os.environ.get(
+            "ATS_LAB_JESSE_POSTGRES_USER", "jesse_user",
+        ),
+        postgres_database=os.environ.get(
+            "ATS_LAB_JESSE_POSTGRES_DATABASE", "jesse_db",
+        ),
+        memory_health_url=os.environ.get(
+            "ATS_LAB_MEMORY_HEALTH_URL", "http://127.0.0.1:18000/health",
+        ),
     )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="ats-lab", description=__doc__)
+    parser = AtsLabArgumentParser(prog="ats-lab", description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--database", type=Path, default=Path(".ats-lab/laboratory.sqlite3"))
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("help", help="Show curated daily-operation help.")
+    next_parser = sub.add_parser("next", help="Show one recommended next action.")
+    next_parser.add_argument("--format", choices=("table", "json"), default="table")
+    doctor = sub.add_parser(
+        "doctor", help="Check infrastructure, workflow, memory, and next action."
+    )
+    doctor.add_argument("--format", choices=("table", "json"), default="table")
     sub.add_parser("init")
     sub.add_parser("migrate-legacy")
     audit_parser = sub.add_parser("audit")
@@ -148,12 +199,23 @@ def main() -> int:
     memory_init.add_argument("--dry-run", action="store_true")
     memory_init.add_argument("--batch-size", type=int, default=100)
     memory_init.add_argument("--delivery-limit", type=int, default=100)
-    memory_sub.add_parser("status", help="Show research-memory readiness.")
+    memory_init.add_argument(
+        "--format", choices=("table", "json"), default="table",
+    )
+    memory_status_nested = memory_sub.add_parser(
+        "status", help="Show research-memory readiness."
+    )
+    memory_status_nested.add_argument(
+        "--format", choices=("table", "json"), default="table",
+    )
     memory_sync_nested = memory_sub.add_parser(
         "sync", help="Deliver currently queued research memory to Memory."
     )
     memory_sync_nested.add_argument("--dry-run", action="store_true")
     memory_sync_nested.add_argument("--limit", type=int, default=100)
+    memory_sync_nested.add_argument(
+        "--format", choices=("table", "json"), default="table",
+    )
     memory_sync = sub.add_parser(
         "memory-sync", help="Preview or dispatch bounded research-memory outbox records."
     )
@@ -377,6 +439,11 @@ def main() -> int:
     dashboard.add_argument("--host", default="127.0.0.1")
     dashboard.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
+    if args.command is None:
+        args.command = "home"
+    if args.command == "help":
+        print(ROOT_HELP, end="" if ROOT_HELP.endswith("\n") else "\n")
+        return 0
     repo = args.repo.resolve()
     if args.command in {
         "worker", "supervisor", "dashboard", "status", "monitor", "control",
@@ -385,33 +452,50 @@ def main() -> int:
         "diagnostic-hpo-trial",
         "hpo", "hpo-detail", "timings", "analyzer",
         "requeue-hpo-analysis", "configure-hpo-validation-routes",
-        "memory-status", "memory-sync",
+        "memory-status", "memory-sync", "memory", "memory-backfill",
+        "home", "next", "doctor", "preflight", "recovery-audit",
     } and repo == Path.cwd().resolve():
-        repo = discover_lab_repo(repo)
+        repo = discover_lab_repo(
+            repo, fallback=Path(__file__).resolve().parents[2],
+        )
     database_path = args.database if args.database.is_absolute() else repo / args.database
     database = WorkflowDatabase(database_path)
 
-    if args.command == "init":
+    if args.command == "home":
+        database.initialize()
+        snapshot = monitor_snapshot(database)
+        print(render_home(snapshot, memory_status(database)))
+    elif args.command == "next":
+        database.initialize()
+        guidance = next_guidance(
+            monitor_snapshot(database), memory_status(database),
+        )
+        if args.format == "json":
+            emit(guidance)
+        else:
+            print(render_guidance(guidance))
+    elif args.command == "doctor":
+        database.initialize()
+        preflight = build_stack_preflight(repo).check()
+        snapshot = monitor_snapshot(database)
+        memory = memory_status(database)
+        if args.format == "json":
+            emit({
+                "healthy": bool(preflight.get("healthy"))
+                and bool(snapshot.get("healthy")),
+                "preflight": preflight,
+                "workflow": operator_status(database),
+                "memory": memory,
+                "next": next_guidance(snapshot, memory),
+            })
+        else:
+            print(render_doctor(preflight, snapshot, memory))
+        return 0 if preflight.get("healthy") and snapshot.get("healthy") else 2
+    elif args.command == "init":
         database.initialize()
         emit({"database": str(database_path), "status": "initialized"})
     elif args.command == "preflight":
-        config = load_direct_execution_config(repo / ".ats-lab" / "config.toml")
-        result = StackPreflight(
-            dashboard_url=config.dashboard_api_base_url,
-            mcp_url=config.mcp_url,
-            postgres_container=os.environ.get(
-                "ATS_LAB_JESSE_POSTGRES_CONTAINER", "postgres",
-            ),
-            postgres_user=os.environ.get(
-                "ATS_LAB_JESSE_POSTGRES_USER", "jesse_user",
-            ),
-            postgres_database=os.environ.get(
-                "ATS_LAB_JESSE_POSTGRES_DATABASE", "jesse_db",
-            ),
-            memory_health_url=os.environ.get(
-                "ATS_LAB_MEMORY_HEALTH_URL", "http://127.0.0.1:18000/health",
-            ),
-        ).check()
+        result = build_stack_preflight(repo).check()
         emit(result)
         return 0 if result["healthy"] else 2
     elif args.command == "memory-status":
@@ -420,7 +504,11 @@ def main() -> int:
     elif args.command == "memory":
         database.initialize()
         if args.memory_command == "status":
-            emit(memory_status(database))
+            result = memory_status(database)
+            if args.format == "json":
+                emit(result)
+            else:
+                print(render_memory_status(result))
         elif args.memory_command == "init":
             if args.batch_size < 1 or args.batch_size > 1000:
                 parser.error("memory init --batch-size must be between 1 and 1000")
@@ -439,11 +527,19 @@ def main() -> int:
                 )
                 print(f"MEMORY {item['phase']} {fields}", flush=True)
 
-            emit(initialize_research_memory(
+            result = initialize_research_memory(
                 database, adapter, apply=not args.dry_run,
                 batch_size=args.batch_size, sync_limit=args.delivery_limit,
-                progress=None if args.dry_run else memory_progress,
-            ))
+                progress=(
+                    memory_progress
+                    if not args.dry_run and args.format == "table"
+                    else None
+                ),
+            )
+            if args.format == "json":
+                emit(result)
+            else:
+                print(render_memory_init(result))
         elif args.memory_command == "sync":
             if args.limit < 1 or args.limit > 100:
                 parser.error("memory sync --limit must be between 1 and 100")
@@ -452,9 +548,13 @@ def main() -> int:
                     "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
                 )
             ))
-            emit(sync_memory_outbox(
+            result = sync_memory_outbox(
                 database, adapter, apply=not args.dry_run, limit=args.limit,
-            ))
+            )
+            if args.format == "json":
+                emit(result)
+            else:
+                print(render_memory_sync(result))
     elif args.command == "memory-sync":
         if args.limit < 1 or args.limit > 100:
             parser.error("memory-sync --limit must be between 1 and 100")
@@ -504,6 +604,8 @@ def main() -> int:
                 ("id", "job", 31),
                 ("attempts", "tries", 5),
                 ("blocker_code", "blocker", 24),
+                ("retry_after", "retry after", 20),
+                ("blocker_detail", "detail", 36),
             )))
     elif args.command == "synthesis-status":
         database.initialize()

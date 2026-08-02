@@ -5,6 +5,27 @@ ATS Lab runs evidence-first Jesse strategy research in batches.
 It does not trade live, manage exchange credentials, or guarantee profitable
 strategies.
 
+## Start here
+
+Run this from any directory:
+
+```bash
+ats-lab
+```
+
+It shows current health, supervisor state, queue, memory, and one exact next
+command. For deeper checks or live progress:
+
+```bash
+ats-lab doctor
+ats-lab next
+ats-lab monitor --watch
+ats-lab help
+```
+
+The installed CLI discovers the canonical ATS Lab checkout automatically.
+Use `--repo` and `--database` only when intentionally targeting another lab.
+
 ## What to use
 
 Use three interfaces:
@@ -16,8 +37,8 @@ Use three interfaces:
 | ATS dashboard | Monitor queue, evidence, candidates, cohorts | <http://127.0.0.1:8765> |
 | Jesse dashboard | Inspect individual backtest sessions | <http://127.0.0.1:9000> |
 
-Run commands from `<repo-root>/src/repos/jesse-src` unless this manual says
-otherwise.
+The `research/automation/ats_lab.sh` bridge remains supported for Jesse-side
+compatibility, but normal operation should use the shorter `ats-lab` commands.
 
 ## How workflow works
 

@@ -36,6 +36,19 @@ class DiscoverLabRepoTests(unittest.TestCase):
 
             self.assertEqual(discover_lab_repo(start), start.resolve())
 
+    def test_uses_installed_checkout_fallback_outside_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            start = root / "elsewhere"
+            fallback = root / "installed-repo"
+            start.mkdir()
+            (fallback / ".ats-lab").mkdir(parents=True)
+            (fallback / ".ats-lab" / "config.toml").write_text("")
+
+            self.assertEqual(
+                discover_lab_repo(start, fallback=fallback), fallback.resolve(),
+            )
+
     def test_continuous_progress_is_compact(self) -> None:
         output = io.StringIO()
         with redirect_stdout(output):
@@ -119,6 +132,41 @@ class CliEvidenceTests(unittest.TestCase):
             ))
             self.assertNotIn("diagnostic-only", output)
 
+    def test_bare_cli_shows_operator_home_and_exact_next_command(self) -> None:
+        output = self.invoke()
+
+        self.assertIn("ATS LAB", output)
+        self.assertIn("QUEUE", output)
+        self.assertIn("MEMORY", output)
+        self.assertIn("NEXT", output)
+        self.assertIn("ats-lab memory sync", output)
+        self.assertNotIn('"work_states"', output)
+
+    def test_next_command_supports_human_and_json_guidance(self) -> None:
+        human = self.invoke("next")
+        payload = json.loads(self.invoke("next", "--format", "json"))
+
+        self.assertIn("WHY", human)
+        self.assertIn("RUN", human)
+        self.assertEqual(payload["command"], "ats-lab memory sync")
+        self.assertEqual(payload["reason"], "research memory is waiting for delivery")
+
+    def test_root_help_is_curated_for_daily_operation(self) -> None:
+        output = io.StringIO()
+        with (
+            patch("sys.argv", ["ats-lab", "--help"]),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit) as stopped,
+        ):
+            main()
+
+        self.assertEqual(stopped.exception.code, 0)
+        text = output.getvalue()
+        self.assertIn("START HERE", text)
+        self.assertIn("ats-lab doctor", text)
+        self.assertIn("ats-lab monitor --watch", text)
+        self.assertIn("Use ats-lab <command> --help", text)
+
     def test_candidates_deduplicate_atomic_evidence_by_experiment(self) -> None:
         human = self.invoke("candidates")
         payload = json.loads(self.invoke("candidates", "--format", "json"))
@@ -148,7 +196,9 @@ class CliEvidenceTests(unittest.TestCase):
         with WorkflowDatabase(self.path).connect() as connection:
             connection.execute("DELETE FROM research_memory_outbox")
 
-        payload = json.loads(self.invoke("memory", "init", "--dry-run"))
+        payload = json.loads(self.invoke(
+            "memory", "init", "--dry-run", "--format", "json",
+        ))
 
         self.assertFalse(payload["apply"])
         self.assertEqual(payload["would_queue"], 1)
@@ -156,6 +206,36 @@ class CliEvidenceTests(unittest.TestCase):
         self.assertEqual(WorkflowDatabase(self.path).rows(
             "SELECT COUNT(*) n FROM research_memory_outbox"
         )[0]["n"], 0)
+
+    def test_nested_memory_status_is_human_by_default(self) -> None:
+        human = self.invoke("memory", "status")
+        payload = json.loads(self.invoke(
+            "memory", "status", "--format", "json",
+        ))
+
+        self.assertIn("MEMORY", human)
+        self.assertIn("pending=1", human)
+        self.assertIn("ats-lab memory sync", human)
+        self.assertEqual(payload, {"delivered": 0, "pending": 1, "retry": 0})
+
+    def test_doctor_combines_checks_and_next_action(self) -> None:
+        class HealthyPreflight:
+            def check(self):
+                return {
+                    "healthy": True,
+                    "checks": [
+                        {"name": "docker_daemon", "status": "healthy"},
+                        {"name": "memory_api", "status": "healthy"},
+                    ],
+                }
+
+        with patch("ats_lab.cli.build_stack_preflight", return_value=HealthyPreflight()):
+            output = self.invoke("doctor")
+
+        self.assertIn("ATS LAB DOCTOR", output)
+        self.assertIn("[OK] docker_daemon", output)
+        self.assertIn("[OK] canonical_workflow", output)
+        self.assertIn("ats-lab memory sync", output)
 
     def test_normalized_json_requires_explicit_format(self) -> None:
         payload = json.loads(self.invoke("evidence", "--format", "json"))
