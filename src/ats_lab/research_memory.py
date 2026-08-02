@@ -324,7 +324,7 @@ def _recall_query(context: Mapping[str, Any]) -> str:
             except json.JSONDecodeError:
                 specification = {}
             for value in (
-                item.get("archetype"), item.get("target_regime"),
+                item.get("strategy"), item.get("archetype"), item.get("target_regime"),
                 item.get("failure_regime"), item.get("source_experiment_id"),
                 specification.get("change_scope") if isinstance(specification, dict) else None,
                 item.get("verdict"),

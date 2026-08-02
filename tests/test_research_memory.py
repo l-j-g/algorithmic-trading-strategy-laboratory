@@ -31,6 +31,7 @@ class FakeMemoryAdapter:
         self.fail = fail
         self.delivered: dict[str, dict] = {}
         self.recalled = recalled or []
+        self.queries: list[str] = []
 
     def deliver(self, payload: dict) -> None:
         if self.fail:
@@ -38,6 +39,7 @@ class FakeMemoryAdapter:
         self.delivered.setdefault(payload["learning_id"], payload)
 
     def recall(self, query: str, *, limit: int) -> list[dict]:
+        self.queries.append(query)
         if self.fail:
             raise OSError("offline")
         return self.recalled[:limit]
@@ -213,11 +215,14 @@ class ResearchMemoryTests(unittest.TestCase):
             for index in range(20)
         ]
         context = {
-            "improvement_candidates": [{"source_experiment_id": "EXP-0"}],
+            "improvement_candidates": [{
+                "source_experiment_id": "EXP-0", "strategy": "PublicStrategy",
+            }],
             "scheduled_candidates": [], "concept_learnings": [],
         }
+        adapter = FakeMemoryAdapter(recalled=recalled)
         result = compact_advisory_memory(
-            FakeMemoryAdapter(recalled=recalled), context,
+            adapter, context,
             max_items=5, max_bytes=3000, max_text_chars=200,
         )
         self.assertFalse(result["memory_degraded"])
@@ -232,6 +237,7 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(result["advisory_memory"]).encode()), 3000)
         self.assertNotIn("readiness", json.dumps(result))
         self.assertNotIn("promotion", json.dumps(result))
+        self.assertIn("PublicStrategy", adapter.queries[0])
 
     def test_unavailable_or_malformed_recall_degrades_to_sqlite_only(self) -> None:
         context = {"improvement_candidates": [], "scheduled_candidates": [],
