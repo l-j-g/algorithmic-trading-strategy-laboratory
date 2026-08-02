@@ -47,10 +47,21 @@ Historical verdicts remain observations, never readiness or promotion inputs.
 ## Operator commands
 
 ```bash
-ats-lab memory-status
-ats-lab memory-sync --dry-run --limit 25
-ats-lab memory-sync --apply --limit 25
+ats-lab memory init
+ats-lab memory status
 ```
+
+`memory init` is the normal one-time setup command. It finds every historical
+evaluation backed by a finished canonical run and normalized evidence, queues
+safe compact learnings, and delivers the whole outbox to Memory in bounded
+batches. It is idempotent and prints progress. Use `ats-lab memory init
+--dry-run` for a read-only preview.
+
+Future validated evaluations enter the outbox automatically and the supervisor
+delivers them during normal operation. `ats-lab memory sync` manually retries or
+drains queued records. Existing `memory-status`, `memory-sync`, and
+`memory-backfill` commands remain available for diagnostics and bounded manual
+control.
 
 `ATS_LAB_MEMORY_API_KEY` is read from process environment only when required. Never put
 it in tracked configuration, CLI output, SQLite, or logs. Local base URL may be

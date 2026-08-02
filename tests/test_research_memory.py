@@ -22,6 +22,7 @@ from ats_lab.research_memory import (
     MemoryResearchAdapter,
     backfill_memory_outbox,
     compact_advisory_memory,
+    initialize_research_memory,
     memory_status,
     sync_memory_outbox,
 )
@@ -243,6 +244,40 @@ class ResearchMemoryTests(unittest.TestCase):
 
         self.assertEqual(result["would_enqueue"], 0)
         self.assertEqual(result["exclusion_reasons"], {"infrastructure_failure": 1})
+
+    def test_memory_initialization_backfills_and_delivers_everything_idempotently(self) -> None:
+        self.database.finalize_batch_evaluation(self._awaiting_evaluation())
+        self.database.finalize_batch_evaluation(self._awaiting_evaluation(
+            experiment_id="EXP-2",
+        ))
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM research_memory_outbox")
+        adapter = FakeMemoryAdapter()
+        progress: list[dict] = []
+
+        preview = initialize_research_memory(
+            self.database, None, apply=False, batch_size=1, sync_limit=1,
+        )
+        applied = initialize_research_memory(
+            self.database, adapter, apply=True, batch_size=1, sync_limit=1,
+            progress=progress.append,
+        )
+        again = initialize_research_memory(
+            self.database, adapter, apply=True, batch_size=1, sync_limit=1,
+        )
+
+        self.assertEqual(preview["would_queue"], 2)
+        self.assertEqual(preview["would_deliver"], 2)
+        self.assertEqual(applied["queued"], 2)
+        self.assertEqual(applied["delivered"], 2)
+        self.assertEqual(applied["outbox"], {
+            "pending": 0, "retry": 0, "delivered": 2,
+        })
+        self.assertTrue(applied["ready"])
+        self.assertEqual(again["queued"], 0)
+        self.assertEqual(again["delivered"], 0)
+        self.assertTrue(any(item["phase"] == "backfill" for item in progress))
+        self.assertTrue(any(item["phase"] == "delivery" for item in progress))
 
     def test_advisory_recall_is_bounded_deduplicated_and_untrusted(self) -> None:
         recalled = [

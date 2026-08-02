@@ -144,6 +144,19 @@ class CliEvidenceTests(unittest.TestCase):
             "SELECT COUNT(*) n FROM research_memory_outbox"
         )[0]["n"], 0)
 
+    def test_nested_memory_init_has_safe_dry_run(self) -> None:
+        with WorkflowDatabase(self.path).connect() as connection:
+            connection.execute("DELETE FROM research_memory_outbox")
+
+        payload = json.loads(self.invoke("memory", "init", "--dry-run"))
+
+        self.assertFalse(payload["apply"])
+        self.assertEqual(payload["would_queue"], 1)
+        self.assertEqual(payload["would_deliver"], 1)
+        self.assertEqual(WorkflowDatabase(self.path).rows(
+            "SELECT COUNT(*) n FROM research_memory_outbox"
+        )[0]["n"], 0)
+
     def test_normalized_json_requires_explicit_format(self) -> None:
         payload = json.loads(self.invoke("evidence", "--format", "json"))
 

@@ -48,6 +48,7 @@ from .research_memory import (
     MemoryProviderConfig,
     MemoryResearchAdapter,
     backfill_memory_outbox,
+    initialize_research_memory,
     memory_status,
     sync_memory_outbox,
 )
@@ -136,6 +137,23 @@ def main() -> int:
     queue_parser.add_argument("--format", choices=("table", "json"), default="table")
     sub.add_parser("synthesis-status")
     sub.add_parser("memory-status", help="Show ATS research-memory outbox state.")
+    memory = sub.add_parser(
+        "memory", help="Initialize, inspect, or synchronize advisory research memory."
+    )
+    memory_sub = memory.add_subparsers(dest="memory_command", required=True)
+    memory_init = memory_sub.add_parser(
+        "init",
+        help="Backfill all safe canonical findings and deliver them to Memory.",
+    )
+    memory_init.add_argument("--dry-run", action="store_true")
+    memory_init.add_argument("--batch-size", type=int, default=100)
+    memory_init.add_argument("--delivery-limit", type=int, default=100)
+    memory_sub.add_parser("status", help="Show research-memory readiness.")
+    memory_sync_nested = memory_sub.add_parser(
+        "sync", help="Deliver currently queued research memory to Memory."
+    )
+    memory_sync_nested.add_argument("--dry-run", action="store_true")
+    memory_sync_nested.add_argument("--limit", type=int, default=100)
     memory_sync = sub.add_parser(
         "memory-sync", help="Preview or dispatch bounded research-memory outbox records."
     )
@@ -399,6 +417,44 @@ def main() -> int:
     elif args.command == "memory-status":
         database.initialize()
         emit(memory_status(database))
+    elif args.command == "memory":
+        database.initialize()
+        if args.memory_command == "status":
+            emit(memory_status(database))
+        elif args.memory_command == "init":
+            if args.batch_size < 1 or args.batch_size > 1000:
+                parser.error("memory init --batch-size must be between 1 and 1000")
+            if args.delivery_limit < 1 or args.delivery_limit > 100:
+                parser.error("memory init --delivery-limit must be between 1 and 100")
+            adapter = None if args.dry_run else MemoryResearchAdapter(
+                MemoryProviderConfig(base_url=os.environ.get(
+                    "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
+                ))
+            )
+
+            def memory_progress(item: dict) -> None:
+                fields = " ".join(
+                    f"{key}={value}" for key, value in item.items()
+                    if key != "phase"
+                )
+                print(f"MEMORY {item['phase']} {fields}", flush=True)
+
+            emit(initialize_research_memory(
+                database, adapter, apply=not args.dry_run,
+                batch_size=args.batch_size, sync_limit=args.delivery_limit,
+                progress=None if args.dry_run else memory_progress,
+            ))
+        elif args.memory_command == "sync":
+            if args.limit < 1 or args.limit > 100:
+                parser.error("memory sync --limit must be between 1 and 100")
+            adapter = MemoryResearchAdapter(MemoryProviderConfig(
+                base_url=os.environ.get(
+                    "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
+                )
+            ))
+            emit(sync_memory_outbox(
+                database, adapter, apply=not args.dry_run, limit=args.limit,
+            ))
     elif args.command == "memory-sync":
         if args.limit < 1 or args.limit > 100:
             parser.error("memory-sync --limit must be between 1 and 100")

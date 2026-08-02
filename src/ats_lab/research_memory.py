@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Protocol, TYPE_CHECKING
+from typing import Any, Callable, Mapping, Protocol, TYPE_CHECKING
 
 from .models import Evaluation, Verdict, utc_now
 
@@ -403,6 +403,111 @@ def sync_memory_outbox(
             )
         result["delivered"] += 1
     return result
+
+
+def initialize_research_memory(
+    database: WorkflowDatabase,
+    adapter: ResearchMemoryAdapter | None,
+    *,
+    apply: bool = True,
+    batch_size: int = 100,
+    sync_limit: int = 100,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Backfill and deliver all safe canonical research memory in one command."""
+    batch_size = max(1, min(int(batch_size), 1000))
+    sync_limit = max(1, min(int(sync_limit), 100))
+    preview = backfill_memory_outbox(
+        database, apply=False, batch_size=batch_size,
+    )
+    before = memory_status(database)
+    if not apply:
+        return {
+            "apply": False,
+            "ready": (
+                preview["eligible"] == 0
+                and before["pending"] == 0
+                and before["retry"] == 0
+            ),
+            "would_queue": preview["eligible"],
+            "would_deliver": (
+                before["pending"] + before["retry"] + preview["eligible"]
+            ),
+            "already_present": preview["duplicates"],
+            "excluded": preview["excluded"],
+            "exclusion_reasons": preview["exclusion_reasons"],
+            "outbox": before,
+        }
+    if adapter is None:
+        raise ValueError("memory initialization requires a delivery adapter")
+
+    queued = 0
+    payload_bytes = 0
+    backfill_batches = 0
+    while True:
+        batch = backfill_memory_outbox(
+            database, apply=True, batch_size=batch_size,
+        )
+        if batch["queued"] == 0:
+            break
+        queued += batch["queued"]
+        payload_bytes += batch["payload_bytes"]
+        backfill_batches += 1
+        if progress is not None:
+            progress({
+                "phase": "backfill",
+                "batch": backfill_batches,
+                "queued": queued,
+                "remaining": max(0, int(batch["eligible"]) - int(batch["queued"])),
+            })
+
+    delivered = 0
+    retries = 0
+    delivery_batches = 0
+    while True:
+        batch = sync_memory_outbox(
+            database, adapter, apply=True, limit=sync_limit,
+        )
+        if batch["eligible"] == 0:
+            break
+        delivered += batch["delivered"]
+        retries += batch["retry"]
+        delivery_batches += 1
+        status = memory_status(database)
+        if progress is not None:
+            progress({
+                "phase": "delivery",
+                "batch": delivery_batches,
+                "delivered": delivered,
+                "pending": status["pending"],
+                "retry": status["retry"],
+            })
+        if batch["delivered"] + batch["retry"] == 0:
+            break
+
+    final_backfill = backfill_memory_outbox(
+        database, apply=False, batch_size=batch_size,
+    )
+    outbox = memory_status(database)
+    return {
+        "apply": True,
+        "ready": (
+            final_backfill["eligible"] == 0
+            and outbox["pending"] == 0
+            and outbox["retry"] == 0
+        ),
+        "queued": queued,
+        "delivered": delivered,
+        "delivery_retries": retries,
+        "already_present": preview["duplicates"],
+        "excluded": preview["excluded"],
+        "exclusion_reasons": preview["exclusion_reasons"],
+        "payload_bytes": payload_bytes,
+        "backfill_batches": backfill_batches,
+        "delivery_batches": delivery_batches,
+        "remaining_unqueued": final_backfill["eligible"],
+        "outbox": outbox,
+    }
 
 
 def _recall_queries(context: Mapping[str, Any]) -> list[str]:
