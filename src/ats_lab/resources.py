@@ -21,7 +21,19 @@ class ResourcePolicy:
     synthesis_max_improvements: int = 20
     synthesis_retry_cooldown_seconds: int = 300
     synthesis_lease_seconds: int = 3600
+    claim_timeout_seconds: int = 7200
+    execution_batch_size: int = 8
     active_ready_limit: int = 3
+    analysis_cohort_min: int = 4
+    analysis_cohort_max: int = 8
+    analysis_parallelism: int = 1
+    analyzer_timeout_seconds: int = 900
+    analyzer_retry_limit: int = 1
+    minimum_trades: int = 50
+    maximum_drawdown_percentage: float = 30.0
+    minimum_sharpe_ratio: float = 0.0
+    minimum_profit_factor: float = 1.0
+    maximum_holdout_degradation_percentage: float = 50.0
 
     def __post_init__(self) -> None:
         if self.mode not in {"balanced", "compute_heavy"}:
@@ -32,7 +44,10 @@ class ResourcePolicy:
             "synthesis_generate_limit", "synthesis_low_watermark",
             "synthesis_min_new_concepts", "synthesis_max_improvements",
             "synthesis_retry_cooldown_seconds", "synthesis_lease_seconds",
-            "active_ready_limit",
+            "claim_timeout_seconds", "execution_batch_size", "active_ready_limit",
+            "analysis_cohort_min", "analysis_cohort_max",
+            "analysis_parallelism", "analyzer_timeout_seconds",
+            "minimum_trades",
         ):
             if int(getattr(self, name)) < (0 if name == "synthesis_low_watermark" else 1):
                 raise ValueError(f"resources.{name} must be non-negative" if name == "synthesis_low_watermark"
@@ -48,6 +63,24 @@ class ResourcePolicy:
                 "resources.synthesis_min_new_concepts + synthesis_max_improvements "
                 "must equal synthesis_generate_limit"
             )
+        if not 4 <= self.analysis_cohort_min <= self.analysis_cohort_max <= 8:
+            raise ValueError(
+                "resources analysis cohort must satisfy 4 <= min <= max <= 8"
+            )
+        if self.analysis_parallelism > 4:
+            raise ValueError("resources.analysis_parallelism must be at most 4")
+        if not 600 <= self.analyzer_timeout_seconds <= 900:
+            raise ValueError(
+                "resources.analyzer_timeout_seconds must be between 600 and 900"
+            )
+        if self.analyzer_retry_limit != 1:
+            raise ValueError("resources.analyzer_retry_limit must equal 1")
+        for name in (
+            "maximum_drawdown_percentage", "minimum_profit_factor",
+            "maximum_holdout_degradation_percentage",
+        ):
+            if float(getattr(self, name)) < 0:
+                raise ValueError(f"resources.{name} must be non-negative")
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -16,6 +16,108 @@ from ats_lab.reconcile import apply_reconciliation, build_reconciliation, normal
 
 
 class WorkflowDatabaseTests(unittest.TestCase):
+    def test_operator_control_is_durable_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+
+            self.assertEqual(database.control_status()["desired_state"], "running")
+            paused = database.set_control_state("paused", updated_by="test")
+
+            self.assertEqual(paused["desired_state"], "paused")
+            event = database.rows(
+                """SELECT event_type,payload_json FROM events
+                   WHERE aggregate_id='control'"""
+            )[0]
+            self.assertEqual(event["event_type"], "control_changed")
+            self.assertEqual(json.loads(event["payload_json"])["to"], "paused")
+
+    def test_supervisor_runtime_is_single_current_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+
+            database.update_supervisor_runtime(
+                worker_id="worker", process_id=123, phase="executing",
+                batch_id="BATCH-1", started_at="2026-01-01T00:00:00Z",
+                detail={"jobs": 8},
+            )
+            runtime = database.supervisor_runtime_status()
+
+            self.assertEqual(runtime["phase"], "executing")
+            self.assertEqual(runtime["batch_id"], "BATCH-1")
+            self.assertEqual(runtime["detail"], {"jobs": 8})
+
+    def test_resolve_blocker_reopens_with_durable_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1", strategy_name="TestStrategy",
+            ))
+            database.upsert_work_item(WorkItem(
+                id="JOB-1", experiment_id="EXP-1", priority=1,
+                state=WorkState.BLOCKED,
+                blocker_code="broken_sizing", blocker_detail="too large",
+            ))
+
+            item = database.resolve_blocked_work_item(
+                "JOB-1",
+                resolution_code="sizing_fixed",
+                detail="Fee-aware margin cap validated.",
+                evidence_ids=["session-1"],
+            )
+
+            self.assertEqual(item["state"], "ready")
+            self.assertIsNone(item["blocker_code"])
+            event = database.rows(
+                "SELECT event_type,payload_json FROM events WHERE aggregate_id='JOB-1'"
+            )[0]
+            payload = json.loads(event["payload_json"])
+            self.assertEqual(event["event_type"], "blocker_resolved")
+            self.assertEqual(payload["previous_blocker_code"], "broken_sizing")
+            self.assertEqual(payload["evidence_ids"], ["session-1"])
+
+            with self.assertRaises(ValueError):
+                database.resolve_blocked_work_item(
+                    "JOB-1", resolution_code="again", detail="duplicate",
+                )
+
+    def test_requeue_finished_evaluation_preserves_run_and_marks_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1", strategy_name="TestStrategy",
+            ))
+            database.upsert_work_item(WorkItem(
+                id="JOB-1", experiment_id="EXP-1", priority=1,
+                state=WorkState.FINISHED,
+            ))
+            database.add_run(RunResult(
+                id="RUN-1", experiment_id="EXP-1", work_item_id="JOB-1",
+                session_id="session-1", status=RunStatus.FINISHED,
+                metrics={"route_runs": [{"metrics": {"net_profit": 1}}]},
+            ))
+
+            item = database.requeue_finished_evaluation(
+                "JOB-1", worker_id="batch-worker",
+                reason="recover nested route metrics",
+            )
+
+            self.assertEqual(item["state"], "running")
+            self.assertEqual(item["claimed_by"], "batch-worker")
+            self.assertEqual(item["blocker_code"], "awaiting_batch_evaluation")
+            self.assertTrue(item["blocker_detail"].startswith("RECOVERY-"))
+            self.assertEqual(
+                len(database.pending_batch_evaluation("batch-worker")), 1,
+            )
+            event = database.rows(
+                """SELECT payload_json FROM events
+                   WHERE aggregate_id='JOB-1' AND event_type='evaluation_requeued'"""
+            )[0]
+            self.assertEqual(json.loads(event["payload_json"])["run_id"], "RUN-1")
+
     def test_claim_is_transactional_and_single_use(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
@@ -101,6 +203,12 @@ class ReconciliationTests(unittest.TestCase):
                     state=WorkState.SCHEDULED,
                     specification=specification,
                 ))
+            self.assertEqual(database.remaining_chain_count(), 1)
+            self.assertIsNotNone(database.reserve_synthesis_cohort(
+                worker_id="planner", requested_count=25,
+                low_watermark=1, lease_seconds=60,
+                retry_cooldown_seconds=0,
+            ))
             self.assertEqual(database.promote_scheduled_runnable(3), 1)
             states = {
                 row["id"]: row["state"]

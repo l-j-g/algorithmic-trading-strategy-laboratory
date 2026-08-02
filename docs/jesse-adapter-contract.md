@@ -5,7 +5,7 @@ The adapter boundary uses two versioned JSON documents:
 - `jesse-execution-request.schema.json`: strategy, operation, routes and date
   windows, parameters, and evaluation gates.
 - `jesse-execution-result.schema.json`: session ID, dashboard URL, normalized
-  metrics, terminal status, and structured error evidence.
+metrics, terminal status, and structured error evidence.
 
 Python producers and consumers use `JesseExecutionRequest` and
 `JesseExecutionResult` from `ats_lab.jesse_contracts`.
@@ -17,8 +17,27 @@ validates data. It does not import Jesse, read strategy/config/candle files,
 launch subprocesses, or perform trading operations. A worker implementing this
 contract must send every Jesse strategy and trading action through Jesse MCP.
 
-Laboratory state changes occur outside the adapter: claim work before building
-a request, then return Jesse evidence to Agent. Agent adds a research
-evaluation in the same response so the worker can persist run and verdict
-atomically before transitioning the work item. Execution completion and research
-quality remain separate facts even though they share one response.
+Laboratory state changes occur outside adapter. Supervisor claims one batch,
+executor returns Jesse evidence only, and laboratory persists runs. Separate
+isolated analyzer receives compact evidence and returns exact evaluation
+coverage. Laboratory then persists verdicts and finishes work. Analyzer failure
+does not repeat durable backtests.
+
+## Direct mechanical executor
+
+`ats_lab.direct_mcp_executor` owns ordinary backtest draft creation, start,
+bounded polling, terminal fetch, and compact result construction. It uses the
+configured `http://127.0.0.1:9002/mcp` endpoint and supported Streamable HTTP
+session semantics. Session IDs and exact terminal metrics are checkpointed in
+SQLite. Restart resumes polling and never invokes a model for terminal polling.
+Harness-fix recovery must remove only a matching stopped checkpoint after
+proving no finished run exists. Recovery records session ID and invalidation
+reason in immutable work-item event history, then permits one replacement
+session. Any finished run prevents checkpoint invalidation and requeue, avoiding
+duplicate valid execution.
+
+New or materially changed strategy source gets one separate bounded
+`prepare_strategies` Agent turn. That turn must use Jesse MCP and return only
+covered work-item IDs; source and patches are forbidden from ATS payloads.
+Unsupported operations remain on the existing Agent path. Set
+`jesse_executor.enabled = false` for full fallback.

@@ -1,6 +1,7 @@
-# Legacy Workflow Cleanup Gate
+# Legacy Workflow Cleanup
 
-Deletion is deferred. This file records categories, not authorization to delete.
+Canonical transition completed for new automation. Historical files remain
+read-only until their evidence is verified in SQLite.
 
 ## Retain as canonical
 
@@ -13,12 +14,12 @@ Deletion is deferred. This file records categories, not authorization to delete.
 
 ## Replace with generated views
 
-- `research/TEST_JOB_QUEUE.md` -> `active_queue` query.
-- `research/RESEARCH_JOURNAL.md` -> evaluation/history report.
+- archived legacy `TEST_JOB_QUEUE.md` -> `active_queue` query.
+- archived legacy `RESEARCH_JOURNAL.md` -> evaluation/history report.
 - candidate HTML -> database candidate view.
 - handoff/progress logs -> events and operational-status view.
 
-## Remove after migration verification
+## Compatibility-only; do not operate
 
 - Markdown queue mutation scripts.
 - JSON operational sidecars superseded by SQLite.
@@ -26,6 +27,10 @@ Deletion is deferred. This file records categories, not authorization to delete.
 - archived inline prompt variants and obsolete plans.
 - redundant experiment logging/review skills.
 - obsolete orchestration-framework references and artifacts.
+
+Jesse legacy loop and Markdown/JSON sidecars now live only under
+`research/archive/legacy_workflow/`. New queue, run, evaluation and synthesis
+writes must go through `ats-lab supervisor`.
 
 ## Keep outside database
 

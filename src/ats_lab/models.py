@@ -112,9 +112,10 @@ class RunResult:
     work_item_id: str
     session_id: str
     status: RunStatus
-    route: RouteSpec | None = None
+    route: RouteSpec | dict[str, Any] | None = None
     dashboard_url: str | None = None
     metrics: dict[str, Any] | None = None
+    raw_result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     started_at: str | None = None
     finished_at: str | None = None

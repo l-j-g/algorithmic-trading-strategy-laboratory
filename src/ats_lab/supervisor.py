@@ -1,0 +1,1380 @@
+"""Batch-first execution, isolated analysis, and cohort replenishment."""
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
+
+from .batch_synthesis import apply_batch, build_batch_context
+from .contracts import evaluation_from_payload
+from .database import WorkflowDatabase
+from .evidence import NormalizedEvidence
+from .gates import GateDecision, evaluate_gates
+from .models import (
+    Evaluation,
+    RouteSpec,
+    RunResult,
+    RunStatus,
+    Verdict,
+    WorkState,
+)
+from .resources import ResourcePolicy
+from .status import operator_status
+from .worker import DispatchResult, Dispatcher
+
+
+INFRASTRUCTURE_BLOCKERS = frozenset({
+    "executor_provider_failed", "executor_timeout", "executor_start_failed",
+    "executor_failed",
+})
+
+
+class BatchSupervisor:
+    """Spend one agent turn executing a batch, then one turn judging the batch."""
+
+    def __init__(
+        self,
+        database: WorkflowDatabase,
+        dispatcher: Dispatcher,
+        worker_id: str,
+        *,
+        resource_policy: ResourcePolicy | None = None,
+        retry_delay_seconds: float = 60,
+        max_attempts: int = 5,
+        sleep: Callable[[float], None] = time.sleep,
+        preflight: Callable[[], dict[str, Any]] | None = None,
+    ):
+        self.database = database
+        self.dispatcher = dispatcher
+        self.worker_id = worker_id
+        self.resource_policy = resource_policy or ResourcePolicy()
+        self.retry_delay_seconds = retry_delay_seconds
+        self.max_attempts = max_attempts
+        self.sleep = sleep
+        self.preflight = preflight
+        self.started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        self._recovered = False
+
+    def plan(self) -> dict[str, Any]:
+        result = operator_status(self.database)
+        result["control"] = self.database.control_status()
+        result["supervisor"] = self.database.supervisor_runtime_status()
+        result["policy"] = {
+            "execution_batch_size": self.resource_policy.execution_batch_size,
+            "analysis_cohort_min": self.resource_policy.analysis_cohort_min,
+            "analysis_cohort_max": self.resource_policy.analysis_cohort_max,
+            "analysis_parallelism": self.resource_policy.analysis_parallelism,
+            "analyzer_timeout_seconds": self.resource_policy.analyzer_timeout_seconds,
+            "synthesis_generate_limit": self.resource_policy.synthesis_generate_limit,
+            "synthesis_low_watermark": self.resource_policy.synthesis_low_watermark,
+        }
+        return result
+
+    def run_round(self) -> dict[str, Any]:
+        self._runtime("checking")
+        pending = self.database.pending_batch_evaluation(self.worker_id)
+        if pending:
+            return self._analyze_pending(pending, recovered=0, promoted=0)
+
+        desired_state = self.database.control_status()["desired_state"]
+        if desired_state == "stop_requested":
+            self._runtime("stopping")
+            return {
+                "status": "stop_requested",
+                "operator": operator_status(self.database),
+            }
+        if desired_state == "paused":
+            self._runtime("paused")
+            return {
+                "status": "paused",
+                "operator": operator_status(self.database),
+            }
+
+        if self.preflight is not None:
+            infrastructure = self.preflight()
+            if not infrastructure.get("healthy"):
+                self._runtime("infrastructure_blocked", detail=infrastructure)
+                return {
+                    "status": "infrastructure_blocked",
+                    "blocker_code": infrastructure.get("blocker_code"),
+                    "failed_check": infrastructure.get("failed_check"),
+                    "detail": infrastructure.get("detail"),
+                }
+
+        if not self._recovered:
+            cutoff = (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=self.resource_policy.claim_timeout_seconds)
+            ).isoformat().replace("+00:00", "Z")
+            recovered = len(self.database.recover_stale_unexecuted_claims(
+                cutoff, apply=True,
+            )["recoverable"])
+            if hasattr(self.database, "recover_abandoned_hpo_analysis"):
+                recovered += len(
+                    self.database.recover_abandoned_hpo_analysis(cutoff)
+                )
+            self._recovered = True
+        else:
+            recovered = 0
+        self.database.refresh_synthesis_cohorts()
+        promoted = self.database.promote_due_retries()
+        promoted += self.database.promote_scheduled_runnable(
+            self.resource_policy.active_ready_limit
+        )
+
+        if hasattr(self.database, "claim_hpo_analysis"):
+            hpo_job = self.database.claim_hpo_analysis(
+                self.worker_id,
+                cohort_id=f"HPO-COHORT-{uuid.uuid4().hex[:12].upper()}",
+            )
+            if hpo_job:
+                return self._analyze_hpo_job(
+                    hpo_job, recovered=recovered, promoted=promoted,
+                )
+
+        claimed = self.database.claim_batch(
+            self.worker_id, self.resource_policy.execution_batch_size,
+        )
+        if claimed:
+            return self._execute(claimed, recovered=recovered, promoted=promoted)
+
+        cohort = self._reserve_cohort()
+        if cohort:
+            return self._synthesize(
+                cohort, recovered=recovered, promoted=promoted,
+            )
+        return {
+            "status": "idle", "recovered": recovered, "promoted": promoted,
+            "operator": operator_status(self.database),
+        }
+
+    def _execute(
+        self, claimed: list[dict], *, recovered: int, promoted: int,
+    ) -> dict[str, Any]:
+        batch_id = f"BATCH-{uuid.uuid4().hex[:12].upper()}"
+        self._runtime(
+            "executing", batch_id=batch_id,
+            detail={"work_items": [item["id"] for item in claimed]},
+        )
+        for item in claimed:
+            self._record_stage(
+                item["id"], "queue_wait",
+                duration_ms=self._timestamp_delta_ms(
+                    item.get("created_at"), item.get("claimed_at"),
+                ),
+                state="finished", cohort_id=batch_id,
+            )
+        requests = []
+        for item in claimed:
+            request = self.database.execution_request(item["id"])
+            study = (
+                self.database.hpo_study_for_work_item(item["id"])
+                if hasattr(self.database, "hpo_study_for_work_item")
+                else None
+            )
+            if (
+                study
+                and study.get("lifecycle_state") == "hpo_scheduled"
+                and hasattr(self.database, "start_hpo_study")
+            ):
+                self.database.start_hpo_study(study["id"])
+            request["resource_policy"] = self.resource_policy.to_dict()
+            requests.append(request)
+        execution_started = time.perf_counter()
+        dispatch = self._dispatch({
+            "schema_version": 1,
+            "task_type": "execute_batch",
+            "batch_id": batch_id,
+            "instruction": (
+                "Execute every work item mechanically in this one bounded turn. "
+                "Do not evaluate, revise, synthesize, or edit laboratory state."
+            ),
+            "requests": requests,
+        })
+        execution_ms = (time.perf_counter() - execution_started) * 1000
+        for item in claimed:
+            self._record_stage(
+                item["id"], "execution", duration_ms=execution_ms,
+                state=(
+                    "finished" if dispatch.outcome == "finished" else "failed"
+                ),
+                cohort_id=batch_id,
+            )
+        payload = dispatch.payload or {}
+        results = payload.get("results")
+        if not isinstance(results, list):
+            detail = dispatch.detail or "batch executor requires results array"
+            for item in claimed:
+                self._retry_or_block(item, dispatch.blocker_code or "batch_execution_failed", detail)
+            return {
+                "status": "execution_failed", "batch_id": batch_id,
+                "work_items": [item["id"] for item in claimed], "detail": detail,
+                "recovered": recovered, "promoted": promoted,
+            }
+        by_id = {
+            result.get("work_item_id"): result
+            for result in results if isinstance(result, dict)
+        }
+        expected = {item["id"] for item in claimed}
+        unknown = set(by_id) - expected
+
+        awaiting: list[str] = []
+        terminal: list[dict[str, str]] = []
+        for item in claimed:
+            result = by_id.get(item["id"])
+            if result is None:
+                detail = (
+                    f"batch result missing work item {item['id']}; "
+                    f"received={sorted(key for key in by_id if key)}"
+                )
+                self._retry_or_block(
+                    item, "batch_coverage_mismatch", detail,
+                )
+                terminal.append({
+                    "work_item_id": item["id"], "state": "retry",
+                })
+                continue
+            outcome = result.get("outcome")
+            if outcome == "finished":
+                try:
+                    persistence_started = time.perf_counter()
+                    execution_request = self.database.execution_request(item["id"])
+                    self._persist_run(execution_request, result)
+                    persistence_ms = (
+                        time.perf_counter() - persistence_started
+                    ) * 1000
+                    self._record_stage(
+                        item["id"], "persistence",
+                        duration_ms=persistence_ms, state="finished",
+                        cohort_id=batch_id,
+                    )
+                    hpo_study = (
+                        self.database.hpo_study_for_work_item(item["id"])
+                        if hasattr(self.database, "hpo_study_for_work_item")
+                        else None
+                    )
+                    if hpo_study:
+                        self.database.complete_hpo_study(hpo_study["id"])
+                        self.database.add_evaluation(Evaluation(
+                            experiment_id=item["experiment_id"],
+                            verdict=Verdict.PASS,
+                            summary=(
+                                "HPO execution durable; separate HPO analysis "
+                                "scheduled."
+                            ),
+                            metrics_summary=json.dumps(
+                                [
+                                    evidence.to_compact_dict()
+                                    for evidence in
+                                    self.database.normalized_evidence_for_experiment(
+                                        item["experiment_id"]
+                                    )
+                                ],
+                                separators=(",", ":"), sort_keys=True,
+                            ),
+                            next_step=(
+                                "Analyze stable parameter regions and schedule "
+                                "rolling multi-market validation."
+                            ),
+                            evaluator="ats-lab-hpo-execution",
+                        ))
+                        self.database.transition_work_item(
+                            item["id"], WorkState.FINISHED,
+                            allowed_from=(WorkState.RUNNING,),
+                        )
+                        terminal.append({
+                            "work_item_id": item["id"],
+                            "state": "hpo_analysis",
+                        })
+                        continue
+                    self.database.mark_awaiting_evaluation(item["id"], batch_id)
+                    awaiting.append(item["id"])
+                except (KeyError, TypeError, ValueError) as error:
+                    self._retry_or_block(
+                        item, "invalid_execution_result", str(error),
+                    )
+                    terminal.append({"work_item_id": item["id"], "state": "retry"})
+            elif outcome == "blocked":
+                self.database.transition_work_item(
+                    item["id"], WorkState.BLOCKED, allowed_from=(WorkState.RUNNING,),
+                    blocker_code=result.get("blocker_code") or "executor_blocked",
+                    blocker_detail=result.get("detail") or "executor blocked work",
+                )
+                terminal.append({"work_item_id": item["id"], "state": "blocked"})
+            else:
+                self._retry_or_block(
+                    item, result.get("blocker_code") or "executor_retry",
+                    result.get("detail") or "executor requested retry",
+                    result.get("retry_after"),
+                )
+                terminal.append({"work_item_id": item["id"], "state": "retry"})
+        if not awaiting:
+            return {
+                "status": "batch_terminal", "batch_id": batch_id, "results": terminal,
+                "recovered": recovered, "promoted": promoted,
+            }
+        pending = self.database.pending_batch_evaluation(self.worker_id)
+        analysis = self._analyze_pending(
+            [row for row in pending if row["batch_id"] == batch_id],
+            recovered=recovered, promoted=promoted,
+        )
+        analysis["execution_results"] = terminal
+        if unknown:
+            analysis["ignored_unknown_results"] = sorted(unknown)
+        return analysis
+
+    def _analyze_pending(
+        self,
+        rows: list[dict],
+        *,
+        recovered: int,
+        promoted: int,
+    ) -> dict[str, Any]:
+        """Partition ordinary and HPO work into disjoint 4-8 item cohorts."""
+        cohorts = self._analysis_cohorts(rows)
+        self._runtime(
+            "analyzing",
+            batch_id=rows[0]["batch_id"] if rows else None,
+            detail={
+                "analyzer_state": "running",
+                "cohorts": len(cohorts),
+                "experiments": len(rows),
+            },
+        )
+        if self.resource_policy.analysis_parallelism > 1 and len(cohorts) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(
+                    self.resource_policy.analysis_parallelism, len(cohorts),
+                )
+            ) as executor:
+                results = list(executor.map(
+                    lambda cohort: self._analyze_cohort(cohort, attempt=1),
+                    cohorts,
+                ))
+        else:
+            results = [
+                self._analyze_cohort(cohort, attempt=1)
+                for cohort in cohorts
+            ]
+        failed = [result for result in results if result["status"] != "finished"]
+        return {
+            "status": "analysis_failed" if failed else "batch_complete",
+            "batch_id": rows[0]["batch_id"] if rows else None,
+            "cohorts": results,
+            "evaluated": [
+                item for result in results
+                for item in result.get("evaluated", [])
+            ],
+            "detail": failed[0].get("detail") if failed else None,
+            "recovered": recovered,
+            "promoted": promoted,
+            "operator": operator_status(self.database),
+        }
+
+    def _analyze_hpo_job(
+        self,
+        job: dict,
+        *,
+        recovered: int,
+        promoted: int,
+    ) -> dict[str, Any]:
+        """Interpret one imported/completed HPO study using canonical evidence."""
+        study_id = job["study_id"]
+        payload = self.database.hpo_analysis_payload(
+            study_id, limit=1000,
+        )
+        detail = self.database.hpo_study_detail(study_id)
+        if not payload or not detail:
+            return self._fail_hpo_job(
+                job, "HPO analysis payload unavailable",
+                recovered=recovered, promoted=promoted,
+            )
+        selected_by_number = {
+            int(item["trial_number"]): item
+            for item in detail.get("selected_trials", [])
+        }
+        trials = payload["trials"]
+        if selected_by_number:
+            trials = [
+                trial for trial in trials
+                if int(trial["trial_number"]) in selected_by_number
+            ]
+        canonical: list[dict[str, Any]] = []
+        objective_name = payload["study"].get("objective_name") or "objective"
+        for trial in trials:
+            selection = selected_by_number.get(int(trial["trial_number"]), {})
+            objective = trial.get("objective_value")
+            trial_raw = trial.get("evidence", [])
+            trial_models = [
+                NormalizedEvidence.from_row(raw) for raw in trial_raw
+            ]
+            trial_gates = evaluate_gates(
+                trial_models, policy=self.resource_policy,
+            )
+            classification = selection.get("classification")
+            for raw in trial_raw:
+                item = {
+                    key: value for key, value in raw.items()
+                    if value is not None
+                }
+                item["optimizer_objective"] = (
+                    f"{objective_name}={objective}"
+                    if objective is not None else objective_name
+                )
+                if selection.get("selection_reason"):
+                    item["finding"] = (
+                        f"{selection['selection_reason']} "
+                        f"{trial_gates.finding}"
+                    )
+                item["verdict"] = (
+                    "reject" if classification == "likely_overfit"
+                    else "revise" if classification in {
+                        "validation_candidate", "selected",
+                    }
+                    else trial_gates.verdict.value
+                )
+                canonical.append(item)
+        if not canonical:
+            return self._fail_hpo_job(
+                job, "HPO study has no canonical completed-trial evidence",
+                recovered=recovered, promoted=promoted,
+            )
+        if int(job.get("attempts") or 1) > 1:
+            canonical = canonical[:max(1, len(canonical) // 2)]
+        experiment_id = payload["study"]["hpo_experiment_id"]
+        request = {
+            "schema_version": 1,
+            "task_type": "analyze_hpo",
+            "analysis_cohort_id": job.get("cohort_id"),
+            "analyzer_timeout_seconds": (
+                self.resource_policy.analyzer_timeout_seconds
+            ),
+            "instruction": (
+                "Interpret stable regions and overfit risk already represented "
+                "in canonical findings. Recommend validation only; never "
+                "overwrite strategy defaults."
+            ),
+            "executions": [{
+                "experiment_id": experiment_id,
+                "evidence": canonical,
+            }],
+        }
+        payload_bytes = len(json.dumps(
+            request, separators=(",", ":"), sort_keys=True,
+        ).encode())
+        self._runtime(
+            "hpo_analysis",
+            detail={
+                "analyzer_state": "running",
+                "study_id": study_id,
+                "job_id": job["id"],
+                "attempt": job.get("attempts"),
+                "payload_bytes": payload_bytes,
+            },
+        )
+        work_item_id = payload["study"].get("hpo_work_item_id")
+        if work_item_id:
+            self._record_stage(
+                work_item_id, "hpo_analysis", duration_ms=None,
+                state="running", analyzer_attempt=job.get("attempts"),
+                cohort_id=job.get("cohort_id"),
+            )
+        started = time.perf_counter()
+        dispatch = self._dispatch(request)
+        duration_ms = (time.perf_counter() - started) * 1000
+        valid, error, evaluations = self._validate_analysis_response(
+            dispatch, [{"experiment_id": experiment_id}],
+        )
+        if not valid:
+            return self._fail_hpo_job(
+                job, error, recovered=recovered, promoted=promoted,
+                duration_ms=duration_ms, payload_bytes=payload_bytes,
+                work_item_id=work_item_id,
+            )
+        raw = evaluations[0]
+        finding = str(raw.get("finding") or "").strip()
+        next_action = str(raw.get("next_action") or "").strip()
+        if not finding or not next_action:
+            return self._fail_hpo_job(
+                job, "HPO analysis requires finding and next_action",
+                recovered=recovered, promoted=promoted,
+                duration_ms=duration_ms, payload_bytes=payload_bytes,
+                work_item_id=work_item_id,
+            )
+        verdict_value = str(raw.get("verdict") or "revise")
+        if verdict_value not in {
+            "paper_trade_candidate", "revise", "reject",
+        }:
+            verdict_value = "revise"
+        self.database.add_evaluation(Evaluation(
+            experiment_id=experiment_id,
+            verdict=Verdict(verdict_value),
+            summary=finding,
+            metrics_summary=json.dumps(
+                canonical, separators=(",", ":"), sort_keys=True,
+            ),
+            next_step=next_action,
+            evaluator="ats-lab-hpo-analyzer",
+        ))
+        validation_numbers = [
+            number for number, selection in selected_by_number.items()
+            if selection.get("classification") in {
+                "validation_candidate", "selected",
+            }
+        ]
+        if validation_numbers:
+            validations = self.database.schedule_hpo_validations(
+                study_id, validation_numbers,
+                evidence_splits=("oos", "rolling"),
+            )
+            status = "validation_scheduled"
+            disposition = "revise"
+        else:
+            self.database.terminalize_hpo_analysis(
+                job["id"], disposition=verdict_value,
+                finding=finding, next_action=next_action,
+            )
+            validations = []
+            status = "terminal"
+            disposition = verdict_value
+        if work_item_id:
+            self._record_stage(
+                work_item_id, "hpo_analysis", duration_ms=duration_ms,
+                state="finished", analyzer_attempt=job.get("attempts"),
+                cohort_id=job.get("cohort_id"),
+            )
+        return {
+            "status": status,
+            "study_id": study_id,
+            "analysis_job_id": job["id"],
+            "attempt": job.get("attempts"),
+            "payload_bytes": payload_bytes,
+            "disposition": disposition,
+            "validations": len(validations),
+            "recovered": recovered,
+            "promoted": promoted,
+        }
+
+    def _fail_hpo_job(
+        self,
+        job: dict,
+        error: str,
+        *,
+        recovered: int,
+        promoted: int,
+        duration_ms: float | None = None,
+        payload_bytes: int | None = None,
+        work_item_id: str | None = None,
+    ) -> dict[str, Any]:
+        retry_after = datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z",
+        )
+        state = self.database.retry_hpo_analysis(
+            job["id"], error=error, retry_after=retry_after,
+            max_attempts=2,
+        )
+        if work_item_id:
+            self._record_stage(
+                work_item_id, "hpo_analysis", duration_ms=duration_ms,
+                state=state["state"], analyzer_attempt=job.get("attempts"),
+                cohort_id=job.get("cohort_id"),
+            )
+        return {
+            "status": (
+                "hpo_analysis_blocked"
+                if state["state"] == "terminal"
+                else "hpo_analysis_retry"
+            ),
+            "study_id": job["study_id"],
+            "analysis_job_id": job["id"],
+            "attempt": job.get("attempts"),
+            "payload_bytes": payload_bytes,
+            "detail": error,
+            "recovered": recovered,
+            "promoted": promoted,
+        }
+
+    def _analysis_cohorts(self, rows: list[dict]) -> list[list[dict]]:
+        ordinary = [
+            row for row in rows if self._operation(row) != "hpo"
+        ]
+        hpo = [row for row in rows if self._operation(row) == "hpo"]
+        return [
+            cohort
+            for group in (ordinary, hpo)
+            for cohort in self._balanced_chunks(group)
+        ]
+
+    def _balanced_chunks(self, rows: list[dict]) -> list[list[dict]]:
+        if not rows:
+            return []
+        maximum = self.resource_policy.analysis_cohort_max
+        count = (len(rows) + maximum - 1) // maximum
+        base, extra = divmod(len(rows), count)
+        result = []
+        offset = 0
+        for index in range(count):
+            size = base + (1 if index < extra else 0)
+            result.append(rows[offset:offset + size])
+            offset += size
+        return result
+
+    def _analyze_cohort(
+        self,
+        rows: list[dict],
+        *,
+        attempt: int,
+    ) -> dict[str, Any]:
+        cohort_id = (
+            f"ANALYSIS-{uuid.uuid4().hex[:12].upper()}-A{attempt}"
+        )
+        task_type = (
+            "analyze_hpo"
+            if all(self._operation(row) == "hpo" for row in rows)
+            else "analyze_batch"
+        )
+        try:
+            compact_executions = [self._compact_execution(row) for row in rows]
+        except (KeyError, TypeError, ValueError) as error:
+            return self._analysis_failure(
+                rows, cohort_id, attempt,
+                f"normalized evidence unavailable: {error}",
+            )
+        request = {
+            "schema_version": 1,
+            "task_type": task_type,
+            "analysis_cohort_id": cohort_id,
+            "analyzer_timeout_seconds": (
+                self.resource_policy.analyzer_timeout_seconds
+            ),
+            "instruction": (
+                "Interpret deterministic gate results and canonical evidence. "
+                "Return concise finding, disposition, and next action only."
+            ),
+            "executions": compact_executions,
+        }
+        payload_bytes = len(json.dumps(
+            request, separators=(",", ":"), sort_keys=True,
+        ).encode())
+        for row in rows:
+            self._record_stage(
+                row["work_item_id"], "analysis", duration_ms=None,
+                state="running", analyzer_attempt=attempt,
+                cohort_id=cohort_id,
+            )
+        started = time.perf_counter()
+        dispatch = self._dispatch(request)
+        analysis_ms = (time.perf_counter() - started) * 1000
+        valid, detail, evaluations = self._validate_analysis_response(
+            dispatch, rows,
+        )
+        if not valid:
+            if dispatch.blocker_code in INFRASTRUCTURE_BLOCKERS:
+                for row in rows:
+                    self._record_stage(
+                        row["work_item_id"], "analysis",
+                        duration_ms=analysis_ms, state="infrastructure_retry",
+                        analyzer_attempt=attempt, cohort_id=cohort_id,
+                    )
+                return {
+                    "status": "infrastructure_retry",
+                    "cohort_id": cohort_id, "attempt": attempt,
+                    "payload_bytes": payload_bytes, "detail": detail,
+                    "evaluated": [],
+                }
+            if attempt <= self.resource_policy.analyzer_retry_limit:
+                retry_results = [
+                    self._analyze_cohort(subset, attempt=attempt + 1)
+                    for subset in self._reduced_retry_cohorts(rows)
+                ]
+                failed = [
+                    result for result in retry_results
+                    if result["status"] != "finished"
+                ]
+                return {
+                    "status": "failed" if failed else "finished",
+                    "cohort_id": cohort_id,
+                    "attempt": attempt,
+                    "retried": True,
+                    "payload_bytes": payload_bytes,
+                    "detail": failed[0].get("detail") if failed else detail,
+                    "evaluated": [
+                        item for result in retry_results
+                        for item in result.get("evaluated", [])
+                    ],
+                }
+            return self._analysis_failure(
+                rows, cohort_id, attempt, detail,
+                duration_ms=analysis_ms, payload_bytes=payload_bytes,
+            )
+
+        try:
+            finalized = self._finalize_analysis(rows, evaluations)
+        except (KeyError, StopIteration, TypeError, ValueError) as error:
+            if attempt <= self.resource_policy.analyzer_retry_limit:
+                retry_results = [
+                    self._analyze_cohort(subset, attempt=attempt + 1)
+                    for subset in self._reduced_retry_cohorts(rows)
+                ]
+                failed = [
+                    result for result in retry_results
+                    if result["status"] != "finished"
+                ]
+                return {
+                    "status": "failed" if failed else "finished",
+                    "cohort_id": cohort_id,
+                    "attempt": attempt,
+                    "retried": True,
+                    "payload_bytes": payload_bytes,
+                    "detail": str(error),
+                    "evaluated": [
+                        item for result in retry_results
+                        for item in result.get("evaluated", [])
+                    ],
+                }
+            return self._analysis_failure(
+                rows, cohort_id, attempt, str(error),
+                duration_ms=analysis_ms, payload_bytes=payload_bytes,
+            )
+        for row in rows:
+            self._record_stage(
+                row["work_item_id"], "analysis",
+                duration_ms=analysis_ms, state="finished",
+                analyzer_attempt=attempt, cohort_id=cohort_id,
+            )
+        return {
+            "status": "finished",
+            "cohort_id": cohort_id,
+            "task_type": task_type,
+            "attempt": attempt,
+            "payload_bytes": payload_bytes,
+            "evaluated": finalized,
+        }
+
+    def _validate_analysis_response(
+        self,
+        dispatch: DispatchResult,
+        rows: list[dict],
+    ) -> tuple[bool, str, list[dict]]:
+        payload = dispatch.payload or {}
+        evaluations = payload.get("evaluations")
+        if dispatch.outcome != "finished" or not isinstance(evaluations, list):
+            return (
+                False,
+                dispatch.detail or "analyzer returned invalid result",
+                [],
+            )
+        expected = {row["experiment_id"] for row in rows}
+        actual = {
+            item.get("experiment_id")
+            for item in evaluations if isinstance(item, dict)
+        }
+        if actual != expected or len(evaluations) != len(expected):
+            return (
+                False,
+                f"evaluation coverage mismatch: expected={sorted(expected)} "
+                f"actual={sorted(value for value in actual if value)}",
+                [],
+            )
+        return True, "", evaluations
+
+    def _finalize_analysis(
+        self,
+        rows: list[dict],
+        evaluations: list[dict],
+    ) -> list[str]:
+        validated = []
+        for raw in evaluations:
+            payload_item = dict(raw)
+            payload_item.setdefault("evaluator", "ats-lab-batch-analyzer")
+            payload_item["summary"] = payload_item.pop("finding", "")
+            payload_item["next_step"] = payload_item.pop("next_action", "")
+            run_row = next(
+                row for row in rows
+                if row["experiment_id"] == payload_item.get("experiment_id")
+            )
+            normalized, gates = self._gated_evidence(run_row)
+            payload_item["metrics_summary"] = json.dumps(
+                [item.to_compact_dict() for item in normalized],
+                separators=(",", ":"), sort_keys=True,
+            )
+            missing = [
+                name for name in ("summary", "metrics_summary", "next_step")
+                if not payload_item.get(name)
+            ]
+            if missing:
+                raise ValueError(
+                    "batch evaluation missing fields: " + ", ".join(missing)
+                )
+            lifecycle_verdict = self._deterministic_verdict(normalized)
+            if lifecycle_verdict is not None:
+                payload_item["verdict"] = lifecycle_verdict
+            elif gates.failed:
+                payload_item["verdict"] = Verdict.REJECT
+            evaluation = evaluation_from_payload(payload_item)
+            operation = self._operation(run_row)
+            if operation == "significance" and lifecycle_verdict is None:
+                raise ValueError(
+                    "significance batch evaluation requires normalized "
+                    "significance_p_value"
+                )
+            validated.append((evaluation, operation, normalized))
+
+        finalized = []
+        for evaluation, operation, normalized in validated:
+            persistence_started = time.perf_counter()
+            item = self.database.finalize_batch_evaluation(evaluation)
+            persistence_ms = (
+                time.perf_counter() - persistence_started
+            ) * 1000
+            self._record_stage(
+                item["id"], "persistence", duration_ms=persistence_ms,
+                state="finished",
+            )
+            finalized.append(item["id"])
+            if (
+                evaluation.verdict is Verdict.HPO_CANDIDATE
+                and operation != "hpo"
+                and hasattr(self.database, "schedule_hpo_candidate")
+            ):
+                self.database.schedule_hpo_candidate(
+                    evaluation.experiment_id, item["id"],
+                    objective_name="sharpe_ratio",
+                )
+            if operation == "significance":
+                p_values = [
+                    evidence.significance_p_value for evidence in normalized
+                    if evidence.significance_p_value is not None
+                ]
+                if p_values:
+                    self.database.reconcile_significance_gate(
+                        item["id"], float(max(p_values)),
+                        self.resource_policy.active_ready_limit,
+                    )
+        return finalized
+
+    def _analysis_failure(
+        self,
+        rows: list[dict],
+        cohort_id: str,
+        attempt: int,
+        detail: str,
+        *,
+        duration_ms: float | None = None,
+        payload_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        for row in rows:
+            self._terminalize_analysis_failure(
+                row, detail, cohort_id=cohort_id, attempt=attempt,
+            )
+            self._record_stage(
+                row["work_item_id"], "analysis",
+                duration_ms=duration_ms, state="blocked",
+                analyzer_attempt=attempt, cohort_id=cohort_id,
+            )
+        return {
+            "status": "failed",
+            "cohort_id": cohort_id,
+            "attempt": attempt,
+            "payload_bytes": payload_bytes,
+            "detail": detail,
+            "evaluated": [],
+        }
+
+    def _reduced_retry_cohorts(
+        self, rows: list[dict],
+    ) -> list[list[dict]]:
+        if len(rows) <= 1:
+            return [rows]
+        midpoint = (len(rows) + 1) // 2
+        return [rows[:midpoint], rows[midpoint:]]
+
+    def _synthesize(
+        self,
+        cohort: dict,
+        *,
+        recovered: int,
+        promoted: int,
+    ) -> dict[str, Any]:
+        self._runtime(
+            "synthesizing",
+            detail={"cohort_id": cohort["id"], "requested": cohort["requested_count"]},
+        )
+        dispatch = self._dispatch({
+            "schema_version": 1,
+            "task_type": "synthesize_batch",
+            "cohort": cohort,
+            "context": build_batch_context(
+                self.database, policy=self.resource_policy,
+            ),
+        })
+        payload = dispatch.payload or {}
+        evidence = payload.get("evidence")
+        requests = (
+            evidence.get("synthesis_requests")
+            if isinstance(evidence, dict) else None
+        )
+        if dispatch.outcome != "finished" or not isinstance(requests, list):
+            detail = dispatch.detail or "synthesis requires evidence.synthesis_requests"
+            self.database.fail_synthesis_cohort(cohort["id"], detail)
+            return {
+                "status": "synthesis_failed", "detail": detail,
+                "recovered": recovered, "promoted": promoted,
+            }
+        try:
+            bounded_requests = self._bounded_synthesis_requests(
+                requests, cohort["requested_count"],
+            )
+            synthesis = apply_batch(
+                self.database, bounded_requests, policy=self.resource_policy,
+                cohort_id=cohort["id"], source_path="batch-supervisor",
+            )
+            if (
+                synthesis["rejected"]
+                or len(synthesis["generated"]) != cohort["requested_count"]
+            ):
+                raise ValueError(f"incomplete synthesis cohort: {synthesis}")
+            chains = []
+            for generated in synthesis["generated"]:
+                work_item_ids = [
+                    item_id for item_id in (
+                        generated.get("significance_job"),
+                        generated["baseline_job"],
+                    ) if item_id
+                ]
+                chains.append({
+                    "slot": generated["cohort_slot"],
+                    "lane": generated["lane"],
+                    "source_experiment_id": generated["source_experiment_id"],
+                    "work_item_ids": work_item_ids,
+                })
+            self.database.activate_synthesis_cohort(cohort["id"], chains)
+        except (KeyError, TypeError, ValueError) as error:
+            self.database.fail_synthesis_cohort(cohort["id"], str(error))
+            return {
+                "status": "synthesis_failed", "detail": str(error),
+                "recovered": recovered, "promoted": promoted,
+            }
+        return {
+            "status": "synthesized", "synthesis": synthesis,
+            "over_generated": len(requests) - len(bounded_requests),
+            "recovered": recovered, "promoted": promoted,
+        }
+
+    def _bounded_synthesis_requests(
+        self,
+        requests: list[dict[str, Any]],
+        requested_count: int,
+    ) -> list[dict[str, Any]]:
+        """Trim over-generation deterministically while preserving lane gates."""
+        received = len(requests)
+        if received < requested_count:
+            raise ValueError(
+                f"synthesis cohort returned {received}/{requested_count} requests"
+            )
+        if received == requested_count:
+            return requests
+        indexed = list(enumerate(requests))
+        if any(
+            not isinstance(item, dict)
+            or item.get("lane") not in {"new_concept", "improvement"}
+            for _, item in indexed
+        ):
+            raise ValueError(
+                "over-generated synthesis cohort contains invalid lane"
+            )
+        improvements = [
+            pair for pair in indexed if pair[1]["lane"] == "improvement"
+        ]
+        new_concepts = [
+            pair for pair in indexed if pair[1]["lane"] == "new_concept"
+        ]
+        maximum_improvements = min(
+            self.resource_policy.synthesis_max_improvements,
+            requested_count - self.resource_policy.synthesis_min_new_concepts,
+        )
+        improvement_count = min(
+            len(improvements), maximum_improvements,
+        )
+        new_count = requested_count - improvement_count
+        if len(new_concepts) < new_count:
+            raise ValueError(
+                "over-generated synthesis cohort cannot satisfy lane policy"
+            )
+        selected = {
+            index for index, _ in improvements[:improvement_count]
+        } | {
+            index for index, _ in new_concepts[:new_count]
+        }
+        return [
+            item for index, item in indexed if index in selected
+        ]
+
+    def _reserve_cohort(self) -> dict | None:
+        return self.database.reserve_synthesis_cohort(
+            worker_id=self.worker_id,
+            requested_count=self.resource_policy.synthesis_generate_limit,
+            low_watermark=self.resource_policy.synthesis_low_watermark,
+            lease_seconds=self.resource_policy.synthesis_lease_seconds,
+            retry_cooldown_seconds=self.resource_policy.synthesis_retry_cooldown_seconds,
+        )
+
+    def _dispatch(self, request: dict[str, Any]) -> DispatchResult:
+        try:
+            return self.dispatcher.dispatch(request)
+        except Exception as error:
+            return DispatchResult(
+                outcome="retry", blocker_code="dispatcher_exception", detail=str(error),
+            )
+
+    def _runtime(
+        self,
+        phase: str,
+        *,
+        batch_id: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.database.update_supervisor_runtime(
+            worker_id=self.worker_id,
+            process_id=os.getpid(),
+            phase=phase,
+            batch_id=batch_id,
+            detail=detail,
+            started_at=self.started_at,
+        )
+
+    def _persist_run(self, request: dict[str, Any], result: dict[str, Any]) -> None:
+        evidence = result.get("evidence")
+        if not isinstance(evidence, dict) or not isinstance(evidence.get("run"), dict):
+            raise ValueError("finished batch result requires evidence.run")
+        run = evidence["run"]
+        session_id = str(run.get("session_id") or "")
+        metrics = run.get("metrics")
+        raw_result = run.get("raw_result")
+        if not session_id:
+            raise ValueError("evidence.run.session_id is required")
+        if not isinstance(metrics, dict):
+            raise ValueError("evidence.run.metrics must be an object")
+        if not isinstance(raw_result, dict):
+            raise ValueError(
+                "evidence.run.raw_result must be a compact session envelope"
+            )
+        expected_raw_keys = {"session_id", "status", "metrics"}
+        if set(raw_result) != expected_raw_keys:
+            raise ValueError(
+                "evidence.run.raw_result must contain exactly "
+                "session_id, status, and metrics"
+            )
+        raw_session_id = raw_result.get("session_id")
+        if raw_session_id != session_id:
+            raise ValueError(
+                "evidence.run.session_id must equal raw_result.session_id"
+            )
+        status = str(run.get("status", "finished"))
+        if raw_result.get("status") != status:
+            raise ValueError(
+                "evidence.run.status must equal raw_result.status"
+            )
+        raw_metrics = raw_result.get("metrics")
+        if not isinstance(raw_metrics, dict):
+            raise ValueError("evidence.run.raw_result.metrics must be an object")
+        if metrics != raw_metrics:
+            raise ValueError(
+                "evidence.run.metrics must equal raw_result.metrics"
+            )
+        route_payload = run.get("route")
+        route = None
+        if isinstance(route_payload, dict):
+            route = RouteSpec(**{
+                key: route_payload[key]
+                for key in ("exchange", "symbol", "timeframe", "start_date", "finish_date")
+                if key in route_payload
+            })
+        elif status == RunStatus.FINISHED.value:
+            requested_routes = request.get("experiment", {}).get("routes")
+            if isinstance(requested_routes, list) and requested_routes:
+                route = {
+                    "coverage": "aggregate_requested_routes",
+                    "evidence": {
+                        "session_id": session_id,
+                        "status": status,
+                    },
+                    "routes": [
+                        {
+                            key: requested[key]
+                            for key in (
+                                "exchange", "symbol", "timeframe",
+                                "start_date", "finish_date",
+                            )
+                            if key in requested
+                        }
+                        for requested in requested_routes
+                        if isinstance(requested, dict)
+                    ],
+                }
+        self.database.add_run(RunResult(
+            id=str(run.get("id") or f"{request['work_item_id']}:{session_id}"),
+            experiment_id=request["experiment_id"], work_item_id=request["work_item_id"],
+            session_id=session_id, status=RunStatus(status),
+            route=route, dashboard_url=run.get("dashboard_url"), metrics=metrics,
+            raw_result=raw_result, error=run.get("error"),
+            started_at=run.get("started_at"),
+            finished_at=run.get("finished_at"),
+        ))
+
+    def _retry_or_block(
+        self, item: dict, code: str, detail: str, retry_after: str | None = None,
+    ) -> None:
+        if code in INFRASTRUCTURE_BLOCKERS:
+            when = retry_after or (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=self.retry_delay_seconds)
+            ).isoformat().replace("+00:00", "Z")
+            self.database.defer_infrastructure_retry(
+                item["id"], blocker_code=code,
+                blocker_detail=detail, retry_after=when,
+            )
+            return
+        next_attempt = int(item["attempts"]) + 1
+        if next_attempt >= self.max_attempts:
+            self.database.transition_work_item(
+                item["id"], WorkState.BLOCKED, allowed_from=(WorkState.RUNNING,),
+                blocker_code="retry_limit_reached",
+                blocker_detail=f"{code} after {next_attempt} attempts: {detail}".strip(),
+            )
+            return
+        delay = self.retry_delay_seconds * (2 ** max(0, next_attempt - 1))
+        when = retry_after or (
+            datetime.now(timezone.utc) + timedelta(seconds=delay)
+        ).isoformat().replace("+00:00", "Z")
+        self.database.transition_work_item(
+            item["id"], WorkState.WAITING_RETRY, allowed_from=(WorkState.RUNNING,),
+            blocker_code=code, blocker_detail=detail, retry_after=when,
+        )
+
+    def _normalized_evidence(self, row: dict) -> list[NormalizedEvidence]:
+        evidence = self.database.normalized_evidence_for_run(row["run_id"])
+        if not evidence:
+            raise ValueError(f"run {row['run_id']} produced no normalized evidence")
+        deterministic_verdict = self._deterministic_verdict(evidence)
+        if deterministic_verdict is not None:
+            evidence = [
+                replace(item, verdict=deterministic_verdict)
+                for item in evidence
+            ]
+        return evidence
+
+    def _gated_evidence(
+        self, row: dict,
+    ) -> tuple[list[NormalizedEvidence], GateDecision]:
+        evidence = self._normalized_evidence(row)
+        experiment = json.loads(row.get("experiment_json") or "{}")
+        routes = experiment.get("routes")
+        if not isinstance(routes, list):
+            routes = []
+        route_payload = json.loads(row.get("route_json") or "{}")
+        observed_routes = []
+        if (
+            route_payload.get("coverage") == "aggregate_requested_routes"
+            and route_payload.get("evidence", {}).get("session_id")
+            == row.get("session_id")
+            and route_payload.get("evidence", {}).get("status") == "finished"
+            and isinstance(route_payload.get("routes"), list)
+        ):
+            observed_routes = route_payload["routes"]
+        gates = evaluate_gates(
+            evidence, policy=self.resource_policy, expected_routes=routes,
+            observed_routes=observed_routes,
+        )
+        lifecycle_verdict = self._deterministic_verdict(evidence)
+        verdict = lifecycle_verdict or gates.verdict
+        return [
+            replace(item, verdict=verdict, finding=gates.finding)
+            for item in evidence
+        ], gates
+
+    def _compact_execution(self, row: dict) -> dict[str, Any]:
+        evidence, _ = self._gated_evidence(row)
+        return {
+            "work_item_id": row["work_item_id"],
+            "experiment_id": row["experiment_id"],
+            "evidence": [item.to_compact_dict() for item in evidence],
+        }
+
+    def _operation(self, row: dict) -> str:
+        work = self.database.rows(
+            "SELECT specification_json FROM work_items WHERE id=?",
+            (row["work_item_id"],),
+        )
+        work_spec = json.loads(work[0]["specification_json"] or "{}") if work else {}
+        operation = work_spec.get("operation")
+        if operation:
+            return str(operation)
+        experiment = json.loads(row.get("experiment_json") or "{}")
+        return {
+            "baseline": "backtest",
+            "multi_window": "backtest",
+            "cost_sensitivity": "backtest",
+            "out_of_sample": "backtest",
+            "harness_check": "backtest",
+            "significance": "significance",
+            "monte_carlo": "monte_carlo",
+            "hpo": "hpo",
+        }.get(experiment.get("experiment_type"), "backtest")
+
+    def _terminalize_analysis_failure(
+        self,
+        row: dict,
+        detail: str,
+        *,
+        cohort_id: str,
+        attempt: int,
+    ) -> None:
+        summary = (
+            f"Analyzer failed after {attempt} attempts in {cohort_id}: {detail}"
+        )
+        self.database.add_evaluation(Evaluation(
+            experiment_id=row["experiment_id"],
+            verdict=Verdict.INFRASTRUCTURE_FAILURE,
+            summary=summary,
+            metrics_summary=json.dumps(
+                [
+                    item.to_compact_dict()
+                    for item in self._normalized_evidence(row)
+                ],
+                separators=(",", ":"), sort_keys=True,
+            ),
+            next_step=(
+                "Inspect analyzer blocker; requeue durable evidence without "
+                "rerunning execution."
+            ),
+            evaluator="ats-lab-analyzer-terminal",
+        ))
+        self.database.transition_work_item(
+            row["work_item_id"], WorkState.BLOCKED,
+            allowed_from=(WorkState.RUNNING,),
+            blocker_code="analyzer_retry_exhausted",
+            blocker_detail=summary,
+        )
+
+    def _record_stage(
+        self,
+        work_item_id: str,
+        stage: str,
+        *,
+        duration_ms: float | None,
+        state: str,
+        analyzer_attempt: int | None = None,
+        cohort_id: str | None = None,
+    ) -> None:
+        recorder = getattr(self.database, "record_work_item_stage", None)
+        if recorder is None:
+            return
+        finished = datetime.now(timezone.utc)
+        started = (
+            finished - timedelta(milliseconds=duration_ms)
+            if duration_ms is not None else finished
+        )
+        recorder(
+            work_item_id=work_item_id,
+            stage=stage,
+            started_at=started.isoformat().replace("+00:00", "Z"),
+            finished_at=(
+                finished.isoformat().replace("+00:00", "Z")
+                if duration_ms is not None else None
+            ),
+            duration_ms=(
+                round(duration_ms) if duration_ms is not None else None
+            ),
+            state=state,
+            analyzer_attempt=analyzer_attempt,
+            cohort_id=cohort_id,
+        )
+
+    @staticmethod
+    def _timestamp_delta_ms(
+        started_at: str | None,
+        finished_at: str | None,
+    ) -> float | None:
+        if not started_at or not finished_at:
+            return None
+        try:
+            started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return max(0.0, (finished - started).total_seconds() * 1000)
+
+    @staticmethod
+    def _deterministic_verdict(
+        evidence: list[NormalizedEvidence],
+    ) -> Verdict | None:
+        """Apply lifecycle gates to canonical fields before Agent analysis."""
+        p_values = [
+            item.significance_p_value for item in evidence
+            if item.lifecycle_stage == "significance"
+            and item.significance_p_value is not None
+        ]
+        if p_values:
+            worst = max(p_values)
+            return (
+                Verdict.PASS if worst < 0.05
+                else (
+                    Verdict.INCONCLUSIVE if worst <= 0.10
+                    else Verdict.REJECT
+                )
+            )
+        cost_statuses = [
+            item.cost_stress_status for item in evidence
+            if item.lifecycle_stage == "cost_sensitivity"
+            and item.cost_stress_status is not None
+        ]
+        if cost_statuses:
+            if "fail" in cost_statuses:
+                return Verdict.REJECT
+            if "inconclusive" in cost_statuses:
+                return Verdict.INCONCLUSIVE
+            if all(status == "pass" for status in cost_statuses):
+                return Verdict.PASS
+        return None
+
+    def run(
+        self,
+        *,
+        continuous: bool,
+        idle_sleep: float,
+        max_rounds: int | None = None,
+        on_result: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        rounds = 0
+        self._runtime("starting")
+        while True:
+            result = self.run_round()
+            rounds += 1
+            if on_result:
+                on_result(result)
+            if not continuous or max_rounds is not None:
+                results.append(result)
+            if max_rounds is not None and rounds >= max_rounds:
+                self._runtime("stopped", detail={"reason": "max_rounds"})
+                return results
+            if not continuous:
+                self._runtime("stopped", detail={"reason": "single_round"})
+                return results
+            if result["status"] == "stop_requested":
+                self._runtime("stopped", detail={"reason": "operator_request"})
+                return results
+            if result["status"] == "paused":
+                self._runtime("paused")
+            else:
+                self._runtime("idle", detail={"last_status": result["status"]})
+            if result["status"] in {
+                "idle", "paused", "analysis_failed", "synthesis_failed",
+            }:
+                self.sleep(idle_sleep)

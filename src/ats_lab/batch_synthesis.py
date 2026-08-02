@@ -45,6 +45,8 @@ def build_batch_context(
     """Inspect revise outcomes first, then scheduled ideas; never expose promotion locks."""
     policy = policy or ResourcePolicy()
     limit = limit or policy.synthesis_inspect_limit
+    revision_limit = min(limit, policy.synthesis_max_improvements)
+    evidence_limit = 4
     latest = database.rows(
         """WITH ranked AS (
                SELECT ev.*, ROW_NUMBER() OVER (
@@ -54,7 +56,7 @@ def build_batch_context(
            )
            SELECT e.id AS source_experiment_id, s.name AS strategy, e.hypothesis,
                   e.experiment_type, e.specification_json, ranked.verdict,
-                  ranked.summary, ranked.metrics_summary, ranked.next_step, ranked.evaluated_at
+                  ranked.evaluated_at
            FROM ranked JOIN experiments e ON e.id=ranked.experiment_id
            LEFT JOIN strategies s ON s.id=e.strategy_id
            WHERE ranked.rn=1 AND ranked.verdict IN ('revise','inconclusive')
@@ -64,12 +66,19 @@ def build_batch_context(
              )
            ORDER BY CASE ranked.verdict WHEN 'revise' THEN 0 ELSE 1 END,
                     ranked.evaluated_at DESC LIMIT ?""",
-        (limit,),
+        (revision_limit,),
     )
     revisions: list[dict[str, Any]] = []
     for row in latest:
         item = dict(row)
         item["revision_depth"] = revision_depth(database, row["source_experiment_id"])
+        item["evidence"] = [
+            evidence.to_compact_dict()
+            for evidence in database.query_normalized_evidence(
+                {"experiment_id": row["source_experiment_id"]},
+                limit=evidence_limit,
+            )
+        ]
         if item["revision_depth"] < MAX_REVISION_DEPTH:
             revisions.append(item)
     remaining = max(0, limit - len(revisions))
@@ -81,6 +90,10 @@ def build_batch_context(
            FROM work_items w JOIN experiments e ON e.id=w.experiment_id
            LEFT JOIN strategies s ON s.id=e.strategy_id
            WHERE w.state='scheduled'
+             AND COALESCE(
+               json_extract(w.specification_json,'$.readiness.status'),
+               'ready'
+             )!='requirements_pending'
              AND NOT EXISTS (
                  SELECT 1 FROM evaluations locked WHERE locked.experiment_id=e.id
                  AND locked.verdict IN ('hpo_candidate','paper_trade_candidate')
@@ -101,14 +114,26 @@ def build_batch_context(
                FROM evaluations ev
            )
            SELECT e.id AS experiment_id,s.name AS strategy,e.archetype,e.target_regime,
-                  e.failure_regime,latest.verdict,latest.summary,latest.metrics_summary,
-                  latest.next_step
+                  e.failure_regime,latest.verdict
            FROM latest JOIN experiments e ON e.id=latest.experiment_id
            LEFT JOIN strategies s ON s.id=e.strategy_id
            WHERE latest.rn=1
            ORDER BY latest.evaluated_at DESC LIMIT ?""",
-        (limit,),
+        (limit + len(revision_ids),),
     )
+    learning_limit = max(0, limit - len(revisions) - len(scheduled))
+    learnings = [
+        learning for learning in learnings
+        if learning["experiment_id"] not in revision_ids
+    ][:learning_limit]
+    for learning in learnings:
+        learning["evidence"] = [
+            evidence.to_compact_dict()
+            for evidence in database.query_normalized_evidence(
+                {"experiment_id": learning["experiment_id"]},
+                limit=evidence_limit,
+            )
+        ]
     fingerprint_count = database.rows(
         """SELECT COUNT(DISTINCT json_extract(specification_json,'$.entry_rule.fingerprint')) AS count
            FROM experiments
@@ -116,6 +141,7 @@ def build_batch_context(
     )[0]["count"]
     return {
         "inspect_limit": limit, "generate_limit": policy.synthesis_generate_limit,
+        "evidence_rows_per_candidate": evidence_limit,
         "low_watermark": policy.synthesis_low_watermark,
         "active_ready_limit": policy.active_ready_limit, "max_revision_depth": MAX_REVISION_DEPTH,
         "lane_policy": {
@@ -137,6 +163,7 @@ def apply_batch(
 ) -> dict[str, Any]:
     """Validate and persist one planning batch with promotion locks and capacity control."""
     policy = policy or ResourcePolicy()
+    payloads = _canonicalize_non_entry_rules(database, payloads)
     generate_limit = policy.synthesis_generate_limit
     generated: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -204,6 +231,38 @@ def apply_batch(
     if len(payloads) > generate_limit:
         rejected.append({"index": generate_limit, "reason": f"batch exceeds generation limit {generate_limit}"})
     return {"generated": generated, "rejected": rejected, "submitted": len(payloads)}
+
+
+def _canonicalize_non_entry_rules(
+    database: WorkflowDatabase,
+    payloads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Force non-entry revisions to retain source's canonical entry rule."""
+    result = []
+    for raw in payloads:
+        payload = dict(raw)
+        if (
+            payload.get("action") == "revise"
+            and payload.get("change_scope")
+            in {"exit_only", "sizing_only", "risk_only", "refactor"}
+            and payload.get("source_experiment_id")
+        ):
+            rows = database.rows(
+                """SELECT
+                     json_extract(
+                       specification_json,'$.entry_rule.description'
+                     ) AS description,
+                     json_extract(
+                       specification_json,'$.entry_rule.fingerprint'
+                     ) AS fingerprint
+                   FROM experiments WHERE id=?""",
+                (payload["source_experiment_id"],),
+            )
+            if rows and rows[0]["description"]:
+                payload["entry_rule"] = rows[0]["description"]
+                payload["parent_entry_fingerprint"] = rows[0]["fingerprint"]
+        result.append(payload)
+    return result
 
 
 def _validate_cohort_request(

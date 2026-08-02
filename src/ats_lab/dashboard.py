@@ -4,12 +4,14 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from typing import Any, Mapping
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+from .console import distinct_candidate_evidence
 from .database import WorkflowDatabase
+from .status import hpo_detail_snapshot, hpo_lifecycle_snapshot
 
 
 PAGE_SPECS = {
@@ -38,135 +40,127 @@ PAGE_SPECS = {
         "sorts": {
             "newest": "ev.evaluated_at DESC",
             "strategy": "s.name COLLATE NOCASE ASC, ev.evaluated_at DESC",
-            "runs": "run_count DESC, ev.evaluated_at DESC",
             "verdict": "ev.verdict ASC, ev.evaluated_at DESC",
         },
         "default_sort": "newest",
-        "sql": """SELECT e.id AS experiment_id, s.name AS strategy, ev.verdict,
-                    ev.summary, ev.metrics_summary, ev.next_step, ev.evaluated_at,
-                    COUNT(r.id) AS run_count,
-                    SUM(CASE WHEN r.status='finished' THEN 1 ELSE 0 END) AS finished_runs
-                 FROM evaluations ev
-                 JOIN experiments e ON e.id=ev.experiment_id
-                 LEFT JOIN strategies s ON s.id=e.strategy_id
-                 LEFT JOIN runs r ON r.experiment_id=e.id
-                 WHERE ev.verdict IN ('hpo_candidate','paper_trade_candidate','revise')""",
-        "search": ("e.id", "s.name", "ev.summary", "ev.metrics_summary", "ev.next_step"),
-        "group": " GROUP BY ev.id, e.id, s.name",
+        "sql": "",
+        "search": (),
     },
     "runs": {
         "title": "Run history",
-        "filters": {"status": ("draft", "running", "finished", "stopped", "terminated")},
+        "filters": {},
         "sorts": {
             "newest": "COALESCE(r.finished_at, r.started_at) DESC",
             "strategy": "s.name COLLATE NOCASE ASC, r.started_at DESC",
-            "status": "r.status ASC, r.started_at DESC",
         },
         "default_sort": "newest",
-        "sql": """SELECT r.id, r.experiment_id, s.name AS strategy, r.session_id,
-                    r.status, r.dashboard_url, r.metrics_json, r.error_json,
-                    r.started_at, r.finished_at
-                 FROM runs r
-                 JOIN experiments e ON e.id=r.experiment_id
-                 LEFT JOIN strategies s ON s.id=e.strategy_id
-                 WHERE 1=1""",
-        "search": ("r.id", "r.experiment_id", "r.session_id", "s.name", "r.metrics_json", "r.error_json"),
+        "sql": "",
+        "search": (),
+    },
+    "hpo": {
+        "title": "HPO lifecycle",
+        "filters": {
+            "lifecycle_state": (
+                "hpo_candidate", "hpo_scheduled", "hpo_running",
+                "hpo_analysis", "validation", "paper_trade_candidate",
+                "revise", "reject",
+            ),
+        },
+        "sorts": {
+            "newest": "updated_at DESC",
+            "strategy": "strategy ASC, updated_at DESC",
+            "state": "lifecycle_state ASC, updated_at DESC",
+        },
+        "default_sort": "newest",
+        "sql": "",
+        "search": (),
     },
 }
 
-BACKTEST_TYPES = ("baseline", "multi_window", "cost_sensitivity", "out_of_sample", "harness_check", "hpo", "monte_carlo")
-METRIC_ALIASES = {
-    "net_profit_percentage": ("net_profit_percentage", "net_profit_pct", "net_profit_percent"),
-    "sharpe_ratio": ("sharpe_ratio", "sharpe"),
-    "sortino_ratio": ("sortino_ratio", "sortino"),
-    "calmar_ratio": ("calmar_ratio", "calmar"),
-    "profit_factor": ("profit_factor", "gross_profit_loss_ratio"),
-    "max_drawdown": ("max_drawdown", "max_drawdown_percentage", "max_drawdown_pct"),
-    "total_trades": ("total_trades", "trade_count", "total", "trades"),
-    "win_rate": ("win_rate", "win_rate_percentage"),
-    "expectancy": ("expectancy", "expectancy_percentage"),
-    "fees": ("fees", "total_fees", "fee"),
-}
 RANK_METRICS = {
     "sharpe": ("sharpe_ratio", True),
     "net_profit": ("net_profit_percentage", True),
     "calmar": ("calmar_ratio", True),
     "profit_factor": ("profit_factor", True),
-    "drawdown": ("max_drawdown", False),
+    "drawdown": ("max_drawdown_percentage", False),
     "expectancy": ("expectancy", True),
 }
 
 
-def normalize_metrics(value: object) -> dict[str, float | None]:
-    payload: dict = {}
-    if isinstance(value, dict):
-        payload = value
-    elif isinstance(value, str) and value.strip():
-        try:
-            decoded = json.loads(value)
-            payload = decoded if isinstance(decoded, dict) else {}
-        except json.JSONDecodeError:
-            payload = {}
-    normalized: dict[str, float | None] = {}
-    for canonical, aliases in METRIC_ALIASES.items():
-        result = None
-        for alias in aliases:
-            raw = payload.get(alias)
-            if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(float(raw)):
-                result = float(raw)
-                break
-        normalized[canonical] = result
-    return normalized
+def _evidence_dict(value: object) -> dict[str, Any]:
+    """Serialize only the canonical evidence contract."""
+    if hasattr(value, "to_dict"):
+        return dict(value.to_dict())
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise TypeError("normalized evidence must provide to_dict()")
+
+
+def _compatibility_key(value: Mapping[str, Any]) -> tuple[object, ...]:
+    return tuple(
+        value.get(name)
+        for name in (
+            "symbol", "timeframe", "start_date", "finish_date", "evidence_split",
+        )
+    )
+
+
+def _complete_compatibility(value: Mapping[str, Any]) -> bool:
+    return all(part not in (None, "") for part in _compatibility_key(value))
+
+
+def _newest_complete_evidence(
+    database: WorkflowDatabase, filters: Mapping[str, object] | None = None,
+) -> object | None:
+    evidence = database.query_normalized_evidence(
+        filters=dict(filters or {}), limit=2000,
+    )
+    complete = [item for item in evidence if _complete_compatibility(_evidence_dict(item))]
+    if not complete:
+        return None
+    return max(
+        complete,
+        key=lambda item: _evidence_dict(item).get("completed_at") or "",
+    )
 
 
 def top_backtests(database: WorkflowDatabase, metric: str = "sharpe", limit: int = 20,
                   minimum_trades: int = 0, *, symbol: str = "", period: str = "",
-                  timeframe: str = "", experiment_type: str = "") -> list[dict]:
+                  timeframe: str = "", experiment_type: str = "",
+                  evidence_split: str = "") -> list[dict]:
     metric = metric if metric in RANK_METRICS else "sharpe"
     limit = max(1, min(int(limit), 100))
     minimum_trades = max(0, min(int(minimum_trades), 1_000_000))
-    placeholders = ",".join("?" for _ in BACKTEST_TYPES)
-    rows = database.rows(
-        f"""SELECT r.id, r.experiment_id, e.experiment_type, s.name AS strategy, r.session_id,
-                   r.dashboard_url, r.route_json, r.metrics_json, r.finished_at
-            FROM runs r JOIN experiments e ON e.id=r.experiment_id
-            LEFT JOIN strategies s ON s.id=e.strategy_id
-            WHERE r.status='finished' AND e.experiment_type IN ({placeholders})
-            ORDER BY r.finished_at DESC LIMIT 2000""",
-        BACKTEST_TYPES,
-    )
     key, higher_is_better = RANK_METRICS[metric]
+    filters: dict[str, object] = {}
+    if symbol:
+        filters["symbol"] = symbol
+    if timeframe:
+        filters["timeframe"] = timeframe
+    if experiment_type:
+        filters["lifecycle_stage"] = experiment_type
+    if evidence_split:
+        filters["evidence_split"] = evidence_split
+    if period and " to " in period:
+        filters["start_date"], filters["finish_date"] = period.split(" to ", 1)
+    anchor = _newest_complete_evidence(database, filters)
+    if anchor is None:
+        return []
+    evidence = database.compatible_evidence(anchor, limit=2000)
     ranked = []
-    for row in rows:
-        metrics = normalize_metrics(row["metrics_json"])
-        score = metrics[key]
-        trades = metrics["total_trades"]
+    for item in evidence:
+        row = _evidence_dict(item)
+        if (
+            experiment_type
+            and row.get("lifecycle_stage") != experiment_type
+        ):
+            continue
+        score = row.get(key)
+        trades = row.get("trade_count")
         if score is None or trades is None or trades < minimum_trades:
             continue
-        route = {}
-        try:
-            route = json.loads(row["route_json"] or "{}")
-            if not isinstance(route, dict):
-                route = {}
-        except json.JSONDecodeError:
-            pass
-        row_period = f'{route.get("start_date", "")} to {route.get("finish_date", "")}'
-        if symbol and route.get("symbol") != symbol:
-            continue
-        if period and row_period != period:
-            continue
-        if timeframe and route.get("timeframe") != timeframe:
-            continue
-        if experiment_type and row["experiment_type"] != experiment_type:
-            continue
         ranked.append({
-            "id": row["id"], "experiment_id": row["experiment_id"], "strategy": row["strategy"],
-            "experiment_type": row["experiment_type"],
-            "session_id": row["session_id"], "dashboard_url": row["dashboard_url"],
-            "symbol": route.get("symbol"), "timeframe": route.get("timeframe"),
-            "start_date": route.get("start_date"), "finish_date": route.get("finish_date"),
-            "finished_at": row["finished_at"], "score": score, "rank_metric": metric,
-            **metrics,
+            **row, "score": score, "rank_metric": metric,
         })
     if metric == "drawdown":
         ranked.sort(key=lambda row: abs(row["score"]))
@@ -176,33 +170,131 @@ def top_backtests(database: WorkflowDatabase, metric: str = "sharpe", limit: int
 
 
 def comparison_options(database: WorkflowDatabase) -> dict[str, list[str]]:
-    placeholders = ",".join("?" for _ in BACKTEST_TYPES)
-    rows = database.rows(
-        f"""SELECT r.route_json, e.experiment_type FROM runs r
-            JOIN experiments e ON e.id=r.experiment_id
-            WHERE r.status='finished' AND r.metrics_json IS NOT NULL
-              AND e.experiment_type IN ({placeholders})""", BACKTEST_TYPES,
-    )
-    result: dict[str, set[str]] = {"symbols": set(), "periods": set(), "timeframes": set(), "experiment_types": set()}
+    rows = [
+        _evidence_dict(item)
+        for item in database.query_normalized_evidence(limit=5000)
+    ]
+    result: dict[str, set[str]] = {
+        "symbols": set(), "periods": set(), "timeframes": set(),
+        "experiment_types": set(), "evidence_splits": set(),
+    }
     for row in rows:
-        try:
-            route = json.loads(row["route_json"] or "{}")
-        except json.JSONDecodeError:
-            route = {}
-        if not isinstance(route, dict):
-            continue
-        if route.get("symbol"):
-            result["symbols"].add(route["symbol"])
-        if route.get("timeframe"):
-            result["timeframes"].add(route["timeframe"])
-        if route.get("start_date") and route.get("finish_date"):
-            result["periods"].add(f'{route["start_date"]} to {route["finish_date"]}')
-        result["experiment_types"].add(row["experiment_type"])
+        if row.get("symbol"):
+            result["symbols"].add(row["symbol"])
+        if row.get("timeframe"):
+            result["timeframes"].add(row["timeframe"])
+        if row.get("start_date") and row.get("finish_date"):
+            result["periods"].add(f'{row["start_date"]} to {row["finish_date"]}')
+        if row.get("lifecycle_stage"):
+            result["experiment_types"].add(row["lifecycle_stage"])
+        if row.get("evidence_split"):
+            result["evidence_splits"].add(row["evidence_split"])
     return {key: sorted(values) for key, values in result.items()}
 
 
 def query_page(database: WorkflowDatabase, page: str, params: dict[str, str]) -> tuple[list[dict], dict]:
     """Query a page using only whitelisted filters and sort expressions."""
+    if page == "hpo":
+        clean: dict[str, str] = {}
+        filters: dict[str, object] = {}
+        state = params.get("lifecycle_state", "")
+        if state in PAGE_SPECS["hpo"]["filters"]["lifecycle_state"]:
+            filters["lifecycle_state"] = state
+            clean["lifecycle_state"] = state
+        query = getattr(database, "hpo_studies", None)
+        rows = query(filters=filters, limit=500) if query else []
+        search = params.get("q", "").strip()[:200]
+        if search:
+            clean["q"] = search
+            needle = search.casefold()
+            rows = [
+                row for row in rows
+                if any(
+                    needle in str(row.get(field) or "").casefold()
+                    for field in (
+                        "study_id", "strategy", "parent_experiment_id",
+                        "hpo_experiment_id", "finding", "next_action",
+                    )
+                )
+            ]
+        sort = params.get("sort", PAGE_SPECS["hpo"]["default_sort"])
+        if sort not in PAGE_SPECS["hpo"]["sorts"]:
+            sort = PAGE_SPECS["hpo"]["default_sort"]
+        clean["sort"] = sort
+        if sort == "strategy":
+            rows.sort(
+                key=lambda row: (
+                    str(row.get("strategy") or "").casefold(),
+                    row.get("updated_at") or "",
+                )
+            )
+        elif sort == "state":
+            rows.sort(
+                key=lambda row: (
+                    row.get("lifecycle_state") or "",
+                    row.get("updated_at") or "",
+                )
+            )
+        else:
+            rows.sort(
+                key=lambda row: row.get("updated_at") or "", reverse=True,
+            )
+        return rows, clean
+
+    if page in {"candidates", "runs"}:
+        clean: dict[str, str] = {}
+        filters: dict[str, object] = {}
+        if page == "candidates":
+            verdict = params.get("verdict", "")
+            if verdict in PAGE_SPECS["candidates"]["filters"]["verdict"]:
+                filters["verdict"] = verdict
+                clean["verdict"] = verdict
+        items = database.query_normalized_evidence(
+            filters=filters, limit=5000 if page == "candidates" else 500,
+        )
+        if page == "candidates":
+            items = distinct_candidate_evidence(items)
+        evidence = [_evidence_dict(item) for item in items]
+        if page == "candidates" and "verdict" not in filters:
+            allowed = set(PAGE_SPECS["candidates"]["filters"]["verdict"])
+            evidence = [row for row in evidence if row.get("verdict") in allowed]
+        search = params.get("q", "").strip()[:200]
+        if search:
+            clean["q"] = search
+            needle = search.casefold()
+            evidence = [
+                row for row in evidence
+                if any(
+                    needle in str(row.get(field) or "").casefold()
+                    for field in (
+                        "experiment_id", "run_id", "session_id", "strategy",
+                        "finding", "next_action",
+                    )
+                )
+            ]
+        sort = params.get("sort", PAGE_SPECS[page]["default_sort"])
+        if sort not in PAGE_SPECS[page]["sorts"]:
+            sort = PAGE_SPECS[page]["default_sort"]
+        clean["sort"] = sort
+        if sort == "strategy":
+            evidence.sort(
+                key=lambda row: (
+                    str(row.get("strategy") or "").casefold(),
+                    row.get("completed_at") or "",
+                )
+            )
+        elif sort == "verdict":
+            evidence.sort(
+                key=lambda row: (
+                    row.get("verdict") or "", row.get("completed_at") or "",
+                )
+            )
+        else:
+            evidence.sort(
+                key=lambda row: row.get("completed_at") or "", reverse=True,
+            )
+        return evidence, clean
+
     spec = PAGE_SPECS.get(page, PAGE_SPECS["queue"])
     clauses: list[str] = []
     values: list[str] = []
@@ -226,44 +318,40 @@ def query_page(database: WorkflowDatabase, page: str, params: dict[str, str]) ->
     sql = spec["sql"] + (" AND " + " AND ".join(clauses) if clauses else "")
     sql += spec.get("group", "") + " ORDER BY " + spec["sorts"][sort] + " LIMIT 500"
     rows = database.rows(sql, tuple(values))
-    if page == "runs":
-        display_rows = []
-        for row in rows:
-            metrics = normalize_metrics(row.get("metrics_json"))
-            display_rows.append({
-                "id": row["id"], "experiment_id": row["experiment_id"], "strategy": row["strategy"],
-                "status": row["status"], "net_profit_percentage": metrics["net_profit_percentage"],
-                "sharpe_ratio": metrics["sharpe_ratio"], "profit_factor": metrics["profit_factor"],
-                "max_drawdown": metrics["max_drawdown"], "total_trades": metrics["total_trades"],
-                "win_rate": metrics["win_rate"], "dashboard_url": row["dashboard_url"],
-                "finished_at": row["finished_at"], "metrics_json": row["metrics_json"],
-            })
-        rows = display_rows
     return rows, clean
 
 
-def dashboard_counts(database: WorkflowDatabase) -> dict[str, int]:
+def dashboard_counts(database: WorkflowDatabase) -> dict[str, object]:
     row = database.rows("""SELECT
         SUM(CASE WHEN state IN ('scheduled','ready','running','waiting_retry','blocked') THEN 1 ELSE 0 END) AS queue,
         SUM(CASE WHEN state='running' THEN 1 ELSE 0 END) AS running,
-        SUM(CASE WHEN state='blocked' THEN 1 ELSE 0 END) AS blocked
+        SUM(CASE WHEN state='blocked' THEN 1 ELSE 0 END) AS blocked,
+        SUM(CASE WHEN state='waiting_retry' THEN 1 ELSE 0 END) AS retry
         FROM work_items""")[0]
-    candidates = database.rows("SELECT COUNT(*) AS count FROM candidate_summary")[0]["count"]
+    candidates = len({
+        item.experiment_id
+        for item in database.query_normalized_evidence(limit=5000)
+        if item.verdict in {
+            "hpo_candidate", "paper_trade_candidate", "revise",
+        }
+    })
+    awaiting = database.rows(
+        """SELECT COUNT(*) AS count FROM work_items
+           WHERE state='running' AND blocker_code='awaiting_batch_evaluation'"""
+    )[0]["count"]
     synthesis = database.synthesis_status()
+    hpo = hpo_lifecycle_snapshot(database)
+    analyzer = hpo.get("analyzer")
     return {"queue": row["queue"] or 0, "running": row["running"] or 0,
-            "blocked": row["blocked"] or 0, "candidates": candidates,
-            "remaining_chains": synthesis["remaining_chains"]}
+            "blocked": row["blocked"] or 0, "retry": row["retry"] or 0,
+            "candidates": candidates, "hpo_active": hpo["active"],
+            "analyzer": analyzer.get("state") if analyzer else "idle",
+            "awaiting_evaluation": awaiting, "remaining_chains": synthesis["remaining_chains"]}
 
 
 def _display(value: object) -> str:
     if value in (None, ""):
         return "—"
-    if isinstance(value, str) and value[:1] in ("{", "["):
-        try:
-            parsed = json.loads(value)
-            return json.dumps(parsed, sort_keys=True, separators=(", ", ": "))
-        except json.JSONDecodeError:
-            pass
     return str(value)
 
 
@@ -273,7 +361,6 @@ def render_page(database: WorkflowDatabase, page: str, params: dict[str, str]) -
     spec = PAGE_SPECS[page]
     rows, clean = query_page(database, page, params)
     counts = dashboard_counts(database)
-    columns = list(rows[0]) if rows else []
     nav = '<a href="/overview">Overview</a>' + "".join(
         f'<a class="{"active" if key == page else ""}" href="/{key}">{html.escape(item["title"])}</a>'
         for key, item in PAGE_SPECS.items()
@@ -288,12 +375,14 @@ def render_page(database: WorkflowDatabase, page: str, params: dict[str, str]) -
                            for value in spec["sorts"])
     filter_control = (f'<label>{filter_name}<select name="{filter_name}">{"".join(options)}</select></label>'
                       if filter_name else "")
-    header = "".join(f"<th>{html.escape(column.replace('_', ' '))}</th>" for column in columns)
-    body = "".join("<tr>" + "".join(_render_cell(column, row[column]) for column in columns) + "</tr>" for row in rows)
-    if not rows:
-        body = '<tr><td class=empty>No matching records.</td></tr>'
+    table = (
+        _render_evidence_table(rows)
+        if page in {"candidates", "runs"}
+        else _render_hpo_table(rows) if page == "hpo"
+        else _render_generic_table(rows)
+    )
     live = f"""<section class=cards>{cards}</section>
-<h2>{html.escape(spec['title'])} <small>{len(rows)} shown</small></h2><div class=table-wrap><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>"""
+<h2>{html.escape(spec['title'])} <small>{len(rows)} shown</small></h2>{table}"""
     return f"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>ATS Lab — {html.escape(spec['title'])}</title>
 <style>{STYLE}</style><script src="/assets/dashboard.js" defer></script></head>
@@ -308,14 +397,15 @@ def render_page(database: WorkflowDatabase, page: str, params: dict[str, str]) -
 def render_fragment(database: WorkflowDatabase, page: str, params: dict[str, str]) -> str:
     rows, _ = query_page(database, page, params)
     spec = PAGE_SPECS[page]
-    columns = list(rows[0]) if rows else []
-    header = "".join(f"<th>{html.escape(column.replace('_', ' '))}</th>" for column in columns)
-    body = "".join("<tr>" + "".join(_render_cell(column, row[column]) for column in columns) + "</tr>" for row in rows)
-    if not rows:
-        body = '<tr><td class=empty>No matching records.</td></tr>'
+    table = (
+        _render_evidence_table(rows)
+        if page in {"candidates", "runs"}
+        else _render_hpo_table(rows) if page == "hpo"
+        else _render_generic_table(rows)
+    )
     return f"""<section class=cards>{_render_cards(dashboard_counts(database))}</section>
 <h2>{html.escape(spec['title'])} <small>{len(rows)} shown</small></h2>
-<div class=table-wrap><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>"""
+{table}"""
 
 
 def render_overview(database: WorkflowDatabase, params: dict[str, str]) -> str:
@@ -326,10 +416,29 @@ def render_overview(database: WorkflowDatabase, params: dict[str, str]) -> str:
         minimum_trades = max(0, min(int(params.get("minimum_trades", "0")), 1_000_000))
     except ValueError:
         minimum_trades = 0
-    filters = {name: params.get(name, "") for name in ("symbol", "period", "timeframe", "experiment_type")}
+    filters = {
+        name: params.get(name, "")
+        for name in (
+            "symbol", "period", "timeframe", "experiment_type", "evidence_split",
+        )
+    }
+    if not any(filters.values()):
+        anchor = _newest_complete_evidence(database)
+        if anchor is not None:
+            row = _evidence_dict(anchor)
+            filters.update({
+                "symbol": row["symbol"],
+                "period": f'{row["start_date"]} to {row["finish_date"]}',
+                "timeframe": row["timeframe"],
+                "evidence_split": row["evidence_split"],
+            })
     available = comparison_options(database)
     def options(name: str) -> str:
-        singular = {"symbols": "symbol", "periods": "period", "timeframes": "timeframe", "experiment_types": "experiment_type"}[name]
+        singular = {
+            "symbols": "symbol", "periods": "period",
+            "timeframes": "timeframe", "experiment_types": "experiment_type",
+            "evidence_splits": "evidence_split",
+        }[name]
         return '<option value="">all</option>' + "".join(
             f'<option value="{html.escape(value, quote=True)}" {"selected" if filters[singular] == value else ""}>{html.escape(value)}</option>'
             for value in available[name]
@@ -352,8 +461,26 @@ def render_overview(database: WorkflowDatabase, params: dict[str, str]) -> str:
 <form id=chart-controls method=get action=/overview><label>metric<select name=metric>{metric_options}</select></label>
 <label>pair<select name=symbol>{options("symbols")}</select></label><label>period<select name=period>{options("periods")}</select></label>
 <label>timeframe<select name=timeframe>{options("timeframes")}</select></label><label>run type<select name=experiment_type>{options("experiment_types")}</select></label>
+<label>split<select name=evidence_split>{options("evidence_splits")}</select></label>
 <label>minimum trades<input name=minimum_trades type=number min=0 value="{minimum_trades}"></label><button>Apply</button></form></div>
 <div id=top-chart>{chart}</div></section></main><footer>Read-only local view · refreshes automatically</footer></body></html>"""
+
+
+def render_hpo_detail_page(
+    database: WorkflowDatabase, study_id: str,
+) -> str | None:
+    detail = hpo_detail_snapshot(database, study_id)
+    if detail is None:
+        return None
+    nav = '<a href="/overview">Overview</a>' + "".join(
+        f'<a class="{"active" if key == "hpo" else ""}" href="/{key}">{html.escape(item["title"])}</a>'
+        for key, item in PAGE_SPECS.items()
+    )
+    return f"""<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>ATS Lab — HPO {html.escape(study_id)}</title>
+<style>{STYLE}</style></head><body><header><h1>ATS Lab</h1><nav>{nav}</nav></header>
+<main><p><a href="/hpo">← HPO lifecycle</a></p>{_render_hpo_detail(detail)}</main>
+<footer>Canonical lifecycle view · raw trial evidence excluded</footer></body></html>"""
 
 
 def _render_chart(rows: list[dict], metric: str) -> str:
@@ -362,39 +489,378 @@ def _render_chart(rows: list[dict], metric: str) -> str:
     body = []
     for index, row in enumerate(rows, 1):
         label = row["strategy"] or row["experiment_id"]
-        context = " · ".join(part for part in (row.get("symbol"), row.get("timeframe"), row.get("experiment_type")) if part)
-        link_start = f'<a href="{html.escape(row["dashboard_url"], quote=True)}" target=_blank rel="noopener noreferrer">' if row.get("dashboard_url") else ""
-        link_end = "</a>" if link_start else ""
         metric_cell = lambda key, suffix="": _metric_text(row.get(key), suffix)
-        body.append(f'''<tr title="{html.escape(row["experiment_id"], quote=True)}"><td>{index}</td><td>{link_start}{html.escape(label)}{link_end}<small class=context>{html.escape(context)}</small></td><td class=ranked>{row["score"]:,.2f}</td><td>{metric_cell("sharpe_ratio")}</td><td>{metric_cell("net_profit_percentage", "%")}</td><td>{metric_cell("calmar_ratio")}</td><td>{metric_cell("profit_factor")}</td><td>{metric_cell("max_drawdown", "%")}</td><td>{metric_cell("win_rate", "%")}</td><td>{metric_cell("expectancy")}</td><td>{metric_cell("total_trades")}</td></tr>''')
-    headers = ("#", "strategy", f"rank: {metric.replace('_', ' ')}", "Sharpe", "net profit", "Calmar", "profit factor", "drawdown", "win rate", "expectancy", "trades")
+        strategy = html.escape(label)
+        if row.get("strategy_version"):
+            strategy += f'<small class=context>{html.escape(str(row["strategy_version"]))}</small>'
+        stage = " / ".join(
+            str(part) for part in (row.get("lifecycle_stage"), row.get("verdict"))
+            if part
+        )
+        market = " · ".join(
+            str(part) for part in (row.get("symbol"), row.get("timeframe")) if part
+        )
+        period = html.escape(" to ".join(
+            str(part) for part in (row.get("start_date"), row.get("finish_date"))
+            if part
+        ))
+        split = row.get("evidence_split")
+        if split:
+            period += f'<small class=context>{html.escape(str(split))}</small>'
+        details = _render_evidence_details(row)
+        body.append(
+            f'''<tr title="{html.escape(row["experiment_id"], quote=True)}">'''
+            f"<td>{index}</td><td>{strategy}</td><td>{html.escape(stage) or '—'}</td>"
+            f"<td>{html.escape(market) or '—'}</td><td>{period or '—'}</td>"
+            f'<td class=ranked>{row["score"]:,.2f}</td>'
+            f'<td>{metric_cell("net_profit_percentage", "%")}</td>'
+            f'<td>{metric_cell("max_drawdown_percentage", "%")}</td>'
+            f'<td>{metric_cell("sharpe_ratio")}</td>'
+            f'<td>{_integer_text(row.get("trade_count"))}</td>'
+            f'<td class=detail>{html.escape(str(row.get("finding") or "—"))}</td>'
+            f'<td class=detail>{html.escape(str(row.get("next_action") or "—"))}</td>'
+            f"<td>{details}</td></tr>"
+        )
+    headers = (
+        "#", "strategy", "stage / verdict", "market", "period / split",
+        f"rank: {metric.replace('_', ' ')}", "net profit", "drawdown",
+        "Sharpe", "trades", "finding", "next action", "details",
+    )
     return '<div class="table-wrap leaderboard"><table><thead><tr>' + "".join(f"<th>{html.escape(value)}</th>" for value in headers) + "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div>"
+
+
+def _duration_text(value: object) -> str:
+    if value is None:
+        return "—"
+    seconds = max(0, int(float(value)))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+
+def _render_hpo_table(rows: list[dict]) -> str:
+    if not rows:
+        return (
+            '<div class=table-wrap><table><tbody>'
+            '<tr><td class=empty>No HPO studies.</td></tr>'
+            "</tbody></table></div>"
+        )
+    headers = (
+        "lifecycle", "strategy", "study", "objective", "trials",
+        "selected", "validation", "disposition", "next action", "details",
+    )
+    body = []
+    for row in rows:
+        study_id = str(row.get("study_id") or "")
+        study_link = (
+            f'<a href="/hpo/{quote(study_id, safe="")}">{html.escape(study_id)}</a>'
+            if study_id else "—"
+        )
+        progress = (
+            f'{row.get("completed_trial_count") or 0}/'
+            f'{row.get("trial_count") or 0}'
+        )
+        details = (
+            "<details><summary>standardized</summary><dl>"
+            + "".join(
+                f"<dt>{html.escape(label)}</dt>"
+                f"<dd>{html.escape(str(row.get(key) or '—'))}</dd>"
+                for label, key in (
+                    ("parent experiment", "parent_experiment_id"),
+                    ("parent job", "parent_work_item_id"),
+                    ("HPO experiment", "hpo_experiment_id"),
+                    ("HPO job", "hpo_work_item_id"),
+                    ("direction", "direction"),
+                    ("finding", "finding"),
+                    ("started", "started_at"),
+                    ("completed", "completed_at"),
+                    ("updated", "updated_at"),
+                )
+            )
+            + "</dl></details>"
+        )
+        body.append(
+            "<tr>"
+            f'<td><span class=lifecycle>{html.escape(str(row.get("lifecycle_state") or "—"))}</span></td>'
+            f'<td>{html.escape(str(row.get("strategy") or "—"))}</td>'
+            f"<td>{study_link}</td>"
+            f'<td>{html.escape(str(row.get("objective_name") or "—"))}</td>'
+            f"<td>{progress}</td>"
+            f'<td>{row.get("selected_trial_count") or 0}</td>'
+            f'<td>{row.get("validation_count") or 0}</td>'
+            f'<td>{html.escape(str(row.get("disposition") or "—"))}</td>'
+            f'<td class=detail>{html.escape(str(row.get("next_action") or "—"))}</td>'
+            f"<td>{details}</td></tr>"
+        )
+    return (
+        '<div class="table-wrap hpo"><table><thead><tr>'
+        + "".join(f"<th>{html.escape(value)}</th>" for value in headers)
+        + "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table></div>"
+    )
+
+
+def _render_linked_id(value: object) -> str:
+    if value in (None, ""):
+        return "—"
+    text = str(value)
+    return (
+        f'<a href="/runs?q={quote(text, safe="")}">{html.escape(text)}</a>'
+    )
+
+
+def _render_hpo_detail(detail: Mapping[str, Any]) -> str:
+    study_value = detail.get("study")
+    study = dict(study_value) if isinstance(study_value, Mapping) else dict(detail)
+    selected = detail.get("selected_trials")
+    selected_rows = selected if isinstance(selected, list) else []
+    trial_body = []
+    for row in selected_rows:
+        if not isinstance(row, Mapping):
+            continue
+        run_link = _render_linked_id(row.get("run_id"))
+        session_link = _render_linked_id(row.get("session_id"))
+        evidence_link = (
+            run_link if row.get("evidence_key") else "—"
+        )
+        trial_body.append(
+            "<tr>"
+            f'<td>{html.escape(str(row.get("rank") or "—"))}</td>'
+            f'<td>{html.escape(str(row.get("trial_number") if row.get("trial_number") is not None else "—"))}</td>'
+            f'<td>{html.escape(str(row.get("objective_value") if row.get("objective_value") is not None else "—"))}</td>'
+            f'<td>{html.escape(str(row.get("classification") or "—"))}</td>'
+            f"<td>{evidence_link}</td><td>{run_link}</td><td>{session_link}</td>"
+            f'<td class=detail>{html.escape(str(row.get("selection_reason") or "—"))}</td>'
+            "</tr>"
+        )
+    selected_table = (
+        '<div class=table-wrap><table><thead><tr>'
+        "<th>rank</th><th>trial</th><th>objective</th><th>classification</th>"
+        "<th>evidence</th><th>run</th><th>session</th><th>reason</th>"
+        "</tr></thead><tbody>"
+        + ("".join(trial_body) or '<tr><td class=empty>No selected trials.</td></tr>')
+        + "</tbody></table></div>"
+    )
+    validations_value = detail.get("validations")
+    validations = validations_value if isinstance(validations_value, list) else []
+    validation_body = []
+    for row in validations:
+        if not isinstance(row, Mapping):
+            continue
+        validation_body.append(
+            "<tr>"
+            f'<td>{html.escape(str(row.get("status") or row.get("validation_status") or row.get("state") or "—"))}</td>'
+            f'<td>{html.escape(str(row.get("readiness_status") or "—"))}</td>'
+            f'<td>{html.escape(str(row.get("experiment_id") or "—"))}</td>'
+            f'<td>{_render_linked_id(row.get("run_id"))}</td>'
+            f'<td>{_render_linked_id(row.get("session_id"))}</td>'
+            f'<td class=detail>{html.escape(str(row.get("blocker_detail") or row.get("finding") or "—"))}</td>'
+            "</tr>"
+        )
+    validation_table = (
+        '<div class=table-wrap><table><thead><tr>'
+        "<th>status</th><th>readiness</th><th>experiment</th><th>run</th>"
+        "<th>session</th><th>blocker / finding</th>"
+        "</tr></thead><tbody>"
+        + ("".join(validation_body) or '<tr><td class=empty>No validation runs.</td></tr>')
+        + "</tbody></table></div>"
+    )
+    timings_value = detail.get("timings")
+    timings = timings_value if isinstance(timings_value, list) else []
+    timing_body = []
+    for row in timings:
+        if not isinstance(row, Mapping):
+            continue
+        timing_body.append(
+            "<tr>"
+            f'<td>{html.escape(str(row.get("stage") or "—"))}</td>'
+            f'<td>{html.escape(str(row.get("attempt") or "—"))}</td>'
+            f'<td>{html.escape(str(row.get("state") or "—"))}</td>'
+            f'<td>{html.escape(_duration_text(row.get("duration_seconds")))}</td>'
+            f'<td>{html.escape(str(row.get("outcome") or "—"))}</td>'
+            f'<td>{html.escape(str(row.get("started_at") or "—"))}</td>'
+            f'<td>{html.escape(str(row.get("completed_at") or "—"))}</td>'
+            "</tr>"
+        )
+    timing_table = (
+        '<div class=table-wrap><table><thead><tr>'
+        "<th>stage</th><th>try</th><th>state</th><th>duration</th>"
+        "<th>outcome</th><th>started</th><th>completed</th>"
+        "</tr></thead><tbody>"
+        + ("".join(timing_body) or '<tr><td class=empty>No stage timings.</td></tr>')
+        + "</tbody></table></div>"
+    )
+    analyzer_value = detail.get("analysis_job")
+    analyzer = analyzer_value if isinstance(analyzer_value, Mapping) else {}
+    analyzer_text = " · ".join(
+        f"{label}={analyzer.get(key) if analyzer.get(key) not in (None, '') else '—'}"
+        for label, key in (
+            ("state", "state"), ("job", "job_id"), ("tries", "attempts"),
+            ("retry", "retry_after"), ("error", "last_error"),
+        )
+    )
+    study_metadata = "".join(
+        f"<dt>{html.escape(label)}</dt>"
+        f"<dd>{html.escape(str(study.get(key) or '—'))}</dd>"
+        for label, key in (
+            ("study", "study_id"), ("name", "name"),
+            ("objective", "objective_name"), ("direction", "direction"),
+            ("HPO experiment", "hpo_experiment_id"),
+            ("HPO job", "hpo_work_item_id"),
+            ("started", "started_at"), ("completed", "completed_at"),
+        )
+    )
+    return (
+        "<section class=cards>"
+        f'<div class=card><b>{html.escape(str(study.get("lifecycle_state") or "—"))}</b><span>lifecycle</span></div>'
+        f'<div class=card><b>{study.get("completed_trial_count") or 0}/{study.get("trial_count") or 0}</b><span>trials</span></div>'
+        f'<div class=card><b>{study.get("selected_trial_count") or 0}</b><span>selected</span></div>'
+        f'<div class=card><b>{study.get("validation_count") or 0}</b><span>validation</span></div>'
+        "</section>"
+        f'<h2>{html.escape(str(study.get("strategy") or "HPO study"))}</h2>'
+        f"<dl>{study_metadata}</dl>"
+        f'<p>{html.escape(str(study.get("finding") or "—"))}</p>'
+        f'<p><b>Next:</b> {html.escape(str(study.get("next_action") or "—"))}</p>'
+        f"<p><b>Analyzer:</b> {html.escape(analyzer_text)}</p>"
+        "<h3>Selected trials</h3>" + selected_table
+        + "<h3>Validation</h3>" + validation_table
+        + "<h3>Stage timings</h3>" + timing_table
+    )
+
+
+def _render_generic_table(rows: list[dict]) -> str:
+    columns = list(rows[0]) if rows else []
+    header = "".join(
+        f"<th>{html.escape(column.replace('_', ' '))}</th>"
+        for column in columns
+    )
+    body = "".join(
+        "<tr>"
+        + "".join(_render_cell(column, row[column]) for column in columns)
+        + "</tr>"
+        for row in rows
+    )
+    if not rows:
+        body = '<tr><td class=empty>No matching records.</td></tr>'
+    return (
+        f'<div class=table-wrap><table><thead><tr>{header}</tr></thead>'
+        f"<tbody>{body}</tbody></table></div>"
+    )
+
+
+def _render_evidence_table(rows: list[dict]) -> str:
+    if not rows:
+        return (
+            '<div class=table-wrap><table><tbody>'
+            '<tr><td class=empty>No matching records.</td></tr>'
+            "</tbody></table></div>"
+        )
+    headers = (
+        "strategy", "stage / verdict", "market", "period / split",
+        "net profit", "drawdown", "Sharpe", "trades", "finding",
+        "next action", "details",
+    )
+    body: list[str] = []
+    for row in rows:
+        strategy = html.escape(str(row.get("strategy") or "—"))
+        if row.get("strategy_version"):
+            strategy += (
+                f'<small class=context>{html.escape(str(row["strategy_version"]))}</small>'
+            )
+        stage = " / ".join(
+            str(part) for part in (row.get("lifecycle_stage"), row.get("verdict"))
+            if part
+        )
+        market = " · ".join(
+            str(part) for part in (row.get("symbol"), row.get("timeframe")) if part
+        )
+        period = html.escape(" to ".join(
+            str(part) for part in (row.get("start_date"), row.get("finish_date"))
+            if part
+        ))
+        if row.get("evidence_split"):
+            period += (
+                f'<small class=context>{html.escape(str(row["evidence_split"]))}</small>'
+            )
+        body.append(
+            "<tr>"
+            f"<td>{strategy}</td><td>{html.escape(stage) if stage else '—'}</td>"
+            f"<td>{html.escape(market) if market else '—'}</td><td>{period or '—'}</td>"
+            f'<td>{_metric_text(row.get("net_profit_percentage"), "%")}</td>'
+            f'<td>{_metric_text(row.get("max_drawdown_percentage"), "%")}</td>'
+            f'<td>{_metric_text(row.get("sharpe_ratio"))}</td>'
+            f'<td>{_integer_text(row.get("trade_count"))}</td>'
+            f'<td class=detail>{html.escape(str(row.get("finding") or "—"))}</td>'
+            f'<td class=detail>{html.escape(str(row.get("next_action") or "—"))}</td>'
+            f"<td>{_render_evidence_details(row)}</td></tr>"
+        )
+    return (
+        '<div class="table-wrap evidence"><table><thead><tr>'
+        + "".join(f"<th>{html.escape(value)}</th>" for value in headers)
+        + "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table></div>"
+    )
+
+
+def _render_evidence_details(row: Mapping[str, Any]) -> str:
+    fields = (
+        ("experiment", "experiment_id", ""),
+        ("run", "run_id", ""),
+        ("session", "session_id", ""),
+        ("Sortino", "sortino_ratio", ""),
+        ("Calmar", "calmar_ratio", ""),
+        ("profit factor", "profit_factor", ""),
+        ("win rate", "win_rate", "%"),
+        ("fees", "fees", ""),
+        ("expectancy", "expectancy", ""),
+        ("leverage", "leverage", "x"),
+        ("risk / trade", "risk_per_trade_percentage", "%"),
+        ("optimizer objective", "optimizer_objective", ""),
+        ("cost stress", "cost_stress_status", ""),
+        ("significance p", "significance_p_value", ""),
+        ("completed", "completed_at", ""),
+    )
+    items = []
+    for label, key, suffix in fields:
+        value = row.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            shown = f"{value:,.2f}{suffix}"
+        else:
+            shown = "—" if value in (None, "") else f"{value}{suffix}"
+        items.append(
+            f"<dt>{html.escape(label)}</dt><dd>{html.escape(str(shown))}</dd>"
+        )
+    return (
+        "<details><summary>standardized</summary><dl>"
+        + "".join(items)
+        + "</dl></details>"
+    )
 
 
 def _json_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-def _render_cards(counts: dict[str, int]) -> str:
+def _render_cards(counts: Mapping[str, object]) -> str:
     return "".join(f"<div class=card><b>{value}</b><span>{html.escape(key)}</span></div>" for key, value in counts.items())
 
 
 def _render_cell(column: str, value: object) -> str:
-    if column in {"net_profit_percentage", "max_drawdown", "win_rate"}:
+    if column in {"net_profit_percentage", "max_drawdown_percentage", "win_rate"}:
         shown = _metric_text(value, "%")
     elif column in {"sharpe_ratio", "sortino_ratio", "calmar_ratio", "profit_factor", "expectancy"}:
         shown = _metric_text(value)
-    elif column == "total_trades":
-        shown = "—" if value is None else f"{float(value):,.0f}"
+    elif column == "trade_count":
+        shown = _integer_text(value)
     elif column == "fees":
-        shown = _metric_text(value, "$", prefix=True)
-    elif column == "metrics_json" and value:
-        shown = f"<details><summary>raw</summary><pre>{html.escape(_pretty_json(value))}</pre></details>"
+        shown = _metric_text(value)
     else:
         shown = html.escape(_display(value))
-    if column == "dashboard_url" and isinstance(value, str) and value.startswith(("http://", "https://")):
-        return f'<td><a href="{html.escape(value, quote=True)}" target=_blank rel="noopener noreferrer">dashboard</a></td>'
-    css = " class=detail" if column in {"blocker_detail", "summary", "metrics_summary", "next_step", "metrics_json", "error_json"} else ""
+    css = " class=detail" if column in {"blocker_detail", "finding", "next_action"} else ""
     return f"<td{css}>{shown}</td>"
 
 
@@ -408,12 +874,8 @@ def _metric_text(value: object, suffix: str = "", *, prefix: bool = False) -> st
     return f'<span class="{css}">{text}</span>'
 
 
-def _pretty_json(value: object) -> str:
-    try:
-        parsed = json.loads(value) if isinstance(value, str) else value
-        return json.dumps(parsed, indent=2, sort_keys=True)
-    except (json.JSONDecodeError, TypeError):
-        return str(value)
+def _integer_text(value: object) -> str:
+    return "—" if value is None else f"{int(value):,}"
 
 
 def make_handler(database: WorkflowDatabase) -> type[BaseHTTPRequestHandler]:
@@ -432,6 +894,52 @@ def make_handler(database: WorkflowDatabase) -> type[BaseHTTPRequestHandler]:
             if request.path == "/api/synthesis-status":
                 self._send(_json_bytes(database.synthesis_status()), "application/json")
                 return
+            if request.path == "/api/analyzer-status":
+                query = getattr(database, "current_analyzer_status", None)
+                self._send(
+                    _json_bytes(query() if query else None), "application/json",
+                )
+                return
+            if request.path == "/api/lifecycle-timings":
+                query = getattr(database, "work_item_stage_timings", None)
+                self._send(
+                    _json_bytes(
+                        query(
+                            work_item_id=params.get("work_item_id"),
+                            limit=500,
+                        ) if query else []
+                    ),
+                    "application/json",
+                )
+                return
+            if request.path == "/api/hpo-studies":
+                query = getattr(database, "hpo_studies", None)
+                filters = {
+                    key: value for key, value in (
+                        ("lifecycle_state", params.get("lifecycle_state")),
+                        ("strategy", params.get("strategy")),
+                    ) if value
+                }
+                self._send(
+                    _json_bytes(
+                        query(filters=filters, limit=500) if query else []
+                    ),
+                    "application/json",
+                )
+                return
+            if request.path.startswith("/api/hpo-studies/"):
+                study_id = unquote(
+                    request.path.removeprefix("/api/hpo-studies/")
+                )
+                if not study_id or "/" in study_id:
+                    self.send_error(404)
+                    return
+                detail = hpo_detail_snapshot(database, study_id)
+                if detail is None:
+                    self.send_error(404)
+                    return
+                self._send(_json_bytes(detail), "application/json")
+                return
             if request.path == "/api/top-backtests":
                 try:
                     limit = int(params.get("limit", "20"))
@@ -439,8 +947,49 @@ def make_handler(database: WorkflowDatabase) -> type[BaseHTTPRequestHandler]:
                 except ValueError:
                     self.send_error(400, "limit and minimum_trades must be integers")
                     return
-                filters = {name: params.get(name, "") for name in ("symbol", "period", "timeframe", "experiment_type")}
+                filters = {
+                    name: params.get(name, "")
+                    for name in (
+                        "symbol", "period", "timeframe", "experiment_type",
+                        "evidence_split",
+                    )
+                }
                 self._send(_json_bytes(top_backtests(database, params.get("metric", "sharpe"), limit, minimum, **filters)), "application/json")
+                return
+            if request.path.startswith("/api/diagnostics/runs/"):
+                run_id = unquote(
+                    request.path.removeprefix("/api/diagnostics/runs/")
+                )
+                if not run_id or "/" in run_id:
+                    self.send_error(404)
+                    return
+                evidence = database.diagnostic_raw_evidence(run_id)
+                if evidence is None:
+                    self.send_error(404)
+                    return
+                self._send(_json_bytes(evidence), "application/json")
+                return
+            if request.path.startswith("/api/diagnostics/hpo/"):
+                parts = request.path.removeprefix(
+                    "/api/diagnostics/hpo/"
+                ).split("/")
+                if len(parts) != 3 or parts[1] != "trials":
+                    self.send_error(404)
+                    return
+                study_id = unquote(parts[0])
+                try:
+                    trial_number = int(parts[2])
+                except ValueError:
+                    self.send_error(404)
+                    return
+                query = getattr(database, "diagnostic_hpo_trial_details", None)
+                detail = (
+                    query(study_id, trial_number) if query else None
+                )
+                if detail is None:
+                    self.send_error(404)
+                    return
+                self._send(_json_bytes(detail), "application/json")
                 return
             if request.path == "/api/queue" or request.path == "/api/candidates" or request.path == "/api/runs":
                 api_page = request.path.rsplit("/", 1)[-1]
@@ -449,6 +998,17 @@ def make_handler(database: WorkflowDatabase) -> type[BaseHTTPRequestHandler]:
                 return
             if page == "overview":
                 self._send(render_overview(database, params).encode(), "text/html; charset=utf-8")
+                return
+            if request.path.startswith("/hpo/"):
+                study_id = unquote(request.path.removeprefix("/hpo/"))
+                if not study_id or "/" in study_id:
+                    self.send_error(404)
+                    return
+                payload = render_hpo_detail_page(database, study_id)
+                if payload is None:
+                    self.send_error(404)
+                    return
+                self._send(payload.encode(), "text/html; charset=utf-8")
                 return
             if page not in PAGE_SPECS:
                 self.send_error(404)
@@ -499,7 +1059,7 @@ def main() -> int:
 
 STYLE = """
 :root{color-scheme:dark;--bg:#101418;--panel:#192027;--line:#303a44;--text:#e7edf2;--muted:#9eabb6;--accent:#55d6a9}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}header{display:flex;align-items:center;gap:2rem;padding:1rem 2rem;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:3}h1{font-size:1.2rem;margin:0}nav{display:flex;gap:.5rem}a{color:var(--accent);text-decoration:none}nav a{padding:.45rem .7rem;border-radius:6px}nav a.active{background:var(--panel)}main{padding:1.5rem 2rem}.live-controls{margin-left:auto;display:flex;align-items:center;gap:.6rem}.live-controls label{display:flex;align-items:center;gap:.3rem}.live-controls input{min-width:auto}.cards{display:flex;gap:1rem;flex-wrap:wrap}.card{background:var(--panel);border:1px solid var(--line);padding:.8rem 1.2rem;border-radius:8px;min-width:110px}.card b{font-size:1.5rem;display:block}.card span,small,footer{color:var(--muted)}form{display:flex;gap:1rem;align-items:end;flex-wrap:wrap;margin:1.5rem 0}label{display:grid;gap:.3rem;color:var(--muted)}input,select,button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:.5rem}input{min-width:260px}button{cursor:pointer}h2{margin-top:1.5rem}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px}table{border-collapse:collapse;width:100%;min-width:900px}th,td{text-align:left;padding:.65rem;border-bottom:1px solid var(--line);vertical-align:top}th{position:sticky;top:0;background:var(--panel)}td.detail{min-width:200px;max-width:520px;white-space:normal}.empty{text-align:center;color:var(--muted);padding:2rem}.positive{color:#55d6a9}.negative{color:#ff7b86}details pre{max-width:520px;max-height:240px;overflow:auto;white-space:pre-wrap;color:var(--muted)}.chart-panel{margin-top:1.5rem;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1.2rem}.chart-heading{display:flex;align-items:start;justify-content:space-between;gap:2rem}.chart-heading h2{margin:0}.chart-heading form{margin:0}.chart-heading input{min-width:100px;width:120px}.leaderboard{margin-top:1.3rem}.leaderboard table{min-width:1150px}.leaderboard td{font-variant-numeric:tabular-nums}.leaderboard td:nth-child(2){min-width:180px}.leaderboard .context{display:block}.leaderboard .ranked{background:#20352f;color:var(--accent);font-weight:700}footer{padding:1rem 2rem}@media(max-width:800px){header{position:static;display:block;padding:1rem}nav{margin-top:.7rem;overflow:auto}.live-controls{margin-top:.8rem}.chart-heading{display:block}.chart-heading form{margin-top:1rem}main{padding:1rem}input{min-width:200px}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}header{display:flex;align-items:center;gap:2rem;padding:1rem 2rem;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:3}h1{font-size:1.2rem;margin:0}nav{display:flex;gap:.5rem}a{color:var(--accent);text-decoration:none}nav a{padding:.45rem .7rem;border-radius:6px}nav a.active{background:var(--panel)}main{padding:1.5rem 2rem}.live-controls{margin-left:auto;display:flex;align-items:center;gap:.6rem}.live-controls label{display:flex;align-items:center;gap:.3rem}.live-controls input{min-width:auto}.cards{display:flex;gap:1rem;flex-wrap:wrap}.card{background:var(--panel);border:1px solid var(--line);padding:.8rem 1.2rem;border-radius:8px;min-width:110px}.card b{font-size:1.5rem;display:block}.card span,small,footer{color:var(--muted)}form{display:flex;gap:1rem;align-items:end;flex-wrap:wrap;margin:1.5rem 0}label{display:grid;gap:.3rem;color:var(--muted)}input,select,button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:.5rem}input{min-width:260px}button{cursor:pointer}h2{margin-top:1.5rem}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px}table{border-collapse:collapse;width:100%;min-width:900px}th,td{text-align:left;padding:.65rem;border-bottom:1px solid var(--line);vertical-align:top}th{position:sticky;top:0;background:var(--panel)}td.detail{min-width:200px;max-width:520px;white-space:normal}.empty{text-align:center;color:var(--muted);padding:2rem}.positive{color:#55d6a9}.negative{color:#ff7b86}details dl{display:grid;grid-template-columns:max-content minmax(100px,1fr);gap:.25rem .7rem;min-width:320px}details dt{color:var(--muted)}details dd{margin:0}.chart-panel{margin-top:1.5rem;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1.2rem}.chart-heading{display:flex;align-items:start;justify-content:space-between;gap:2rem}.chart-heading h2{margin:0}.chart-heading form{margin:0}.chart-heading input{min-width:100px;width:120px}.leaderboard{margin-top:1.3rem}.leaderboard table{min-width:1150px}.leaderboard td{font-variant-numeric:tabular-nums}.leaderboard td:nth-child(2){min-width:180px}.leaderboard .context{display:block}.leaderboard .ranked{background:#20352f;color:var(--accent);font-weight:700}footer{padding:1rem 2rem}@media(max-width:800px){header{position:static;display:block;padding:1rem}nav{margin-top:.7rem;overflow:auto}.live-controls{margin-top:.8rem}.chart-heading{display:block}.chart-heading form{margin-top:1rem}main{padding:1rem}input{min-width:200px}}
 """
 
 DASHBOARD_JS = r"""
@@ -537,12 +1097,28 @@ DASHBOARD_JS = r"""
     if (!rows.length) { target.innerHTML = '<p class=empty>No qualifying finished backtests yet.</p>'; return; }
     const metric = document.querySelector('[name=metric]').value.replaceAll('_', ' ');
     const number = (value, suffix = '') => value == null ? '—' : `<span class="${value > 0 ? 'positive' : value < 0 ? 'negative' : ''}">${Number(value).toFixed(2)}${suffix}</span>`;
-    const headers = ['#','strategy',`rank: ${metric}`,'Sharpe','net profit','Calmar','profit factor','drawdown','win rate','expectancy','trades'];
+    const shown = value => value == null || value === '' ? '—' : escapeHtml(value);
+    const details = row => {
+      const fields = [
+        ['experiment',row.experiment_id],['run',row.run_id],['session',row.session_id],
+        ['Sortino',row.sortino_ratio],['Calmar',row.calmar_ratio],
+        ['profit factor',row.profit_factor],['win rate',row.win_rate],
+        ['fees',row.fees],['expectancy',row.expectancy],['leverage',row.leverage],
+        ['risk / trade',row.risk_per_trade_percentage],
+        ['optimizer objective',row.optimizer_objective],
+        ['cost stress',row.cost_stress_status],
+        ['significance p',row.significance_p_value],['completed',row.completed_at],
+      ];
+      return `<details><summary>standardized</summary><dl>${fields.map(([label,value]) => `<dt>${escapeHtml(label)}</dt><dd>${shown(value)}</dd>`).join('')}</dl></details>`;
+    };
+    const headers = ['#','strategy','stage / verdict','market','period / split',`rank: ${metric}`,'net profit','drawdown','Sharpe','trades','finding','next action','details'];
     const body = rows.map((row, index) => {
-      const context = [row.symbol, row.timeframe, row.experiment_type].filter(Boolean).join(' · ');
-      const label = escapeHtml(row.strategy || row.experiment_id);
-      const linked = row.dashboard_url ? `<a href="${escapeAttr(row.dashboard_url)}" target=_blank rel="noopener noreferrer">${label}</a>` : label;
-      return `<tr title="${escapeAttr(row.experiment_id)}"><td>${index + 1}</td><td>${linked}<small class=context>${escapeHtml(context)}</small></td><td class=ranked>${number(row.score)}</td><td>${number(row.sharpe_ratio)}</td><td>${number(row.net_profit_percentage,'%')}</td><td>${number(row.calmar_ratio)}</td><td>${number(row.profit_factor)}</td><td>${number(row.max_drawdown,'%')}</td><td>${number(row.win_rate,'%')}</td><td>${number(row.expectancy)}</td><td>${row.total_trades == null ? '—' : Math.round(row.total_trades)}</td></tr>`;
+      const version = row.strategy_version ? `<small class=context>${escapeHtml(row.strategy_version)}</small>` : '';
+      const stage = [row.lifecycle_stage,row.verdict].filter(Boolean).join(' / ');
+      const market = [row.symbol,row.timeframe].filter(Boolean).join(' · ');
+      const period = [row.start_date,row.finish_date].filter(Boolean).join(' to ');
+      const split = row.evidence_split ? `<small class=context>${escapeHtml(row.evidence_split)}</small>` : '';
+      return `<tr title="${escapeAttr(row.experiment_id)}"><td>${index + 1}</td><td>${shown(row.strategy || row.experiment_id)}${version}</td><td>${shown(stage)}</td><td>${shown(market)}</td><td>${shown(period)}${split}</td><td class=ranked>${number(row.score)}</td><td>${number(row.net_profit_percentage,'%')}</td><td>${number(row.max_drawdown_percentage,'%')}</td><td>${number(row.sharpe_ratio)}</td><td>${row.trade_count == null ? '—' : Math.round(row.trade_count)}</td><td class=detail>${shown(row.finding)}</td><td class=detail>${shown(row.next_action)}</td><td>${details(row)}</td></tr>`;
     }).join('');
     target.innerHTML = `<div class="table-wrap leaderboard"><table><thead><tr>${headers.map(value => `<th>${escapeHtml(value)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`;
   }

@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from ats_lab.batch_synthesis import ACTIVE_READY_LIMIT, apply_batch, build_batch_context
 from ats_lab.database import WorkflowDatabase
-from ats_lab.models import Evaluation, ExperimentSpec, Verdict, WorkItem, WorkState
+from ats_lab.models import (
+    Evaluation,
+    ExperimentSpec,
+    RunResult,
+    RunStatus,
+    Verdict,
+    WorkItem,
+    WorkState,
+)
 from ats_lab.resources import ResourcePolicy
 
 
@@ -50,9 +60,44 @@ class BatchSynthesisTests(unittest.TestCase):
             self.add_source(database, "PLAIN", Verdict.INFRASTRUCTURE_FAILURE)
             context = build_batch_context(database)
             self.assertEqual([row["source_experiment_id"] for row in context["improvement_candidates"]], ["REVISE"])
+            self.assertEqual(context["improvement_candidates"][0]["evidence"], [])
+            self.assertNotIn(
+                "metrics_summary", context["improvement_candidates"][0],
+            )
             exposed = {row["source_experiment_id"] for row in context["scheduled_candidates"]}
             self.assertNotIn("LOCKED", exposed)
             self.assertEqual(context["promotion_locked_count"], 1)
+
+    def test_context_is_bounded_to_twenty_five_compact_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            for index in range(25):
+                self.add_source(database, f"REVISE-{index}", Verdict.REVISE)
+            for index in range(10):
+                self.add_source(database, f"REJECT-{index}", Verdict.REJECT)
+            for index in range(6):
+                database.add_run(RunResult(
+                    id=f"RUN-{index}", experiment_id="REVISE-24",
+                    work_item_id="REVISE-24", session_id=f"SESSION-{index}",
+                    status=RunStatus.FINISHED,
+                    metrics={"sharpe_ratio": index / 10},
+                ))
+
+            context = build_batch_context(database)
+            inspected = (
+                len(context["improvement_candidates"])
+                + len(context["scheduled_candidates"])
+                + len(context["concept_learnings"])
+            )
+
+            self.assertEqual(len(context["improvement_candidates"]), 20)
+            self.assertLessEqual(inspected, 25)
+            candidate = next(
+                row for row in context["improvement_candidates"]
+                if row["source_experiment_id"] == "REVISE-24"
+            )
+            self.assertLessEqual(len(candidate["evidence"]), 4)
+            self.assertEqual(context["evidence_rows_per_candidate"], 4)
 
     def test_revise_request_creates_child_but_hpo_source_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -76,6 +121,46 @@ class BatchSynthesisTests(unittest.TestCase):
             parent = database.rows("SELECT parent_experiment_id FROM experiments WHERE id=?", (child,))[0]
             self.assertEqual(parent["parent_experiment_id"], "REVISE")
             self.assertIn("promotion-locked", result["rejected"][0]["reason"])
+
+    def test_non_entry_revision_uses_canonical_source_entry_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            self.add_source(database, "REVISE", Verdict.REVISE)
+            source = json.loads(database.rows(
+                "SELECT specification_json FROM experiments WHERE id='REVISE'"
+            )[0]["specification_json"])
+            description = "Close crosses above canonical EMA gate"
+            source["entry_rule"] = {
+                "description": description,
+                "fingerprint": hashlib.sha256(
+                    description.casefold().encode()
+                ).hexdigest(),
+            }
+            with database.connect() as connection:
+                connection.execute(
+                    """UPDATE experiments SET specification_json=?
+                       WHERE id='REVISE'""",
+                    (json.dumps(source),),
+                )
+
+            result = apply_batch(database, [request(
+                action="revise", lane="improvement",
+                source_experiment_id="REVISE",
+                controlled_change="Reduce risk cap",
+                change_scope="risk_only",
+                strategy_name="StrategyREVISE",
+                entry_rule="Model accidentally changed entry",
+            )])
+
+            self.assertEqual(len(result["generated"]), 1)
+            child = result["generated"][0]["baseline_job"]
+            child_spec = json.loads(database.rows(
+                "SELECT specification_json FROM experiments WHERE id=?",
+                (child,),
+            )[0]["specification_json"])
+            self.assertEqual(
+                child_spec["entry_rule"]["description"], description,
+            )
 
     def test_ready_capacity_holds_generated_jobs_as_scheduled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

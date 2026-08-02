@@ -19,26 +19,34 @@ synthesis_min_new_concepts = 5
 synthesis_max_improvements = 20
 synthesis_retry_cooldown_seconds = 300
 synthesis_lease_seconds = 3600
-active_ready_limit = 3
+claim_timeout_seconds = 7200
+execution_batch_size = 8
+active_ready_limit = 8
 ```
 
 Compute-heavy behavior:
 
-- One synthesis agent call returns exactly 25 chains at the five-chain watermark.
+- One synthesis agent call returns 25 chains at five-chain watermark. Context
+  inspects at most 25 records and four canonical evidence rows per record.
+- Local lane gate trims harmless over-generation to exact 25 while preserving
+  minimum five new concepts and maximum twenty improvements. Under-generation
+  fails explicitly.
 - Each cohort reserves at least five slots for new concepts and uses up to twenty
   eligible controlled improvements.
 - Planner lease prevents duplicate synthesis across workers. Invalid batches
   wait five minutes before retry.
 - Worker drains dependency-satisfied scheduled overflow as ready capacity opens,
   avoiding another synthesis context load between jobs in the cohort.
-- Execution and evaluation share one Agent turn, avoiding a second context load.
+- Up to eight jobs share one execution turn.
+- One separate bounded analysis turn evaluates whole completed batch and creates
+  next cohort when needed.
 - New entry jobs use 5,000 local random-entry simulations.
 - HPO uses native Jesse optimization with 300 trials per parameter and keeps 50
   candidates.
 - Candle Monte Carlo uses 500 scenarios.
 - Six of ten CPU cores are available to Jesse; four remain for the OS, Docker,
   database and agent.
-- Only three jobs may be ready/running, preventing stale speculative backlog.
+- Only eight jobs may be ready/running, matching execution batch capacity.
 
 These are execution budgets, not promotion criteria. More trials reduce search
 noise but do not turn weak or overfit results into valid candidates.

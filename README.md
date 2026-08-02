@@ -1,201 +1,644 @@
-# Algorithmic Trading Strategy Laboratory
+# ATS Lab User Manual
 
-Evidence-first infrastructure for designing, scheduling, executing and
-evaluating algorithmic trading strategy research.
+ATS Lab runs evidence-first Jesse strategy research in batches.
 
-The laboratory keeps four concerns separate:
-
-1. **Future work** — experiments waiting to run.
-2. **Execution evidence** — immutable sessions, routes, metrics and errors.
-3. **Evaluation** — explicit gates and research verdicts.
-4. **Synthesis** — searchable history and candidate comparison.
-
-It does not place live orders, manage exchange credentials or promise profitable
+It does not trade live, manage exchange credentials, or guarantee profitable
 strategies.
 
-## Why this exists
+## What to use
 
-Research workflows often begin as Markdown queues and shell scripts. Over time,
-execution state, results, agent prompts and historical notes become entangled.
-Rejected work remains in the “queue,” failures are confused with completed
-experiments, and agents repeat old research because evidence is hard to query.
+Use three interfaces:
 
-This project replaces that sprawl with:
+| Interface | Purpose | Address or command |
+|---|---|---|
+| ATS supervisor | Run batch research loop | `research/automation/ats_lab.sh supervisor` |
+| ATS terminal | Monitor and control loop | `research/automation/ats_lab.sh console` |
+| ATS dashboard | Monitor queue, evidence, candidates, cohorts | <http://127.0.0.1:8765> |
+| Jesse dashboard | Inspect individual backtest sessions | <http://127.0.0.1:9000> |
 
-- typed Python domain contracts;
-- versioned JSON Schemas for agent and adapter inputs;
-- transactional SQLite persistence;
-- separate work state and research verdicts;
-- idempotent migration from legacy Markdown/JSON ledgers;
-- short JSON-producing commands suitable for agents, cron and CI;
-- queryable candidate and active-queue views.
+Run commands from `<repo-root>/src/repos/jesse-src` unless this manual says
+otherwise.
 
-## Status
-
-Early alpha. Core schema, contracts, queue transitions, legacy importer, audit
-tools and candidate views are implemented. Execution-framework adapters and
-ranking extensions are the next stage.
-
-## Architecture
+## How workflow works
 
 ```text
-Agent / Codex / cron / CI
-             |
-             v
-        ats-lab CLI
-             |
-             v
-   typed contracts + SQLite
-      |         |         |
-    queue     evidence  evaluation
-      |                   |
-      +---- execution ----+
-             adapter
+ATS SQLite ready queue
+        |
+        v
+executor Agent turn
+  runs up to 8 jobs through Jesse MCP
+        |
+        v
+durable run evidence in SQLite
+        |
+        v
+canonical NormalizedEvidence rows
+  one record per route/split
+        |
+        v
+deterministic gates
+  same fields used by every consumer
+        |
+        v
+separate analyzer Agent turn
+  evaluates whole completed batch once
+        |
+        v
+validated evaluations
+        |
+        +-- remaining chains > 5 --> execute next batch
+        |
+        +-- remaining chains <= 5 -> synthesize 25 new chains
 ```
 
-The core is agent-agnostic and backtester-agnostic. A Jesse adapter is the first
-planned execution integration. Agent and Codex can orchestrate the same short,
-idempotent commands. Memory may supply cross-session memory, but SQLite remains
-the authoritative source for queue and evidence state.
+Important boundaries:
 
-See [architecture](docs/architecture.md) for boundaries and state machines.
-See [Jesse workspace integration](docs/workspace-integration.md) for the exact
-harness, database, repository, and market-data ownership boundary.
+- ATS SQLite is sole queue, run, evaluation and synthesis authority.
+- `NormalizedEvidence` is sole metric contract. `CandidateMetrics` is an alias,
+  not another schema.
+- Jesse owns strategy source, candles and backtest execution.
+- Trading operations use Jesse MCP.
+- Agent executor uses tools. Agent analyzer receives compact normalized
+  evidence only and does not own workflow state.
+- Markdown queues, journals and JSON sidecars are legacy evidence only.
+- `ats-lab worker` is compatibility-only. Use `ats-lab supervisor`.
 
-## Requirements
+## Canonical evidence
 
-- Python 3.11+
-- No runtime dependencies
+Every completed run is normalized immediately into SQLite. Multi-route runs
+become one row per atomic route and evidence split. Supervisor analysis, HPO,
+deterministic gates, dashboard, CLI and Agent prompts all read these same rows.
 
-## Installation
+Missing values remain SQL/JSON `null` internally and display as `—`. Currency
+`net_profit` is never misread as `net_profit_percentage`. Raw Jesse metrics stay
+available only through explicit diagnostic export.
+
+Normal evidence view:
 
 ```bash
-git clone https://github.com/l-j-g/algorithmic-trading-strategy-laboratory.git
-cd algorithmic-trading-strategy-laboratory
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -e .
+research/automation/ats_lab.sh evidence
+research/automation/ats_lab.sh evidence \
+  --symbol BTC-USDT \
+  --timeframe 1h \
+  --split oos \
+  --rank sharpe_ratio
 ```
 
-## Quick start
-
-Initialize a laboratory database:
+Machine-readable normalized evidence:
 
 ```bash
-ats-lab init
+research/automation/ats_lab.sh evidence --format json
 ```
 
-Inspect future work and candidates:
+Raw diagnostic evidence for one known run:
 
 ```bash
-ats-lab queue
-ats-lab reconcile
-ats-lab candidates
-ats-lab candidates --verdict hpo-candidate
+research/automation/ats_lab.sh diagnostic-export RUN-ID
 ```
 
-Claim one ready item transactionally:
+Raw optimizer parameters for one known HPO trial:
 
 ```bash
-ats-lab claim --worker research-agent-1
+research/automation/ats_lab.sh diagnostic-hpo-trial HPO-STUDY-ID TRIAL-NUMBER
 ```
 
-Every command emits JSON. A second worker cannot claim the same ready item.
+Do not use diagnostic output for ranking, gating, HPO analysis or normal
+monitoring.
 
-### Run a worker
+## Daily operation
 
-Connect any agent runner through a small JSON stdin/stdout adapter:
+### 1. Check Jesse
+
+Jesse dashboard should open:
+
+<http://127.0.0.1:9000>
+
+Jesse MCP endpoint:
+
+```text
+http://127.0.0.1:9002/mcp
+```
+
+If Jesse is stopped:
 
 ```bash
-ats-lab worker --dispatch-command './bin/dispatch-agent' --continuous
+cd <repo-root>/src/repos/jesse-src/docker
+docker compose up
 ```
 
-When `.ats-lab/config.toml` exists, omit `--dispatch-command`; the worker uses
-the built-in Agent launcher automatically. The command-line flag and
-`ATS_LAB_DISPATCH_COMMAND` remain explicit overrides.
-
-Continuous workers synthesize through Agent when unresolved research chains
-reach the low watermark (five by default). One planner lease emits exactly 25
-chains: eligible controlled improvements first, at least five genuinely new
-concepts, and no more than twenty improvements. A chain may contain significance
-and gated baseline work, so 25 chains can create more than 25 work items. At most
-three work items are ready/running; scheduled overflow is promoted as slots open.
-HPO and paper-trade candidates remain promotion-locked. Use
-`--no-idle-synthesis` for monitor-only waiting.
-
-Each finished research response includes normalized run evidence and an
-evaluation. Both persist together, letting the next cohort learn from metrics,
-failure regimes and next steps without a separate evaluator context load.
+Before starting supervisor, run deterministic stack gate:
 
 ```bash
-ats-lab synthesis-status
+PYTHONPATH=src python3 -m ats_lab.cli preflight
 ```
 
-For compute-rich/token-limited operation, configure `[resources]` in the ignored
-`.ats-lab/config.toml`. See [resource policy](docs/resource-policy.md).
+Gate checks Docker, Jesse PostgreSQL container/readiness/read-only query/public
+schema, Jesse dashboard/MCP, then Memory. PostgreSQL inspection is limited to
+`SELECT 1` and table names `candle`, `backtestsession`, and
+`significancetestsession`; credential tables and values are never read.
 
-For each claimed item, the command receives a versioned execution request on
-standard input. It must print one JSON object with an `outcome` of `finished`,
-`retry`, or `blocked`. A retry may include `retry_after`; otherwise the worker
-uses a 60-second delay. Blocked and retry results may include `blocker_code`
-and `detail`. Finished research work must include `evidence.run` and
-`evidence.evaluation`.
+Gate requires local Docker daemon, Jesse dashboard (`127.0.0.1:9000`), Jesse
+MCP (`127.0.0.1:9002/mcp`), and Memory health API
+(`127.0.0.1:18000/health`). Supervisor runs same gate before claiming work.
+Failure returns `infrastructure_preflight_failed` without consuming strategy
+attempts. Override only Memory URL with `ATS_LAB_MEMORY_HEALTH_URL`; keep
+credentials in process environment, never tracked config or command output.
 
-`--continuous` defaults off, `--idle-sleep` defaults to 30 seconds, and
-`--retry-delay` defaults to 60 seconds. `--max-items N` provides a bounded run
-for supervisors and smoke tests. The dispatch command can also be set with
-`ATS_LAB_DISPATCH_COMMAND`; worker identity uses `ATS_LAB_WORKER_ID`.
-
-The worker owns only queue lifecycle. The adapter owns agent launch and Jesse
-operations, then returns a normalized outcome. Missing adapter configuration
-fails before any work is claimed.
-
-### Reconcile imported queue state
-
-Preview classifications before starting workers:
+### 2. Inspect plan
 
 ```bash
-ats-lab reconcile
+cd <repo-root>/src/repos/jesse-src
+research/automation/ats_lab.sh supervisor --plan
 ```
 
-Default stale threshold: 24 hours. Missing claim metadata on imported
-`running` work also counts as stale. Apply conservative cleanup explicitly:
+This command is read-only. Check:
+
+- `healthy` is `true`;
+- `awaiting_batch_evaluation` is `0`, unless resuming analysis;
+- `unresolved_execution_claims` is `0`; active work appears separately under
+  `running_execution_claims`;
+- `next_action` explains expected supervisor action;
+- configured `execution_batch_size` is `8`;
+- synthesis limit is `25`;
+- synthesis low watermark is `5`.
+
+### 3. Start dashboard
+
+Use separate terminal:
 
 ```bash
-ats-lab reconcile --stale-after-hours 24 --apply
-ats-lab normalize-blockers --apply
+cd <repo-root>/src/repos/jesse-src
+research/automation/ats_lab.sh dashboard --host 127.0.0.1 --port 8765
 ```
 
-`normalize-blockers` returns never-attempted legacy ideas to `scheduled` while
-preserving their former blocker text as readiness requirements. Runtime
-`blocked` remains reserved for work that an executor actually attempted.
+Open <http://127.0.0.1:8765>.
 
-Apply blocks stale running work with `stale_worker_claim`. It archives only
-`legacy_blocked` items already backed by an evaluation or terminal run. Other
-blocked work remains actionable. Reconciliation never deletes records.
+Keep dashboard loopback-only. It has no authentication.
 
-### Sanitize imported queue and history
+### 4. Start terminal monitor
 
-Preview terminal evidence evaluation and dead-item deletion:
+Use separate terminal:
 
 ```bash
-ats-lab sanitize
+research/automation/ats_lab.sh monitor --watch
 ```
 
-Apply only after taking a SQLite backup:
+Or open interactive control console:
 
 ```bash
-ats-lab sanitize --apply
+research/automation/ats_lab.sh console
 ```
 
-Sanitation adds deterministic evaluations to finished work with persisted run
-metrics. It deletes blocked, never-attempted work with no run/evaluation
-evidence and empty archived placeholders. Runnable work and all recorded run
-evidence remain intact.
+Console commands:
 
-## Enqueue an experiment
+```text
+status
+watch [seconds]
+queue [state]
+candidates
+evidence
+hpo
+analyzer
+timings
+pause
+resume
+stop
+help
+quit
+```
 
-Create `experiment.json`:
+`quit` closes console only. It does not stop supervisor.
+
+### 5. Run research
+
+One supervisor round:
+
+```bash
+research/automation/ats_lab.sh supervisor
+```
+
+Continuous operation:
+
+```bash
+research/automation/ats_lab.sh supervisor --continuous
+```
+
+Bounded continuous run:
+
+```bash
+research/automation/ats_lab.sh supervisor \
+  --continuous \
+  --max-rounds 3
+```
+
+Prefer graceful CLI stop:
+
+```bash
+research/automation/ats_lab.sh control stop
+```
+
+Supervisor finishes current execution plus required analysis, then exits before
+claiming another batch. Completed run evidence stays durable.
+
+Resume after graceful stop:
+
+```bash
+research/automation/ats_lab.sh control resume
+research/automation/ats_lab.sh supervisor --continuous
+```
+
+## Most effective operating pattern
+
+Use this sequence:
+
+1. Run `supervisor --plan`.
+2. Resolve unhealthy claims or permanent blockers first.
+3. Start ATS dashboard.
+4. Run one supervisor round as smoke test.
+5. Confirm completed runs and evaluations appear.
+6. Start `supervisor --continuous`.
+7. Run `monitor --watch` or `console` in another terminal.
+8. Pause before inspecting or changing blocked requirements.
+9. Use graceful `control stop`; do not kill active Jesse/Agent subprocesses.
+
+Avoid:
+
+- running legacy Markdown discovery loop;
+- running `ats-lab worker` beside supervisor;
+- launching multiple supervisors with different worker IDs;
+- editing SQLite directly;
+- deleting/recreating database to clear state;
+- treating profitable single backtest as promotion evidence;
+- storing queue state only in chat or memory.
+
+## Monitoring commands
+
+### Recommended terminal view
+
+One snapshot:
+
+```bash
+research/automation/ats_lab.sh monitor
+```
+
+Refresh every five seconds:
+
+```bash
+research/automation/ats_lab.sh monitor --watch
+```
+
+Custom refresh:
+
+```bash
+research/automation/ats_lab.sh monitor --watch --interval 2
+```
+
+View includes durable control intent, supervisor phase/PID/heartbeat, queue
+counts, active jobs, current batch, synthesis cohort, next action and top
+candidates. It also shows HPO lifecycle counts, current analyzer state and most
+recent stage duration.
+
+### Supervisor control
+
+```bash
+research/automation/ats_lab.sh control status
+research/automation/ats_lab.sh control pause
+research/automation/ats_lab.sh control resume
+research/automation/ats_lab.sh control stop
+```
+
+Semantics:
+
+| Command | Effect |
+|---|---|
+| `pause` | Finish current batch and analysis; remain alive; claim no new work |
+| `resume` | Allow paused supervisor to claim next batch |
+| `stop` | Finish current batch and analysis; exit before next claim |
+| `status` | Show durable request plus reported supervisor runtime |
+
+Control state lives in canonical SQLite. Reopening terminal does not lose it.
+`stop` remains requested until `resume`; run `resume` before starting another
+supervisor.
+
+Optional short alias for current shell:
+
+```bash
+alias lab='<repo-root>/src/repos/jesse-src/research/automation/ats_lab.sh'
+lab monitor --watch
+lab control pause
+lab control resume
+lab console
+```
+
+### Compact health
+
+```bash
+research/automation/ats_lab.sh status
+research/automation/ats_lab.sh status --format json
+```
+
+Important fields:
+
+| Field | Meaning |
+|---|---|
+| `healthy` | No unresolved execution claim |
+| `next_action` | Recommended operator action |
+| `awaiting_batch_evaluation` | Runs finished but analyzer not yet durable |
+| `running_execution_claims` | Current executor batch claims |
+| `unresolved_execution_claims` | Stale claims past configured timeout |
+| `remaining_chains` | Unresolved research chains before refill |
+| `latest_event` | Most recent durable workflow event |
+
+### Active queue
+
+```bash
+research/automation/ats_lab.sh queue
+research/automation/ats_lab.sh queue --state ready
+research/automation/ats_lab.sh queue --state blocked
+research/automation/ats_lab.sh queue --format json
+```
+
+### Candidates
+
+```bash
+research/automation/ats_lab.sh candidates
+research/automation/ats_lab.sh candidates --verdict hpo-candidate
+research/automation/ats_lab.sh candidates --verdict paper-trade-candidate
+research/automation/ats_lab.sh candidates --format json
+```
+
+Candidate views show one representative row per experiment. Use `evidence` to
+inspect every atomic route/split row.
+
+### HPO lifecycle
+
+Use one lifecycle surface for HPO scheduling, execution, analysis, validation
+and final disposition:
+
+```bash
+research/automation/ats_lab.sh hpo
+research/automation/ats_lab.sh hpo --state hpo_running
+research/automation/ats_lab.sh hpo-detail HPO-STUDY-ID
+research/automation/ats_lab.sh analyzer
+research/automation/ats_lab.sh timings
+research/automation/ats_lab.sh timings --job HPO-WORK-ITEM-ID
+research/automation/ats_lab.sh requeue-hpo-analysis HPO-ANALYSIS-JOB-ID \
+  --reason "provider or transport blocker repaired"
+```
+
+Normal commands render human tables. Add `--format json` for machine-readable
+lifecycle/status data. Terminal analyzer jobs require explicit operator requeue
+with a durable reason; attempts reset only after that command.
+
+Lifecycle labels:
+
+| Label | Meaning |
+|---|---|
+| `hpo_candidate` | Baseline evidence approved for optimization |
+| `hpo_scheduled` | HPO work created; waiting for execution |
+| `hpo_running` | Optimizer study running |
+| `hpo_analysis` | Study complete; selected-trial analysis pending/running |
+| `validation` | Selected trials undergoing holdout/OOS/rolling validation |
+| `paper_trade_candidate` | Validation supports paper-trade review |
+| `revise` | Evidence supports one controlled revision |
+| `reject` | Evidence does not support further promotion |
+
+`hpo-detail` shows study objective, trial progress, selected trials, validation
+status, analyzer state, stage durations, and normalized run/session evidence
+links. It never prints raw optimizer JSON. Use `diagnostic-hpo-trial` only when
+investigating optimizer internals.
+
+Validation jobs keep trial parameters out of normal UI and analyzer payloads.
+Executor hydrates selected parameters into execution-only context. Jobs remain
+`requirements_pending` when canonical validation routes are absent; worker will
+not claim them until symbol/timeframe/OOS or rolling periods are supplied.
+
+Supply fresh split-specific routes without editing SQLite:
+
+```bash
+research/automation/ats_lab.sh configure-hpo-validation-routes \
+  OPTUNA-9BD60A3E3546 --file validation-routes.json
+```
+
+`validation-routes.json`:
+
+```json
+{
+  "oos": [{
+    "exchange": "Binance Perpetual Futures",
+    "symbol": "BTC-USDT",
+    "timeframe": "1h",
+    "start_date": "2026-01-01",
+    "finish_date": "2026-03-31"
+  }],
+  "rolling": [{
+    "exchange": "Binance Perpetual Futures",
+    "symbol": "BTC-USDT",
+    "timeframe": "1h",
+    "start_date": "2025-01-01",
+    "finish_date": "2026-03-31"
+  }]
+}
+```
+
+Use genuinely unseen periods. Command validates routes, records operator event,
+clears only matching `requirements_pending`, then normal promotion resumes.
+
+### Audit
+
+```bash
+research/automation/ats_lab.sh audit
+research/automation/ats_lab.sh synthesis-status
+```
+
+Healthy audit expectations:
+
+- `finished_missing_evaluation: 0`;
+- `unknown_strategy: 0`;
+- no unexplained running claim;
+- no completed batch left unevaluated indefinitely.
+
+## Work states
+
+```text
+scheduled -> ready -> running -> finished
+                         |
+                         +-> waiting_retry -> ready
+                         |
+                         +-> blocked
+```
+
+| State | Meaning |
+|---|---|
+| `scheduled` | Future work waiting for dependency or ready capacity |
+| `ready` | May be claimed by supervisor |
+| `running` | Claimed execution or completed run awaiting batch analysis |
+| `waiting_retry` | Transient failure with bounded backoff |
+| `blocked` | Permanent constraint or human decision required |
+| `finished` | Execution and evaluation durable |
+| `archived` | Terminal history, not future work |
+
+Execution completion and research verdict are separate facts.
+
+Verdicts:
+
+- `reject`
+- `revise`
+- `inconclusive`
+- `pass`
+- `hpo_candidate`
+- `paper_trade_candidate`
+- `infrastructure_failure`
+
+## Recovery
+
+### Stale claim
+
+Always preview:
+
+```bash
+research/automation/ats_lab.sh recover-claims --stale-after-hours 2
+```
+
+Apply only when preview shows abandoned claims with no durable runs:
+
+```bash
+research/automation/ats_lab.sh recover-claims \
+  --stale-after-hours 2 \
+  --apply
+```
+
+Completed executions awaiting analysis are excluded from stale-claim recovery.
+
+### Analyzer failure
+
+Do not rerun backtests manually. Restart same supervisor:
+
+```bash
+research/automation/ats_lab.sh supervisor
+```
+
+Supervisor finds durable runs marked `awaiting_batch_evaluation` and resumes
+analysis.
+
+### Retry loop
+
+Inspect:
+
+```bash
+research/automation/ats_lab.sh queue
+```
+
+Retries use exponential delay and stop at configured attempt limit. Repeated
+failure becomes `blocked` with `retry_limit_reached`.
+
+### Blocked item
+
+Inspect exact blocker:
+
+```bash
+research/automation/ats_lab.sh queue --state blocked
+```
+
+Do not blindly return blocked work to ready. Resolve requirement, accept explicit
+research assumption, or archive with terminal evidence.
+
+After fixing and validating root cause, reopen with durable evidence:
+
+```bash
+research/automation/ats_lab.sh resolve-blocker JOB-ID \
+  --code sizing_fix_validated \
+  --detail "Exact validated resolution." \
+  --evidence JESSE-SESSION-ID
+```
+
+This atomically moves `blocked -> ready`, clears active blocker fields and
+records previous blocker, resolution, detail and evidence IDs in SQLite events.
+
+If durable run metrics exist but analyzer evidence was incomplete:
+
+```bash
+research/automation/ats_lab.sh requeue-evaluation JOB-ID \
+  --batch RECOVERY-ID \
+  --reason "Recover existing durable metrics."
+```
+
+This schedules analysis only. It does not rerun Jesse execution.
+
+### Database audit or migration concern
+
+Preview only:
+
+```bash
+research/automation/ats_lab.sh reconcile
+research/automation/ats_lab.sh sanitize
+```
+
+Before applying sanitation, back up:
+
+```bash
+cp <repo-root>/src/repos/algorithmic-trading-strategy-laboratory/.ats-lab/laboratory.sqlite3 \
+   <repo-root>/src/repos/algorithmic-trading-strategy-laboratory/.ats-lab/laboratory.sqlite3.backup
+```
+
+Then, only after reviewing preview:
+
+```bash
+research/automation/ats_lab.sh sanitize --apply
+```
+
+## Configuration
+
+Local configuration:
+
+```text
+<repo-root>/src/repos/algorithmic-trading-strategy-laboratory/.ats-lab/config.toml
+```
+
+Example:
+
+```toml
+[repositories]
+jesse = "<repo-root>/src/repos/jesse-src"
+
+[executor]
+executable = "<repo-root>/.local/bin/executor"
+profile = "ats-lab"
+timeout_seconds = 3600
+
+[resources]
+mode = "compute_heavy"
+cpu_cores = 6
+significance_simulations = 5000
+hpo_trials_per_parameter = 300
+hpo_best_candidates = 50
+monte_carlo_scenarios = 500
+execution_batch_size = 8
+active_ready_limit = 8
+synthesis_inspect_limit = 25
+synthesis_generate_limit = 25
+synthesis_low_watermark = 5
+synthesis_min_new_concepts = 5
+synthesis_max_improvements = 20
+synthesis_retry_cooldown_seconds = 300
+synthesis_lease_seconds = 3600
+claim_timeout_seconds = 7200
+```
+
+Recommended token-efficient settings:
+
+- execute 8 jobs per executor turn;
+- analyze completed batch once;
+- generate 25 chains per synthesis turn;
+- inspect at most 25 synthesis records and 4 canonical evidence rows per record;
+- refill at 5 remaining chains;
+- require at least 5 new concepts;
+- allow up to 20 controlled improvements.
+
+## Manual experiment enqueue
+
+Normal operation should use synthesis. For explicit operator-created work,
+create `experiment.json`:
 
 ```json
 {
@@ -208,22 +651,13 @@ Create `experiment.json`:
     "archetype": "trend",
     "target_regime": "directional expansion",
     "failure_regime": "low-volatility chop",
-    "routes": [
-      {
-        "exchange": "Example Perpetual Futures",
-        "symbol": "BTC-USDT",
-        "timeframe": "1h",
-        "start_date": "2024-01-01",
-        "finish_date": "2024-12-31"
-      }
-    ],
-    "success_gates": [
-      {"name": "trade_count", "operator": ">=", "threshold": 30},
-      {"name": "expectancy", "operator": ">", "threshold": 0}
-    ],
-    "failure_gates": [
-      {"name": "max_drawdown", "operator": "<", "threshold": -30}
-    ]
+    "routes": [{
+      "exchange": "Binance Perpetual Futures",
+      "symbol": "BTC-USDT",
+      "timeframe": "1h",
+      "start_date": "2024-01-01",
+      "finish_date": "2024-12-31"
+    }]
   },
   "work_item": {
     "id": "BTC-TREND-001",
@@ -235,131 +669,68 @@ Create `experiment.json`:
 }
 ```
 
-Then enqueue it:
+Enqueue:
 
 ```bash
-ats-lab enqueue --file experiment.json
+research/automation/ats_lab.sh enqueue --file experiment.json
 ```
 
-The authoritative contract is
-[`experiment-work-item.schema.json`](src/ats_lab/schemas/experiment-work-item.schema.json).
+## Installation
 
-## Record an evaluation
-
-```json
-{
-  "schema_version": 1,
-  "experiment_id": "BTC-TREND-001",
-  "verdict": "revise",
-  "summary": "Baseline passed, but recent-window evidence is missing.",
-  "metrics_summary": "trades=84 expectancy=2.1 max_drawdown=-11.4%",
-  "next_step": "Run the unchanged strategy on the recent validation window.",
-  "evaluator": "research-agent-1"
-}
-```
+Fresh checkout:
 
 ```bash
-ats-lab evaluate --file evaluation.json
+git clone https://github.com/l-j-g/algorithmic-trading-strategy-laboratory.git
+cd algorithmic-trading-strategy-laboratory
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e .
+ats-lab init
 ```
 
-Research verdicts are independent from execution completion:
+Requirements:
 
-- `reject`
-- `revise`
-- `hpo_candidate`
-- `paper_trade_candidate`
-- `inconclusive`
-- `infrastructure_failure`
-- `pass`
-
-## Work-item lifecycle
-
-```text
-scheduled -> ready -> running -> finished
-                         |-> waiting_retry -> ready
-                         |-> blocked
-```
-
-## Synthesize gated jobs
-
-Create significance-first job chains for new or changed entries:
-
-```bash
-ats-lab synthesize --file idea.json
-```
-
-Unchanged entry rules with exit/sizing/risk-only changes skip the significance
-test. Entry rules use stable fingerprints; `p_value < 0.05` unlocks baseline,
-`0.05–0.10` holds it, and `> 0.10` archives it. See
-[job synthesis](docs/synthesis.md).
-
-Examples:
-
-```bash
-ats-lab finish BTC-TREND-001
-ats-lab block BTC-TREND-001 --code missing_data --detail "Required route unavailable"
-ats-lab retry BTC-TREND-001 --after 2026-08-01T00:00:00Z
-```
-
-## Legacy migration
-
-The included adapter can import the original Markdown/YAML-block and JSON
-research ledger used during development:
-
-```bash
-ats-lab --repo /path/to/legacy-repository migrate-legacy
-ats-lab --repo /path/to/legacy-repository audit \
-  --markdown /tmp/migration-audit.md
-ats-lab --repo /path/to/legacy-repository inventory \
-  --markdown /tmp/legacy-inventory.md
-```
-
-Migration is idempotent. Legacy deletion must wait until the audit reports no
-unaccepted ambiguities. See [migration and cleanup](docs/migration-and-cleanup.md).
-
-## Agent and memory integration
-
-Recommended boundary:
-
-```text
-Agent: reasoning and orchestration
-Memory provider: durable preferences and conclusions
-Laboratory: operational state and research evidence
-Execution framework: strategy code and backtests
-```
-
-Do not store queue locks, session IDs or authoritative metrics only in agent
-memory. Agents restart; the laboratory database persists.
+- Python 3.11+
+- Agent `ats-lab` profile
+- running Jesse service and MCP
+- local `.ats-lab/config.toml`
 
 ## Testing
 
+From ATS Lab repository:
+
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src python3 -m unittest discover -s tests
+git diff --check
 ```
 
-## Public-release safety
+From Jesse repository:
 
-Before publishing a migrated laboratory:
+```bash
+research/automation/ats_lab.sh supervisor --plan
+research/automation/ats_lab.sh audit
+git diff --check
+```
 
-- exclude `.env`, credentials and exchange configuration;
-- exclude private or licensed strategy source;
-- exclude raw conversation/session dumps;
-- review dashboard URLs and local filesystem paths;
-- publish schemas and synthetic examples instead of private evidence;
-- run secret scanning over the exact subtree or release archive.
+## Reference documentation
 
-## Contributing
+- Architecture: `docs/architecture.md`
+- Operator dashboard: `docs/operator-dashboard.md`
+- Resource policy: `docs/resource-policy.md`
+- Synthesis: `docs/synthesis.md`
+- Agent launcher: `docs/executor-memory-launcher.md`
+- Jesse integration: `docs/workspace-integration.md`
+- Migration cleanup: `docs/migration-and-cleanup.md`
 
-Issues and small focused pull requests are welcome. Proposed execution adapters
-should preserve the core rule: framework-specific operations stay behind the
-adapter boundary, while specifications and evidence remain portable.
+## Safety
 
-## Disclaimer
-
-For research and software-engineering purposes only. Backtest results are not
-financial advice and do not guarantee future performance. Validate data,
-assumptions, fees, slippage and risk independently before any real-world use.
+- Research/backtesting only.
+- No live order placement.
+- No exchange credentials in ATS Lab.
+- Keep dashboard bound to `127.0.0.1`.
+- Preserve licensed/private strategy-source boundaries.
+- Backtests are not financial advice and do not guarantee future performance.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See `LICENSE`.

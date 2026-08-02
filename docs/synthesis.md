@@ -54,30 +54,36 @@ ideas must remain scheduled until those inputs exist.
 
 ## Continuous replenishment
 
-`ats-lab worker --continuous` asks its configured Agent profile for one typed
+`ats-lab supervisor --continuous` asks its configured Agent profile for one typed
 batch plan when unresolved chains reach the configured low watermark. Each cycle:
 
 1. Acquires one transactional planner lease; concurrent workers cannot duplicate
    a cohort.
 2. Inspects bounded improvement candidates and compact concept learnings.
+   Total inspection records never exceed 25; each candidate contributes at most
+   four canonical normalized evidence rows.
 3. Prioritizes latest `revise`, then `inconclusive`.
 4. Reserves at least five of 25 slots for new concepts and allows at most twenty
    controlled improvements, backfilling unused improvement slots with new ideas.
 5. Excludes every experiment that has ever reached `hpo_candidate` or
    `paper_trade_candidate`.
-6. Produces exactly 25 research chains. A significance/baseline pair is one
-   chain, not two.
-7. Keeps at most three work items `ready` or `running`; overflow remains
+6. Produces exactly 25 research chains. If Agent over-generates, laboratory
+   deterministically trims extras while preserving five-new/twenty-improvement
+   lane gates. Under-generation fails explicitly. A significance/baseline pair
+   is one chain, not two.
+7. Keeps at most configured batch capacity work items `ready` or `running`; overflow remains
    `scheduled` and is promoted as capacity opens.
 8. Starts planning the next cohort at five unresolved chains, using all
    evaluations available at that point.
 
 Each revision names its source experiment and one controlled change. Revision
 depth is capped at three. Entry fingerprint remains stable for exit/sizing/risk
-revisions, while a separate job fingerprint prevents child-ID collisions.
-Every finished research turn returns run evidence plus its evaluation, so SQLite
+revisions; laboratory replaces any model-supplied entry text with source's
+canonical entry rule for those scopes. Separate job fingerprint prevents
+child-ID collisions.
+Executor turn returns run evidence. Separate analyzer turn evaluates completed
+batch. Separate synthesis turn replenishes only at low watermark, so SQLite
 serves as both execution history and iterative learning repository. Significance
 passes release their baseline locally; inconclusive or failed gates archive the
-dependent baseline without another synthesis turn. Invalid synthesis output
-fails its cohort and respects the configured retry cooldown. Disable synthesis
-with `--no-idle-synthesis`.
+dependent baseline without another execution turn. Invalid synthesis output
+fails its cohort and respects configured retry cooldown.
