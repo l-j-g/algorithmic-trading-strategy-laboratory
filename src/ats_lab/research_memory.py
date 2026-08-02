@@ -311,7 +311,8 @@ def sync_memory_outbox(
 
 
 def _recall_queries(context: Mapping[str, Any]) -> list[str]:
-    strategy_terms: list[str] = []
+    strategy_names: list[str] = []
+    archetype_terms: list[str] = []
     regime_terms: list[str] = []
     refinement_terms: list[str] = []
     for collection in (
@@ -326,7 +327,8 @@ def _recall_queries(context: Mapping[str, Any]) -> list[str]:
             except json.JSONDecodeError:
                 specification = {}
             groups = (
-                (strategy_terms, (item.get("strategy"), item.get("archetype"))),
+                (strategy_names, (item.get("strategy"),)),
+                (archetype_terms, (item.get("archetype"),)),
                 (regime_terms, (item.get("target_regime"), item.get("failure_regime"))),
                 (refinement_terms, (
                     item.get("source_experiment_id"),
@@ -343,9 +345,12 @@ def _recall_queries(context: Mapping[str, Any]) -> list[str]:
                     refinement_terms.append(
                         " ".join(str(evidence["finding"]).split())[:160]
                     )
-    queries = []
+    queries = [
+        f"ATS strategy learnings {strategy}"
+        for strategy in dict.fromkeys(strategy_names)
+    ][:3]
     for prefix, terms in (
-        ("ATS strategy learning", strategy_terms),
+        ("ATS strategy archetype evidence", archetype_terms),
         ("ATS regime evidence", regime_terms),
         ("ATS refinement evidence", refinement_terms),
     ):
