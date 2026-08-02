@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Protocol, TYPE_CHECKING
 
-from .models import Evaluation, utc_now
+from .models import Evaluation, Verdict, utc_now
 
 if TYPE_CHECKING:
     from .database import WorkflowDatabase
@@ -247,6 +247,101 @@ def memory_status(database: WorkflowDatabase) -> dict[str, int]:
     )
     counts = {row["state"]: int(row["count"]) for row in rows}
     return {state: counts.get(state, 0) for state in ("pending", "retry", "delivered")}
+
+
+def backfill_memory_outbox(
+    database: WorkflowDatabase,
+    *,
+    apply: bool = False,
+    batch_size: int = 100,
+) -> dict[str, Any]:
+    """Queue bounded historical learnings from canonical completed evidence."""
+    batch_size = max(1, min(int(batch_size), 1000))
+    result: dict[str, Any] = {
+        "apply": apply,
+        "batch_size": batch_size,
+        "scanned": 0,
+        "eligible": 0,
+        "would_enqueue": 0,
+        "queued": 0,
+        "duplicates": 0,
+        "excluded": 0,
+        "payload_bytes": 0,
+        "exclusion_reasons": {},
+    }
+
+    def exclude(reason: str) -> None:
+        result["excluded"] += 1
+        reasons = result["exclusion_reasons"]
+        reasons[reason] = reasons.get(reason, 0) + 1
+
+    with database.connect() as connection:
+        evaluations = connection.execute(
+            """SELECT e.experiment_id,e.verdict,e.summary,e.metrics_summary,
+                      e.next_step,e.evaluator,e.evaluated_at,
+                      EXISTS(SELECT 1 FROM normalized_evidence n
+                             WHERE n.experiment_id=e.experiment_id) AS has_evidence,
+                      EXISTS(SELECT 1 FROM runs r
+                             WHERE r.experiment_id=e.experiment_id
+                               AND r.status='finished') AS has_finished_run
+               FROM evaluations e
+               ORDER BY e.evaluated_at,e.id"""
+        ).fetchall()
+        for row in evaluations:
+            result["scanned"] += 1
+            if row["verdict"] == Verdict.INFRASTRUCTURE_FAILURE.value:
+                exclude("infrastructure_failure")
+                continue
+            if not row["has_finished_run"]:
+                exclude("no_finished_run")
+                continue
+            if not row["has_evidence"]:
+                exclude("no_normalized_evidence")
+                continue
+            evaluation = Evaluation(
+                experiment_id=row["experiment_id"],
+                verdict=Verdict(row["verdict"]),
+                summary=row["summary"],
+                metrics_summary=row["metrics_summary"],
+                next_step=row["next_step"],
+                evaluator=row["evaluator"],
+                evaluated_at=row["evaluated_at"],
+            )
+            try:
+                payload = build_learning_record(connection, evaluation)
+            except (ValueError, json.JSONDecodeError) as error:
+                detail = str(error)
+                if "unsafe" in detail:
+                    exclude("unsafe_learning_text")
+                elif "non-finite" in detail or "metric" in detail:
+                    exclude("invalid_metrics")
+                elif "byte limit" in detail:
+                    exclude("payload_too_large")
+                else:
+                    exclude("invalid_canonical_evidence")
+                continue
+            fingerprint = payload["learning_id"]
+            if connection.execute(
+                "SELECT 1 FROM research_memory_outbox WHERE learning_fingerprint=?",
+                (fingerprint,),
+            ).fetchone():
+                result["duplicates"] += 1
+                continue
+            result["eligible"] += 1
+            if result["would_enqueue"] >= batch_size:
+                continue
+            serialized = _stable_json(payload)
+            result["would_enqueue"] += 1
+            result["payload_bytes"] += len(serialized.encode())
+            if apply:
+                inserted = connection.execute(
+                    """INSERT OR IGNORE INTO research_memory_outbox(
+                           learning_fingerprint,payload_json,state,created_at
+                       ) VALUES (?,?,'pending',?)""",
+                    (fingerprint, serialized, utc_now()),
+                )
+                result["queued"] += inserted.rowcount
+    return result
 
 
 def _error_code(error: Exception) -> str:

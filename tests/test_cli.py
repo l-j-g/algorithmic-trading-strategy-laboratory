@@ -129,6 +129,21 @@ class CliEvidenceTests(unittest.TestCase):
         self.assertEqual(payload[0]["experiment_id"], "EXP-1")
         self.assertEqual(len(evidence), 2)
 
+    def test_memory_backfill_command_defaults_to_non_mutating_preview(self) -> None:
+        with WorkflowDatabase(self.path).connect() as connection:
+            connection.execute("DELETE FROM research_memory_outbox")
+
+        payload = json.loads(self.invoke(
+            "memory-backfill", "--dry-run", "--batch-size", "10",
+        ))
+
+        self.assertFalse(payload["apply"])
+        self.assertEqual(payload["would_enqueue"], 1)
+        self.assertEqual(payload["queued"], 0)
+        self.assertEqual(WorkflowDatabase(self.path).rows(
+            "SELECT COUNT(*) n FROM research_memory_outbox"
+        )[0]["n"], 0)
+
     def test_normalized_json_requires_explicit_format(self) -> None:
         payload = json.loads(self.invoke("evidence", "--format", "json"))
 

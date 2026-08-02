@@ -20,6 +20,7 @@ from ats_lab.models import (
 )
 from ats_lab.research_memory import (
     MemoryResearchAdapter,
+    backfill_memory_outbox,
     compact_advisory_memory,
     memory_status,
     sync_memory_outbox,
@@ -197,6 +198,51 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertEqual(self.database.rows(
             "SELECT attempts FROM work_items WHERE id='EXP-2'"
         )[0]["attempts"], 0)
+
+    def test_historical_memory_backfill_is_dry_run_bounded_and_idempotent(self) -> None:
+        self.database.finalize_batch_evaluation(self._awaiting_evaluation())
+        self.database.finalize_batch_evaluation(self._awaiting_evaluation(
+            experiment_id="EXP-2",
+        ))
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM research_memory_outbox")
+
+        preview = backfill_memory_outbox(
+            self.database, apply=False, batch_size=1,
+        )
+        self.assertEqual(preview["eligible"], 2)
+        self.assertEqual(preview["would_enqueue"], 1)
+        self.assertEqual(preview["queued"], 0)
+        self.assertGreater(preview["payload_bytes"], 0)
+        self.assertEqual(self.database.rows(
+            "SELECT COUNT(*) n FROM research_memory_outbox"
+        )[0]["n"], 0)
+
+        first = backfill_memory_outbox(self.database, apply=True, batch_size=1)
+        second = backfill_memory_outbox(self.database, apply=True, batch_size=1)
+        third = backfill_memory_outbox(self.database, apply=True, batch_size=1)
+        self.assertEqual(first["queued"], 1)
+        self.assertEqual(second["queued"], 1)
+        self.assertEqual(second["duplicates"], 1)
+        self.assertEqual(third["queued"], 0)
+        self.assertEqual(third["duplicates"], 2)
+        self.assertEqual(self.database.rows(
+            "SELECT COUNT(*) n FROM research_memory_outbox"
+        )[0]["n"], 2)
+
+    def test_historical_memory_backfill_excludes_noncanonical_findings(self) -> None:
+        self.database.upsert_experiment(ExperimentSpec(
+            id="NO-RUN", strategy_name="PublicStrategy",
+        ))
+        self.database.add_evaluation(Evaluation(
+            experiment_id="NO-RUN", verdict=Verdict.INFRASTRUCTURE_FAILURE,
+            summary="Transport unavailable.", evaluator="test",
+        ))
+
+        result = backfill_memory_outbox(self.database, apply=False)
+
+        self.assertEqual(result["would_enqueue"], 0)
+        self.assertEqual(result["exclusion_reasons"], {"infrastructure_failure": 1})
 
     def test_advisory_recall_is_bounded_deduplicated_and_untrusted(self) -> None:
         recalled = [

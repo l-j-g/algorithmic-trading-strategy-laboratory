@@ -47,6 +47,7 @@ from .resources import load_resource_policy
 from .research_memory import (
     MemoryProviderConfig,
     MemoryResearchAdapter,
+    backfill_memory_outbox,
     memory_status,
     sync_memory_outbox,
 )
@@ -142,6 +143,14 @@ def main() -> int:
     memory_mode.add_argument("--dry-run", action="store_true")
     memory_mode.add_argument("--apply", action="store_true")
     memory_sync.add_argument("--limit", type=int, default=25)
+    memory_backfill = sub.add_parser(
+        "memory-backfill",
+        help="Queue bounded historical learnings from canonical completed evidence.",
+    )
+    memory_backfill_mode = memory_backfill.add_mutually_exclusive_group()
+    memory_backfill_mode.add_argument("--dry-run", action="store_true")
+    memory_backfill_mode.add_argument("--apply", action="store_true")
+    memory_backfill.add_argument("--batch-size", type=int, default=100)
     sub.add_parser(
         "preflight",
         help="Check Docker, Jesse dashboard/MCP, and Memory before execution.",
@@ -401,6 +410,13 @@ def main() -> int:
         ))
         emit(sync_memory_outbox(
             database, adapter, apply=args.apply, limit=args.limit,
+        ))
+    elif args.command == "memory-backfill":
+        if args.batch_size < 1 or args.batch_size > 1000:
+            parser.error("memory-backfill --batch-size must be between 1 and 1000")
+        database.initialize()
+        emit(backfill_memory_outbox(
+            database, apply=args.apply, batch_size=args.batch_size,
         ))
     elif args.command == "migrate-legacy":
         emit(LegacyImporter(repo, database).import_all())
