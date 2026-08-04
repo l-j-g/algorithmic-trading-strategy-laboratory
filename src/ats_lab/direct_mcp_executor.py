@@ -575,9 +575,7 @@ class DirectMcpDispatcher:
                 if created_now:
                     session = self._start_and_verify(client, session_id, plan)
                 else:
-                    session = self._session(client.call_tool(
-                        plan.get_tool, {"session_id": session_id},
-                    ))
+                    session = self._fetch_session(client, plan, session_id)
                     if self._status(session) == "draft":
                         session = self._start_and_verify(client, session_id, plan)
             else:
@@ -587,9 +585,7 @@ class DirectMcpDispatcher:
                     return self._finished(
                         client, request, session_id, metrics, polls, plan,
                     )
-                session = self._session(client.call_tool(
-                    plan.get_tool, {"session_id": session_id},
-                ))
+                session = self._fetch_session(client, plan, session_id)
                 if self._status(session) == "draft":
                     if checkpoint["state"] == "start_recovery_failed":
                         return self._record_and_return(
@@ -613,9 +609,7 @@ class DirectMcpDispatcher:
                 if polls > 1 or classification.state not in {
                     "terminal_success", "terminal_failure",
                 }:
-                    session = self._session(client.call_tool(
-                        plan.get_tool, {"session_id": session_id},
-                    ))
+                    session = self._fetch_session(client, plan, session_id)
                     classification = self._observe_session(
                         work_item_id, experiment_id, session_id, fingerprint,
                         session,
@@ -742,9 +736,7 @@ class DirectMcpDispatcher:
         run = client.call_tool(plan.run_tool, {"session_id": session_id})
         if not isinstance(run, dict) or run.get("status") != "started":
             raise McpError(f"{plan.run_tool} failed for {session_id}: {run}")
-        session = self._session(client.call_tool(
-            plan.get_tool, {"session_id": session_id},
-        ))
+        session = self._fetch_session(client, plan, session_id)
         if self._has_started(session):
             return session
         if not plan.dashboard_supported:
@@ -758,9 +750,7 @@ class DirectMcpDispatcher:
                 "credentials are unavailable"
             )
         self.dashboard_client.run_backtest(session_id)
-        session = self._session(client.call_tool(
-            plan.get_tool, {"session_id": session_id},
-        ))
+        session = self._fetch_session(client, plan, session_id)
         if not self._has_started(session):
             raise McpError(
                 f"session {session_id} remained draft after dashboard start fallback"
@@ -1216,6 +1206,50 @@ class DirectMcpDispatcher:
         if isinstance(response.get("session"), dict):
             return response["session"]
         return response
+
+    @classmethod
+    def _fetch_session(
+        cls, client: McpClient, plan: ExecutionPlan, session_id: str,
+    ) -> dict[str, Any]:
+        """Fetch a session and normalize operation-specific shapes."""
+        session = cls._session(client.call_tool(
+            plan.get_tool, {"session_id": session_id},
+        ))
+        if plan.operation == "significance":
+            return cls._normalize_significance_session(session)
+        return session
+
+    @staticmethod
+    def _normalize_significance_session(session: dict[str, Any]) -> dict[str, Any]:
+        """Map a significance-test session to the classifier's backtest shape.
+
+        Jesse significance sessions expose terminal metrics at the top-level
+        ``results`` key (observed_mean, annualized_return, p_value,
+        n_simulations, n_observations) and store ``state`` as a config form with
+        no ``results.executing`` flag and no ``metrics`` key. The shared
+        classifier expects backtest shape (``state.results.executing`` for
+        liveness, ``metrics`` for terminal output), so normalize before
+        classification. Status transitions running -> finished are authoritative
+        for liveness; progress is published over Redis and is not part of the
+        session object, so it is left unset (None).
+        """
+        status = str(session.get("status") or "unknown").lower()
+        raw_results = session.get("results")
+        metrics = raw_results if isinstance(raw_results, dict) else None
+        executing = (
+            status in {"running", "pending", "queued", "starting", "started"}
+        )
+        normalized: dict[str, Any] = {
+            "id": session.get("id") or session.get("session_id"),
+            "status": status,
+            "state": {"results": {"executing": executing}},
+            "metrics": metrics,
+            "updated_at": session.get("updated_at") or session.get("updatedAt"),
+        }
+        for key in ("exception", "error", "traceback"):
+            if session.get(key):
+                normalized[key] = session[key]
+        return normalized
 
     @staticmethod
     def _operation(request: dict[str, Any]) -> str | None:

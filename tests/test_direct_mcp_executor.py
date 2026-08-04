@@ -100,11 +100,19 @@ class FakeMcpHandler(BaseHTTPRequestHandler):
                 self.server.poll_count += 1  # type: ignore[attr-defined]
                 statuses = self.server.statuses  # type: ignore[attr-defined]
                 status = statuses[min(poll, len(statuses) - 1)]
+                # Real Jesse significance sessions expose terminal metrics at
+                # the top-level "results" key and store "state" as a config form
+                # (no results.executing flag, no metrics key).
                 session = {
                     "id": arguments["session_id"],
                     "status": status,
-                    "state": {"results": {"executing": status == "running"}},
-                    "metrics": self.server.significance_metrics if status == "finished" else {},  # type: ignore[attr-defined]
+                    "has_results": status == "finished",
+                    "results": (
+                        self.server.significance_metrics  # type: ignore[attr-defined]
+                        if status == "finished" else None
+                    ),
+                    "state": {"form": {"n_simulations": 5000, "random_seed": 42}},
+                    "created_at": 0, "updated_at": 0,
                 }
                 if status == "stopped":
                     session["exception"] = "significance failure"
