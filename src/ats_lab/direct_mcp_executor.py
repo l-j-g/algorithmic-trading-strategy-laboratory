@@ -26,6 +26,15 @@ SOURCE_CHANGE_SCOPES = {
     "new_entry", "entry_changed", "exit_only", "sizing_only", "risk_only",
     "refactor",
 }
+OPERATION_BY_EXPERIMENT_TYPE = {
+    "baseline": "backtest", "multi_window": "backtest",
+    "cost_sensitivity": "backtest", "out_of_sample": "backtest",
+    "harness_check": "backtest",
+}
+SIGNIFICANCE_METRIC_FIELDS = (
+    "observed_mean", "annualized_return", "p_value",
+    "n_simulations", "n_observations",
+)
 
 
 class McpError(RuntimeError):
@@ -60,6 +69,39 @@ class DirectExecutionConfig:
             raise ValueError(
                 "jesse_executor.zombie_unchanged_observations must be at least 2"
             )
+
+
+@dataclass(frozen=True)
+class ExecutionPlan:
+    """Jesse MCP tool surface and display routing for one operation kind."""
+
+    operation: str
+    create_tool: str
+    run_tool: str
+    get_tool: str
+    dashboard_supported: bool
+    dashboard_path: str | None = None
+
+    @classmethod
+    def for_request(cls, request: dict[str, Any]) -> "ExecutionPlan":
+        operation = DirectMcpDispatcher._operation(request)
+        if operation == "significance":
+            return cls(
+                operation="significance",
+                create_tool="create_significance_test_draft",
+                run_tool="run_significance_test",
+                get_tool="get_significance_test_session",
+                dashboard_supported=False,
+                dashboard_path="significance-test",
+            )
+        return cls(
+            operation="backtest",
+            create_tool="create_backtest_draft",
+            run_tool="run_backtest",
+            get_tool="get_backtest_session",
+            dashboard_supported=True,
+            dashboard_path="backtest",
+        )
 
 
 @dataclass(frozen=True)
@@ -498,6 +540,7 @@ class DirectMcpDispatcher:
     def _execute_one(self, request: dict[str, Any]) -> dict[str, Any]:
         work_item_id = str(request.get("work_item_id") or "")
         experiment_id = str(request.get("experiment_id") or "")
+        plan = ExecutionPlan.for_request(request)
         client = self.client_factory(self.config.mcp_url, self.config.timeout_seconds)
         polls = 0
         outcome = "retry"
@@ -517,7 +560,7 @@ class DirectMcpDispatcher:
                 )
             if checkpoint is None:
                 session_id, replacement, created_now = self._create_or_resume_session(
-                    client, request,
+                    client, request, plan,
                 )
                 self._save_checkpoint(
                     work_item_id, experiment_id, session_id, fingerprint, "draft",
@@ -530,20 +573,22 @@ class DirectMcpDispatcher:
                             (work_item_id,),
                         )
                 if created_now:
-                    session = self._start_and_verify(client, session_id)
+                    session = self._start_and_verify(client, session_id, plan)
                 else:
                     session = self._session(client.call_tool(
-                        "get_backtest_session", {"session_id": session_id},
+                        plan.get_tool, {"session_id": session_id},
                     ))
                     if self._status(session) == "draft":
-                        session = self._start_and_verify(client, session_id)
+                        session = self._start_and_verify(client, session_id, plan)
             else:
                 session_id = checkpoint["session_id"]
                 if checkpoint["state"] in {"finished", "terminal_success"}:
                     metrics = json.loads(checkpoint["metrics_json"] or "{}")
-                    return self._finished(client, request, session_id, metrics, polls)
+                    return self._finished(
+                        client, request, session_id, metrics, polls, plan,
+                    )
                 session = self._session(client.call_tool(
-                    "get_backtest_session", {"session_id": session_id},
+                    plan.get_tool, {"session_id": session_id},
                 ))
                 if self._status(session) == "draft":
                     if checkpoint["state"] == "start_recovery_failed":
@@ -559,7 +604,7 @@ class DirectMcpDispatcher:
                         work_item_id, experiment_id, session_id, fingerprint,
                         "draft",
                     )
-                    session = self._start_and_verify(client, session_id)
+                    session = self._start_and_verify(client, session_id, plan)
             classification = self._observe_session(
                 work_item_id, experiment_id, session_id, fingerprint, session,
             )
@@ -569,7 +614,7 @@ class DirectMcpDispatcher:
                     "terminal_success", "terminal_failure",
                 }:
                     session = self._session(client.call_tool(
-                        "get_backtest_session", {"session_id": session_id},
+                        plan.get_tool, {"session_id": session_id},
                     ))
                     classification = self._observe_session(
                         work_item_id, experiment_id, session_id, fingerprint,
@@ -584,12 +629,25 @@ class DirectMcpDispatcher:
                             detail="terminal Jesse session metrics must be object",
                             attempt_charged=False,
                         )
+                    if (
+                        plan.operation == "significance"
+                        and not self._significance_metrics_complete(metrics)
+                    ):
+                        return self._record_and_return(
+                            client, work_item_id, polls, "retry",
+                            blocker_code="invalid_jesse_metrics",
+                            detail=(
+                                "significance terminal metrics must include "
+                                + ", ".join(SIGNIFICANCE_METRIC_FIELDS)
+                            ),
+                            attempt_charged=False,
+                        )
                     self._save_checkpoint(
                         work_item_id, experiment_id, session_id, fingerprint,
                         "terminal_success", metrics=metrics,
                     )
                     return self._finished(
-                        client, request, session_id, metrics, polls,
+                        client, request, session_id, metrics, polls, plan,
                     )
                 if classification.state == "terminal_failure":
                     detail = classification.error or (
@@ -631,7 +689,7 @@ class DirectMcpDispatcher:
                 checkpoint = self._checkpoint(work_item_id) or {}
                 if not checkpoint.get("recovery_attempted"):
                     self._mark_recovery_attempted(work_item_id)
-                    client.call_tool("run_backtest", {"session_id": session_id})
+                    client.call_tool(plan.run_tool, {"session_id": session_id})
                     return self._record_and_return(
                         client, work_item_id, polls, "retry",
                         blocker_code="jesse_zombie_recovery_pending",
@@ -679,16 +737,21 @@ class DirectMcpDispatcher:
             )
 
     def _start_and_verify(
-        self, client: McpClient, session_id: str,
+        self, client: McpClient, session_id: str, plan: ExecutionPlan,
     ) -> dict[str, Any]:
-        run = client.call_tool("run_backtest", {"session_id": session_id})
+        run = client.call_tool(plan.run_tool, {"session_id": session_id})
         if not isinstance(run, dict) or run.get("status") != "started":
-            raise McpError(f"run_backtest failed for {session_id}: {run}")
+            raise McpError(f"{plan.run_tool} failed for {session_id}: {run}")
         session = self._session(client.call_tool(
-            "get_backtest_session", {"session_id": session_id},
+            plan.get_tool, {"session_id": session_id},
         ))
         if self._has_started(session):
             return session
+        if not plan.dashboard_supported:
+            raise McpError(
+                f"session {session_id} remained draft after MCP start and "
+                "dashboard start fallback is not supported for this operation kind"
+            )
         if self.dashboard_client is None:
             raise McpError(
                 f"session {session_id} remained draft after MCP start and dashboard "
@@ -696,7 +759,7 @@ class DirectMcpDispatcher:
             )
         self.dashboard_client.run_backtest(session_id)
         session = self._session(client.call_tool(
-            "get_backtest_session", {"session_id": session_id},
+            plan.get_tool, {"session_id": session_id},
         ))
         if not self._has_started(session):
             raise McpError(
@@ -715,7 +778,11 @@ class DirectMcpDispatcher:
         state = session.get("state") if isinstance(session.get("state"), dict) else {}
         return str(session.get("status") or state.get("status") or "unknown")
 
-    def _create(self, client: McpClient, request: dict[str, Any]) -> str:
+    def _create(
+        self, client: McpClient, request: dict[str, Any], plan: ExecutionPlan,
+    ) -> str:
+        if plan.operation == "significance":
+            return self._create_significance(client, request)
         experiment = request["experiment"]
         routes = experiment.get("routes")
         if not isinstance(routes, list) or not routes:
@@ -755,8 +822,61 @@ class DirectMcpDispatcher:
             raise McpError("create_backtest_draft returned no session id")
         return str(session_id)
 
+    def _create_significance(self, client: McpClient, request: dict[str, Any]) -> str:
+        experiment = request["experiment"]
+        routes = experiment.get("routes")
+        if not isinstance(routes, list) or not routes:
+            raise ValueError("direct significance test requires experiment.routes")
+        windows = {
+            (route.get("start_date"), route.get("finish_date"))
+            for route in routes if isinstance(route, dict)
+        }
+        exchanges = {
+            route.get("exchange") for route in routes if isinstance(route, dict)
+        }
+        if len(windows) != 1 or len(exchanges) != 1:
+            raise ValueError(
+                "direct significance test requires one shared exchange/date window"
+            )
+        start_date, finish_date = next(iter(windows))
+        strategy = experiment.get("strategy_name")
+        mcp_routes = [{
+            "exchange": route["exchange"], "strategy": strategy,
+            "symbol": route["symbol"], "timeframe": route["timeframe"],
+        } for route in routes]
+        parameters = request.get("work_item", {}).get("parameters") or {}
+        n_simulations = parameters.get("n_simulations")
+        if n_simulations is None:
+            raise ValueError(
+                "significance work item requires parameters.n_simulations"
+            )
+        payload: dict[str, Any] = {
+            "exchange": next(iter(exchanges)),
+            "routes": json.dumps(mcp_routes, separators=(",", ":")),
+            "data_routes": "[]",
+            "start_date": start_date, "finish_date": finish_date,
+            "n_simulations": n_simulations,
+            "debug_mode": False, "export_csv": False, "export_json": False,
+            "export_chart": True, "export_tradingview": False,
+            "fast_mode": False, "benchmark": True,
+            "title": f"ATS Lab significance {request['work_item_id']}",
+            "description": "ATS Lab deterministic significance-test execution.",
+        }
+        if parameters.get("random_seed") is not None:
+            payload["random_seed"] = parameters["random_seed"]
+        draft = client.call_tool("create_significance_test_draft", payload)
+        if not isinstance(draft, dict):
+            raise McpError(f"create_significance_test_draft returned {draft!r}")
+        session_id = (
+            draft.get("significance_test_id") or draft.get("backtest_id")
+            or draft.get("session_id") or draft.get("id")
+        )
+        if not session_id:
+            raise McpError("create_significance_test_draft returned no session id")
+        return str(session_id)
+
     def _create_or_resume_session(
-        self, client: McpClient, request: dict[str, Any],
+        self, client: McpClient, request: dict[str, Any], plan: ExecutionPlan,
     ) -> tuple[str, bool, bool]:
         work_item_id = str(request["work_item_id"])
         rows = self.database.rows(
@@ -766,7 +886,7 @@ class DirectMcpDispatcher:
             (work_item_id,),
         )
         if not rows:
-            return self._create(client, request), False, True
+            return self._create(client, request, plan), False, True
         recovery = rows[0]
         if recovery["replacement_session_id"]:
             return str(recovery["replacement_session_id"]), True, False
@@ -787,7 +907,7 @@ class DirectMcpDispatcher:
             )
             if reserved.rowcount != 1:
                 raise McpError("replacement session reservation changed")
-        session_id = self._create(client, request)
+        session_id = self._create(client, request, plan)
         with self.database.connect() as connection:
             saved = connection.execute(
                 """UPDATE direct_execution_recoveries
@@ -859,6 +979,7 @@ class DirectMcpDispatcher:
         session_id: str,
         metrics: dict[str, Any],
         polls: int,
+        plan: ExecutionPlan,
     ) -> dict[str, Any]:
         work_item_id = str(request["work_item_id"])
         raw = {
@@ -870,14 +991,22 @@ class DirectMcpDispatcher:
             "evidence": {"run": {
                 "id": f"{work_item_id}:{session_id}",
                 "session_id": session_id, "status": "finished",
-                "dashboard_url": (
-                    f"{self.config.dashboard_display_base_url.rstrip('/')}/{session_id}"
-                ),
+                "dashboard_url": self._dashboard_url(plan, session_id),
                 "metrics": metrics, "raw_result": raw,
             }},
         }
         self._telemetry(client, work_item_id, "finished", polls, result)
         return result
+
+    def _dashboard_url(self, plan: ExecutionPlan, session_id: str) -> str:
+        base = self.config.dashboard_display_base_url.rstrip("/")
+        if (
+            plan.dashboard_path
+            and plan.dashboard_path != "backtest"
+            and base.endswith("/backtest")
+        ):
+            base = base[: -len("/backtest")] + f"/{plan.dashboard_path}"
+        return f"{base}/{session_id}"
 
     def _record_and_return(
         self,
@@ -1089,15 +1218,18 @@ class DirectMcpDispatcher:
         return response
 
     @staticmethod
-    def _mechanical_backtest(request: dict[str, Any]) -> bool:
+    def _operation(request: dict[str, Any]) -> str | None:
         operation = request.get("work_item", {}).get("operation")
         if operation is None:
-            operation = {
-                "baseline": "backtest", "multi_window": "backtest",
-                "cost_sensitivity": "backtest", "out_of_sample": "backtest",
-                "harness_check": "backtest",
-            }.get(request.get("experiment", {}).get("experiment_type"))
-        if operation != "backtest":
+            operation = OPERATION_BY_EXPERIMENT_TYPE.get(
+                request.get("experiment", {}).get("experiment_type")
+            )
+        return operation
+
+    @staticmethod
+    def _mechanical_backtest(request: dict[str, Any]) -> bool:
+        operation = DirectMcpDispatcher._operation(request)
+        if operation not in {"backtest", "significance"}:
             return False
         if request.get("execution_context", {}).get("optimizer_parameters"):
             return False
@@ -1115,6 +1247,13 @@ class DirectMcpDispatcher:
             route.get("exchange") for route in routes if isinstance(route, dict)
         }
         return len(windows) == 1 and len(exchanges) == 1
+
+    @staticmethod
+    def _significance_metrics_complete(metrics: dict[str, Any]) -> bool:
+        return all(
+            field in metrics and metrics[field] is not None
+            for field in SIGNIFICANCE_METRIC_FIELDS
+        )
 
     @staticmethod
     def _requires_preparation(request: dict[str, Any]) -> bool:
@@ -1151,13 +1290,16 @@ class DirectMcpDispatcher:
 
     @staticmethod
     def _fingerprint(request: dict[str, Any]) -> str:
+        work_item = request.get("work_item", {})
         material = {
             "experiment_id": request.get("experiment_id"),
             "strategy_name": request.get("experiment", {}).get("strategy_name"),
             "routes": request.get("experiment", {}).get("routes"),
-            "operation": request.get("work_item", {}).get("operation"),
+            "operation": work_item.get("operation"),
             "execution_context": request.get("execution_context"),
         }
+        if work_item.get("operation") == "significance":
+            material["significance_parameters"] = work_item.get("parameters")
         return hashlib.sha256(json.dumps(
             material, separators=(",", ":"), sort_keys=True,
         ).encode()).hexdigest()

@@ -38,6 +38,14 @@ ROUTES = [
     },
 ]
 
+SIGNIFICANCE_METRICS = {
+    "observed_mean": 0.001234567890123,
+    "annualized_return": 12.345678901234,
+    "p_value": 0.031234567890123,
+    "n_simulations": 5000,
+    "n_observations": 1200,
+}
+
 
 class FakeMcpHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -68,9 +76,11 @@ class FakeMcpHandler(BaseHTTPRequestHandler):
             self.server.tool_calls.append((name, arguments))  # type: ignore[attr-defined]
             if name == "create_backtest_draft":
                 result = {"backtest_id": "jesse-session-1"}
-            elif name == "run_backtest":
+            elif name == "create_significance_test_draft":
+                result = {"significance_test_id": "sig-session-1"}
+            elif name in {"run_backtest", "run_significance_test"}:
                 self.server.run_calls += 1  # type: ignore[attr-defined]
-                result = {"status": "started", "backtest_id": arguments["session_id"]}
+                result = {"status": "started", "session_id": arguments["session_id"]}
             elif name == "get_backtest_session":
                 poll = self.server.poll_count  # type: ignore[attr-defined]
                 self.server.poll_count += 1  # type: ignore[attr-defined]
@@ -84,6 +94,20 @@ class FakeMcpHandler(BaseHTTPRequestHandler):
                 }
                 if status == "stopped":
                     session["exception"] = "mechanical failure"
+                result = {"data": {"session": session}, "error": None}
+            elif name == "get_significance_test_session":
+                poll = self.server.poll_count  # type: ignore[attr-defined]
+                self.server.poll_count += 1  # type: ignore[attr-defined]
+                statuses = self.server.statuses  # type: ignore[attr-defined]
+                status = statuses[min(poll, len(statuses) - 1)]
+                session = {
+                    "id": arguments["session_id"],
+                    "status": status,
+                    "state": {"results": {"executing": status == "running"}},
+                    "metrics": self.server.significance_metrics if status == "finished" else {},  # type: ignore[attr-defined]
+                }
+                if status == "stopped":
+                    session["exception"] = "significance failure"
                 result = {"data": {"session": session}, "error": None}
             else:
                 result = {"status": "error", "message": f"unexpected tool {name}"}
@@ -118,6 +142,7 @@ class FakeMcpServer:
                 {"session_id": "route-b", "route": ROUTES[1], "net_profit_percentage": 7.0},
             ],
         }
+        self.http.significance_metrics = dict(SIGNIFICANCE_METRICS)
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
 
     def __enter__(self) -> FakeMcpServer:
@@ -174,6 +199,32 @@ def batch_request(*, change_scope: str = "") -> dict:
                 "sizing_model": "risk quantity capped at 95% available_margin",
             },
             "work_item": {"operation": "backtest"},
+        }],
+    }
+
+
+def significance_request(
+    *, n_simulations: int = 5000, random_seed: int | None = 42,
+) -> dict:
+    return {
+        "schema_version": 1,
+        "task_type": "execute_batch",
+        "batch_id": "BATCH-SIG",
+        "requests": [{
+            "work_item_id": "JOB-SIG",
+            "experiment_id": "EXP-SIG",
+            "experiment": {
+                "strategy_name": "ExistingStrategy",
+                "routes": [ROUTES[0]],
+                "sizing_model": "risk quantity capped at 95% available_margin",
+            },
+            "work_item": {
+                "operation": "significance",
+                "parameters": {
+                    "n_simulations": n_simulations,
+                    "random_seed": random_seed,
+                },
+            },
         }],
     }
 
@@ -235,15 +286,19 @@ class DirectMcpExecutorTests(unittest.TestCase):
         max_polls: int = 4,
         fallback: RecordingFallback | None = None,
         dashboard: FakeDashboard | None = None,
+        work_id: str = "JOB-1",
+        experiment_id: str = "EXP-1",
+        specification: dict | None = None,
     ) -> tuple[DirectMcpDispatcher, WorkflowDatabase]:
         database = WorkflowDatabase(Path(root) / "lab.sqlite3")
         database.initialize()
         database.upsert_experiment(ExperimentSpec(
-            id="EXP-1", strategy_name="ExistingStrategy",
+            id=experiment_id, strategy_name="ExistingStrategy",
         ))
         database.upsert_work_item(WorkItem(
-            id="JOB-1", experiment_id="EXP-1", priority=1,
-            state=WorkState.RUNNING, specification={"operation": "backtest"},
+            id=work_id, experiment_id=experiment_id, priority=1,
+            state=WorkState.RUNNING,
+            specification=specification or {"operation": "backtest"},
         ))
         dispatcher = DirectMcpDispatcher(
             database,
@@ -291,6 +346,60 @@ class DirectMcpExecutorTests(unittest.TestCase):
             self.assertEqual(telemetry["model_call_count"], 0)
             self.assertGreater(telemetry["request_bytes"], 0)
             self.assertGreater(telemetry["mcp_call_count"], 0)
+
+    def test_significance_dispatch_direct_zero_model_and_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, database = self.make_dispatcher(
+                tmp, server, work_id="JOB-SIG", experiment_id="EXP-SIG",
+                specification={
+                    "operation": "significance",
+                    "parameters": {"n_simulations": 5000, "random_seed": 42},
+                },
+            )
+            result = dispatcher.dispatch(significance_request())
+            self.assertEqual(result.outcome, "finished")
+            run = result.payload["results"][0]["evidence"]["run"]
+            self.assertEqual(run["metrics"], server.http.significance_metrics)
+            self.assertEqual(run["status"], "finished")
+            self.assertEqual(
+                run["raw_result"],
+                {
+                    "session_id": "sig-session-1",
+                    "status": "finished",
+                    "metrics": server.http.significance_metrics,
+                },
+            )
+            tools = [name for name, _ in server.http.tool_calls]
+            self.assertIn("create_significance_test_draft", tools)
+            self.assertIn("run_significance_test", tools)
+            self.assertNotIn("run_backtest", tools)
+            self.assertEqual(server.http.run_calls, 1)
+            telemetry = database.rows(
+                "SELECT * FROM direct_execution_telemetry ORDER BY id DESC LIMIT 1"
+            )[0]
+            self.assertEqual(telemetry["model_call_count"], 0)
+
+    def test_significance_incomplete_metrics_retries_without_attempt_charge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["finished"]
+        ) as server:
+            server.http.significance_metrics = {
+                "observed_mean": 0.001,
+                "annualized_return": 12.3,
+            }
+            dispatcher, _ = self.make_dispatcher(
+                tmp, server, work_id="JOB-SIG", experiment_id="EXP-SIG",
+                specification={
+                    "operation": "significance",
+                    "parameters": {"n_simulations": 5000},
+                },
+            )
+            result = dispatcher.dispatch(significance_request())
+            item = result.payload["results"][0]
+            self.assertEqual(item["outcome"], "retry")
+            self.assertEqual(item["blocker_code"], "invalid_jesse_metrics")
 
     def test_mcp_started_but_draft_uses_dashboard_and_verifies_start(self) -> None:
         dashboard = FakeDashboard()
