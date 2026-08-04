@@ -26,6 +26,7 @@ class AgentLauncherConfig:
     timeout_seconds: float = 3600
     model: str | None = None
     provider: str | None = None
+    execution_model: str | None = None
     execution_toolsets: tuple[str, ...] = ("jesse",)
     analysis_toolsets: tuple[str, ...] = ("context_engine",)
     synthesis_toolsets: tuple[str, ...] = ("context_engine",)
@@ -75,6 +76,9 @@ def load_config(path: Path) -> AgentLauncherConfig:
         timeout_seconds=timeout,
         model=_optional_string(executor.get("model"), "executor.model"),
         provider=_optional_string(executor.get("provider"), "executor.provider"),
+        execution_model=_optional_string(
+            executor.get("execution_model"), "executor.execution_model",
+        ),
         execution_toolsets=toolsets("execution_toolsets", ("jesse",)),
         analysis_toolsets=toolsets("analysis_toolsets", ("context_engine",)),
         synthesis_toolsets=toolsets("synthesis_toolsets", ("context_engine",)),
@@ -163,6 +167,22 @@ def _toolsets_for_task(
     return config.analysis_toolsets
 
 
+def _model_for_task(
+    config: AgentLauncherConfig, task_type: str | None,
+) -> tuple[str | None, str | None]:
+    """Select (model, provider) per task type.
+
+    Execution and strategy preparation are base work: run them on the cheap
+    ``execution_model`` when configured (defaults to the global ``model``).
+    Analysis and synthesis are the advanced/expensive tasks: use the global
+    ``model`` (typically a ``strong`` alias) so expensive capacity is reserved
+    for exactly where the edge is judged.
+    """
+    if task_type in {"execute_batch", "prepare_strategies"} and config.execution_model:
+        return config.execution_model, config.provider
+    return config.model, config.provider
+
+
 def build_command(
     config: AgentLauncherConfig,
     prompt: str,
@@ -177,10 +197,11 @@ def build_command(
     if config.profile:
         command.extend(("-p", config.profile))
     command.extend(("--oneshot", prompt))
-    if config.model:
-        command.extend(("--model", config.model))
-    if config.provider:
-        command.extend(("--provider", config.provider))
+    model, provider = _model_for_task(config, task_type)
+    if model:
+        command.extend(("--model", model))
+    if provider:
+        command.extend(("--provider", provider))
     command.extend(("--toolsets", ",".join(
         _toolsets_for_task(config, task_type)
     )))
