@@ -1,8 +1,8 @@
 """Human-readable terminal monitor and operator console."""
 from __future__ import annotations
 
-import shutil
 import os
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -271,9 +271,8 @@ def _render_live_monitor(
     progress = str(snapshot.get("progress_state") or (
         "healthy" if snapshot.get("healthy") else "attention"
     )).upper()
-    health = _paint(progress, _state_style(progress), color)
-    phase = _paint(runtime.get("phase") or "idle", _state_style(runtime.get("phase")), color)
-    desired = _paint(control.get("desired_state") or "running", _state_style(control.get("desired_state")), color)
+    phase_value = str(runtime.get("phase") or "idle")
+    desired_value = str(control.get("desired_state") or "running")
     queue = " ".join(
         f"{name}={int(states.get(name, 0) or 0)}"
         for name in ("ready", "running", "waiting_retry", "blocked", "finished")
@@ -285,11 +284,18 @@ def _render_live_monitor(
         if timing else "idle"
     )
     width = width or shutil.get_terminal_size((120, 20)).columns
+    title = _fit_line(f"ATS LAB LIVE  {snapshot['checked_at']}", width)
+    status = _fit_line(
+        f"STATUS {progress}  control={desired_value}  stage={phase_value} "
+        f"heartbeat={_age(runtime.get('heartbeat_at'))}", width,
+    )
+    queue_line = _fit_line(f"QUEUE  {queue}", width)
+    stage_line = _fit_line(f"STAGE  {stage}", width)
     lines = [
-        _fit_line(f"{_paint('ATS LAB LIVE', 'bold', color)}  {snapshot['checked_at']}", width),
-        _fit_line(f"STATUS {health}  control={desired}  stage={phase}  heartbeat={_age(runtime.get('heartbeat_at'))}", width),
-        _fit_line(_paint(f"QUEUE  {queue}", "cyan", color), width),
-        _fit_line(f"STAGE  {stage}", width),
+        _paint(title, "bold", color),
+        _paint(status, _state_style(progress), color),
+        _paint(queue_line, "cyan", color),
+        stage_line,
     ]
     completions = snapshot.get("recent_completions", [])
     if completions:
