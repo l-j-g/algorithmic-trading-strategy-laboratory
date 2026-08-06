@@ -480,6 +480,22 @@ research/automation/ats_lab.sh configure-hpo-validation-routes \
 }
 ```
 
+For a newly scheduled HPO study with no inherited training route, include an
+explicit `hpo` entry in the same file.  HPO execution never reuses OOS or
+rolling routes; those splits release validation jobs only:
+
+```json
+{
+  "hpo": [{
+    "exchange": "Binance Perpetual Futures",
+    "symbol": "BTC-USDT",
+    "timeframe": "1h",
+    "start_date": "2024-01-01",
+    "finish_date": "2025-01-01"
+  }]
+}
+```
+
 Use genuinely unseen periods. Command validates routes, records operator event,
 clears only matching `requirements_pending`, then normal promotion resumes.
 

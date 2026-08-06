@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -113,6 +114,69 @@ class HpoPersistenceTests(unittest.TestCase):
         )[0]
         self.assertEqual(work["state"], "ready")
         self.assertEqual(work["blocker_code"], "requirements_pending")
+
+    def test_configured_routes_release_hpo_before_validation_jobs_exist(self) -> None:
+        study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
+        self.database.promote_scheduled_runnable(1)
+        self.database.mark_unroutable_hpo_requirements_pending()
+
+        result = self.database.configure_hpo_validation_routes(
+            study["id"],
+            {
+                "oos": [{
+                    "exchange": "Binance Perpetual Futures",
+                    "symbol": "BTC-USDT", "timeframe": "1h",
+                    "start_date": "2026-01-01", "finish_date": "2026-03-31",
+                }],
+                "rolling": [{
+                    "exchange": "Binance Perpetual Futures",
+                    "symbol": "BTC-USDT", "timeframe": "1h",
+                    "start_date": "2025-01-01", "finish_date": "2026-03-31",
+                }],
+            },
+        )
+
+        self.assertEqual(result["hpo_routes"], 0)
+        work = self.database.rows(
+            "SELECT state,blocker_code,specification_json FROM work_items WHERE id=?",
+            (study["hpo_work_item_id"],),
+        )[0]
+        self.assertEqual(work["state"], "ready")
+        self.assertEqual(work["blocker_code"], "requirements_pending")
+        self.assertEqual(
+            json.loads(work["specification_json"])["readiness"]["status"],
+            "requirements_pending",
+        )
+        experiment = self.database.rows(
+            "SELECT specification_json FROM experiments WHERE id=?",
+            (study["hpo_experiment_id"],),
+        )[0]
+        self.assertEqual(json.loads(experiment["specification_json"])["routes"], [])
+
+        released = self.database.configure_hpo_validation_routes(
+            study["id"],
+            {"hpo": [{
+                "exchange": "Binance Perpetual Futures",
+                "symbol": "BTC-USDT", "timeframe": "1h",
+                "start_date": "2024-01-01", "finish_date": "2025-01-01",
+            }]},
+        )
+        self.assertEqual(released["hpo_routes"], 1)
+        work = self.database.rows(
+            "SELECT state,blocker_code,specification_json FROM work_items WHERE id=?",
+            (study["hpo_work_item_id"],),
+        )[0]
+        self.assertEqual(work["state"], "ready")
+        self.assertIsNone(work["blocker_code"])
+        self.assertEqual(
+            json.loads(work["specification_json"])["readiness"]["status"],
+            "ready",
+        )
+        experiment = self.database.rows(
+            "SELECT specification_json FROM experiments WHERE id=?",
+            (study["hpo_experiment_id"],),
+        )[0]
+        self.assertEqual(len(json.loads(experiment["specification_json"])["routes"]), 1)
 
     def test_terminal_analysis_can_be_explicitly_requeued(self) -> None:
         study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")

@@ -869,7 +869,12 @@ class WorkflowDatabase:
                         "experiment_type": "out_of_sample",
                         "parent_experiment_id": study["hpo_experiment_id"],
                     })
-                    routes = specification.get("routes")
+                    validation_routes = specification.get("validation_routes")
+                    routes = (
+                        validation_routes.get(split)
+                        if isinstance(validation_routes, dict)
+                        else None
+                    )
                     has_routes = (
                         isinstance(routes, list) and bool(routes)
                     )
@@ -977,10 +982,18 @@ class WorkflowDatabase:
         *,
         updated_by: str = "operator",
     ) -> dict:
-        """Attach validated split-specific routes and release pending jobs."""
+        """Attach split-specific routes and release pending HPO work.
+
+        Validation jobs are normally created before routes are known.  A
+        scheduled HPO study can also reach this command before validation
+        jobs exist.  An explicit ``hpo`` route entry then attaches only that
+        route to the optimizer; OOS/rolling entries never leak into HPO
+        execution.  This keeps route readiness explicit while avoiding a
+        second operator-only SQLite edit path.
+        """
         normalized: dict[str, list[dict[str, str]]] = {}
         for split, raw_routes in routes_by_split.items():
-            if split not in {"oos", "rolling"}:
+            if split not in {"oos", "rolling", "hpo"}:
                 raise ValueError(f"unsupported validation split: {split}")
             if not isinstance(raw_routes, list) or not raw_routes:
                 raise ValueError(
@@ -1016,11 +1029,22 @@ class WorkflowDatabase:
         updated = []
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if connection.execute(
-                "SELECT 1 FROM hpo_studies WHERE id=?", (study_id,),
-            ).fetchone() is None:
+            study = connection.execute(
+                """SELECT id,hpo_experiment_id,hpo_work_item_id
+                   FROM hpo_studies WHERE id=?""",
+                (study_id,),
+            ).fetchone()
+            if study is None:
                 raise KeyError(f"unknown HPO study: {study_id}")
+            hpo_routes = [
+                route
+                for split in ("hpo",)
+                for route in normalized.get(split, [])
+            ]
+            validation_jobs_found = False
             for split, routes in normalized.items():
+                if split == "hpo":
+                    continue
                 jobs = connection.execute(
                     """SELECT v.id,v.experiment_id,v.work_item_id,
                               e.specification_json AS experiment_json,
@@ -1031,13 +1055,16 @@ class WorkflowDatabase:
                        WHERE v.study_id=? AND v.evidence_split=?""",
                     (study_id, split),
                 ).fetchall()
-                if not jobs:
-                    raise ValueError(
-                        f"study has no validation jobs for split: {split}"
-                    )
+                validation_jobs_found = validation_jobs_found or bool(jobs)
                 for job in jobs:
                     experiment = _json_object(job["experiment_json"])
                     experiment["routes"] = routes
+                    configured = experiment.get("validation_routes")
+                    validation_routes = (
+                        dict(configured) if isinstance(configured, dict) else {}
+                    )
+                    validation_routes[split] = routes
+                    experiment["validation_routes"] = validation_routes
                     work = _json_object(job["work_json"])
                     work["readiness"] = {
                         "status": "ready", "missing": [],
@@ -1064,6 +1091,51 @@ class WorkflowDatabase:
                         ),
                     )
                     updated.append(job["work_item_id"])
+            # A study may still be hpo_scheduled with no selected trials and
+            # therefore no validation jobs.  Release its optimizer work item
+            # once canonical routes are supplied instead of leaving it in a
+            # permanent requirements_pending state.
+            hpo_work = connection.execute(
+                """SELECT specification_json,state FROM work_items WHERE id=?""",
+                (study["hpo_work_item_id"],),
+            ).fetchone()
+            hpo_operation = (
+                _json_object(hpo_work["specification_json"]).get("operation")
+                if hpo_work is not None else None
+            )
+            hpo_experiment = connection.execute(
+                """SELECT specification_json FROM experiments WHERE id=?""",
+                (study["hpo_experiment_id"],),
+            ).fetchone()
+            if hpo_experiment is not None and hpo_routes and hpo_operation == "hpo":
+                experiment = _json_object(hpo_experiment["specification_json"])
+                existing_routes = experiment.get("routes")
+                if not isinstance(existing_routes, list) or not existing_routes:
+                    experiment["routes"] = hpo_routes
+                    connection.execute(
+                        """UPDATE experiments SET specification_json=?,updated_at=?
+                           WHERE id=?""",
+                        (
+                            json.dumps(experiment, sort_keys=True),
+                            now, study["hpo_experiment_id"],
+                        ),
+                    )
+                if hpo_work is not None:
+                    work = _json_object(hpo_work["specification_json"])
+                    work["readiness"] = {"status": "ready", "missing": []}
+                    connection.execute(
+                        """UPDATE work_items SET specification_json=?,
+                           state=CASE WHEN state='blocked'
+                                AND blocker_code='requirements_pending'
+                              THEN 'scheduled' ELSE state END,
+                           blocker_code=NULL,blocker_detail=NULL,updated_at=?
+                           WHERE id=?""",
+                        (
+                            json.dumps(work, sort_keys=True),
+                            now, study["hpo_work_item_id"],
+                        ),
+                    )
+                    updated.append(study["hpo_work_item_id"])
             connection.execute(
                 """INSERT INTO events(
                        aggregate_type,aggregate_id,event_type,payload_json,
@@ -1078,6 +1150,8 @@ class WorkflowDatabase:
                             for split, routes in normalized.items()
                         },
                         "work_item_ids": sorted(updated),
+                        "validation_jobs_found": validation_jobs_found,
+                        "hpo_routes": len(hpo_routes),
                     }, sort_keys=True),
                     now,
                 ),
@@ -1085,6 +1159,7 @@ class WorkflowDatabase:
         return {
             "study_id": study_id,
             "updated_work_items": sorted(updated),
+            "hpo_routes": len(hpo_routes),
             "splits": {
                 split: len(routes)
                 for split, routes in normalized.items()

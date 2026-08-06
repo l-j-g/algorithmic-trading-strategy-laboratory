@@ -370,7 +370,10 @@ def main() -> int:
     )
     validation_routes = sub.add_parser(
         "configure-hpo-validation-routes",
-        help="Supply canonical OOS/rolling routes for pending HPO validation.",
+        help=(
+            "Supply canonical HPO training and/or OOS/rolling routes; "
+            "release only matching work."
+        ),
     )
     validation_routes.add_argument("study_id")
     validation_routes.add_argument("--file", type=Path, required=True)

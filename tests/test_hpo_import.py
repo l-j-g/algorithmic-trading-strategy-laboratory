@@ -230,6 +230,34 @@ class OptunaImportTests(unittest.TestCase):
                 execution["experiment"]["routes"][0]["timeframe"], "1h",
             )
 
+    def test_validation_requires_each_requested_split_route(self) -> None:
+        result = import_optuna_study(
+            self.database,
+            self.source,
+            study_name="Trend_optuna",
+            parent_experiment_id="EXP-HPO",
+            parent_work_item_id="JOB-HPO",
+            strategy="Trend",
+            classifications={7: {"classification": "validation_candidate"}},
+        )
+        validations = self.database.schedule_hpo_validations(
+            result["study_id"], [7], evidence_splits=("oos", "rolling"),
+        )
+        self.database.configure_hpo_validation_routes(
+            result["study_id"],
+            {"oos": [{
+                "exchange": "Binance Perpetual Futures", "symbol": "BTC-USDT",
+                "timeframe": "1h", "start_date": "2026-01-01",
+                "finish_date": "2026-03-31",
+            }]},
+        )
+        states = {
+            row["evidence_split"]: row["readiness_status"]
+            for row in self.database.hpo_study_detail(result["study_id"])["validations"]
+        }
+        self.assertEqual(states, {"oos": "ready", "rolling": "requirements_pending"})
+        self.assertEqual(len(validations), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
