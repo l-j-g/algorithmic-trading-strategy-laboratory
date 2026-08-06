@@ -21,6 +21,8 @@ jesse = "/absolute/path/to/jesse-workspace"
 executable = "executor"
 profile = "ats-lab"
 timeout_seconds = 3600
+# Fallback execution/HPO calls are bounded separately.
+execution_timeout_seconds = 900
 # Strategy preparation is bounded separately so one Jesse inspection cannot
 # hold the supervisor for the full general-purpose Agent timeout.
 preparation_timeout_seconds = 300
