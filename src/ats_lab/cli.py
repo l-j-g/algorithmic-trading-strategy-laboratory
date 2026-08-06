@@ -63,6 +63,7 @@ from .research_memory import (
     memory_status,
     sync_memory_outbox,
 )
+from .telemetry_rollup import TelemetryRollup
 from .sanitize import apply_sanitize_plan, build_sanitize_plan
 from .synthesis import synthesis_request_from_file, synthesize
 from .status import hpo_detail_snapshot, operator_status
@@ -348,6 +349,12 @@ def main() -> int:
     timings.add_argument("--job")
     timings.add_argument("--limit", type=int, default=100)
     timings.add_argument("--format", choices=("table", "json"), default="table")
+    telemetry = sub.add_parser(
+        "telemetry", help="Summarize privacy-safe Agent transport telemetry."
+    )
+    telemetry.add_argument("--path", type=Path)
+    telemetry.add_argument("--since-hours", type=float, default=24)
+    telemetry.add_argument("--format", choices=("table", "json"), default="table")
     analyzer = sub.add_parser(
         "analyzer", help="Show current HPO analyzer state."
     )
@@ -467,7 +474,7 @@ def main() -> int:
         "console", "recover-claims", "resolve-blocker", "requeue-evaluation",
         "queue", "candidates", "evidence", "diagnostic-export",
         "diagnostic-hpo-trial",
-        "hpo", "hpo-detail", "timings", "analyzer",
+        "hpo", "hpo-detail", "timings", "telemetry", "analyzer",
         "requeue-hpo-analysis", "configure-hpo-validation-routes",
         "memory-status", "memory-sync", "memory", "memory-backfill",
         "home", "next", "doctor", "preflight", "recovery-audit", "tui", "loop",
@@ -842,6 +849,32 @@ def main() -> int:
             emit(rows)
         else:
             print(render_stage_timings(rows))
+    elif args.command == "telemetry":
+        if args.since_hours <= 0:
+            parser.error("--since-hours must be positive")
+        path = args.path or (repo / ".ats-lab" / "agent-transport.jsonl")
+        result = TelemetryRollup(path).summarize(
+            since_hours=args.since_hours,
+        )
+        if args.format == "json":
+            emit(result)
+        else:
+            print(f"TELEMETRY  since={args.since_hours:g}h  path={path}")
+            for item in result["task_types"]:
+                input_stats = item["input_tokens"]
+                output_stats = item["output_tokens"]
+                cache_stats = item["cache_read_tokens"]
+                print(
+                    f"{item['task_type']:<18} records={item['records']:<5} "
+                    f"input={input_stats['total']:.0f} "
+                    f"output={output_stats['total']:.0f} "
+                    f"cache={cache_stats['total']:.0f}"
+                )
+            for alarm in result["alarms"]:
+                print(
+                    f"ALARM {alarm['code']} task={alarm['task_type']} "
+                    f"value={alarm['value']} detail={alarm['detail']}"
+                )
     elif args.command == "analyzer":
         database.initialize()
         query = getattr(database, "current_analyzer_status", None)

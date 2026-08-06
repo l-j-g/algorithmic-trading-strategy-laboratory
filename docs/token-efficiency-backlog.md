@@ -87,6 +87,17 @@ Current implementation supplies privacy-safe Agent JSONL records plus SQLite
 direct-executor records. Remaining: bounded daily p50/p95 rollup, alarms, and
 rotation/retention.
 
+The local rollup is now available without exposing prompts or responses:
+
+```bash
+ats-lab telemetry --since-hours 24
+ats-lab telemetry --since-hours 24 --format json
+```
+
+It reports per-task totals and p50/p95 values for calls, tokens, cache reads,
+and transport bytes. Alarms flag model calls on the direct execution path and
+oversized synthesis requests. File rotation and retention remain separate work.
+
 ## 5. Deterministic verdict expansion
 
 Expected impact: eliminate analysis model calls where existing gates fully
