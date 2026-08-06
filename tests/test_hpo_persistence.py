@@ -95,6 +95,25 @@ class HpoPersistenceTests(unittest.TestCase):
             self.database.current_analyzer_status()["state"], "pending",
         )
 
+    def test_unroutable_running_study_returns_to_scheduled(self) -> None:
+        study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
+        self.database.start_hpo_study(study["id"])
+        work_item_id = study["hpo_work_item_id"]
+        self.database.promote_scheduled_runnable(1)
+
+        changed = self.database.mark_unroutable_hpo_requirements_pending()
+
+        self.assertEqual(changed, 1)
+        refreshed = self.database.hpo_study_detail(study["id"])
+        self.assertEqual(refreshed["lifecycle_state"], "hpo_scheduled")
+        self.assertIsNone(refreshed["started_at"])
+        work = self.database.rows(
+            "SELECT state,blocker_code FROM work_items WHERE id=?",
+            (work_item_id,),
+        )[0]
+        self.assertEqual(work["state"], "ready")
+        self.assertEqual(work["blocker_code"], "requirements_pending")
+
     def test_terminal_analysis_can_be_explicitly_requeued(self) -> None:
         study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
         self.database.complete_hpo_study(study["id"])

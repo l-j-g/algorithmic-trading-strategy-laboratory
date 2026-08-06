@@ -32,6 +32,7 @@ from .models import (
     WorkState,
 )
 from .resources import ResourcePolicy
+from .runtime_heartbeat import RuntimeHeartbeat
 from .research_memory import (
     ResearchMemoryAdapter,
     compact_advisory_memory,
@@ -64,6 +65,7 @@ class BatchSupervisor:
         failure_recorder: ExecutionFailureRecorder | None = None,
         analysis_input_builder: ExecutionAnalysisInputBuilder | None = None,
         terminal_failure_recovery: TerminalFailureRecovery | None = None,
+        heartbeat_interval_seconds: float = 30.0,
     ):
         self.database = database
         self.dispatcher = dispatcher
@@ -87,6 +89,9 @@ class BatchSupervisor:
             terminal_failure_recovery
             or TerminalFailureRecovery(database, self.failure_recorder)
         )
+        if heartbeat_interval_seconds <= 0:
+            raise ValueError("heartbeat interval must be positive")
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self._recovered = False
 
@@ -1136,8 +1141,19 @@ class BatchSupervisor:
         )
 
     def _dispatch(self, request: dict[str, Any]) -> DispatchResult:
+        runtime = self.database.supervisor_runtime_status() or {}
+        heartbeat = RuntimeHeartbeat(
+            self.database,
+            worker_id=self.worker_id,
+            started_at=self.started_at,
+            phase=str(runtime.get("phase") or request.get("task_type") or "dispatching"),
+            batch_id=runtime.get("batch_id"),
+            detail=runtime.get("detail"),
+            interval_seconds=self.heartbeat_interval_seconds,
+        )
         try:
-            return self.dispatcher.dispatch(request)
+            with heartbeat:
+                return self.dispatcher.dispatch(request)
         except Exception as error:
             return DispatchResult(
                 outcome="retry", blocker_code="dispatcher_exception", detail=str(error),

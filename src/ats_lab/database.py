@@ -2149,9 +2149,10 @@ class WorkflowDatabase:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                """SELECT w.id,w.specification_json
+                """SELECT w.id,w.specification_json,s.id AS study_id
                    FROM work_items w JOIN experiments e
                      ON e.id=w.experiment_id
+                   LEFT JOIN hpo_studies s ON s.hpo_work_item_id=w.id
                    WHERE w.state IN ('scheduled','ready')
                      AND json_extract(w.specification_json,'$.operation')='hpo'
                      AND COALESCE(
@@ -2171,7 +2172,14 @@ class WorkflowDatabase:
                               blocker_detail='HPO execution requires configured routes',
                               updated_at=? WHERE id=? AND state IN ('scheduled','ready')""",
                     (json.dumps(specification, sort_keys=True), now, row["id"]),
-                )
+                    )
+                if row["study_id"]:
+                    connection.execute(
+                        """UPDATE hpo_studies SET lifecycle_state='hpo_scheduled',
+                           started_at=NULL,updated_at=?
+                           WHERE id=? AND lifecycle_state='hpo_running'""",
+                        (now, row["study_id"]),
+                    )
                 connection.execute(
                     """INSERT INTO events(
                            aggregate_type,aggregate_id,event_type,payload_json,occurred_at
