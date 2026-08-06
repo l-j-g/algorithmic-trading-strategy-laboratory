@@ -11,7 +11,7 @@ from ats_lab.database import WorkflowDatabase
 from ats_lab.legacy_import import LegacyImporter
 from ats_lab.inventory import build_inventory
 from ats_lab.contracts import evaluation_from_payload, experiment_from_payload, work_item_from_payload
-from ats_lab.models import Evaluation, ExperimentSpec, RunResult, RunStatus, Verdict, WorkItem, WorkState
+from ats_lab.models import Evaluation, ExperimentSpec, ExperimentType, RunResult, RunStatus, Verdict, WorkItem, WorkState
 from ats_lab.reconcile import apply_reconciliation, build_reconciliation, normalize_unattempted_blockers
 
 
@@ -216,6 +216,34 @@ class ReconciliationTests(unittest.TestCase):
             }
             self.assertEqual(states["PENDING"], "scheduled")
             self.assertEqual(states["RUNNABLE"], "ready")
+
+    def test_hpo_without_routes_is_held_for_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="HPO-EXP", strategy_name="TestStrategy",
+                experiment_type=ExperimentType.HPO,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="HPO-JOB", experiment_id="HPO-EXP", priority=1,
+                state=WorkState.SCHEDULED,
+                specification={"operation": "hpo"},
+            ))
+
+            changed = database.mark_unroutable_hpo_requirements_pending()
+
+            self.assertEqual(changed, 1)
+            row = database.rows(
+                "SELECT state,blocker_code,specification_json FROM work_items "
+                "WHERE id='HPO-JOB'"
+            )[0]
+            self.assertEqual(row["state"], "scheduled")
+            self.assertEqual(row["blocker_code"], "requirements_pending")
+            self.assertEqual(
+                json.loads(row["specification_json"])["readiness"],
+                {"missing": ["hpo_routes"], "status": "requirements_pending"},
+            )
 
     def test_requirements_pending_ready_item_cannot_be_claimed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

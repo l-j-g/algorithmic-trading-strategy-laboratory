@@ -12,6 +12,7 @@ from ats_lab.models import (
     ExperimentType,
     RunResult,
     RunStatus,
+    RouteSpec,
     Verdict,
     WorkItem,
     WorkState,
@@ -456,6 +457,13 @@ class BatchSupervisorTests(unittest.TestCase):
     def test_hpo_execution_uses_public_study_id_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1", strategy_name="Strategy1",
+                routes=(RouteSpec(
+                    "Binance Perpetual Futures", "BTC-USDT", "1h",
+                    "2025-01-01", "2025-06-01",
+                ),),
+            ))
             database.transition_work_item(
                 "JOB-1", WorkState.FINISHED,
                 allowed_from=(WorkState.READY,),

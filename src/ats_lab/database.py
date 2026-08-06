@@ -2137,6 +2137,48 @@ class WorkflowDatabase:
             )
             return len(ids)
 
+    def mark_unroutable_hpo_requirements_pending(self) -> int:
+        """Keep HPO jobs without routes out of execution claims."""
+        now = utc_now()
+        changed = 0
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT w.id,w.specification_json
+                   FROM work_items w JOIN experiments e
+                     ON e.id=w.experiment_id
+                   WHERE w.state IN ('scheduled','ready')
+                     AND json_extract(w.specification_json,'$.operation')='hpo'
+                     AND COALESCE(
+                       json_array_length(json_extract(e.specification_json,'$.routes')),
+                       0
+                     )=0"""
+            ).fetchall()
+            for row in rows:
+                specification = json.loads(row["specification_json"] or "{}")
+                specification["readiness"] = {
+                    "status": "requirements_pending",
+                    "missing": ["hpo_routes"],
+                }
+                connection.execute(
+                    """UPDATE work_items SET specification_json=?,
+                              blocker_code='requirements_pending',
+                              blocker_detail='HPO execution requires configured routes',
+                              updated_at=? WHERE id=? AND state IN ('scheduled','ready')""",
+                    (json.dumps(specification, sort_keys=True), now, row["id"]),
+                )
+                connection.execute(
+                    """INSERT INTO events(
+                           aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                       ) VALUES ('work_item',?,?,?,?)""",
+                    (
+                        row["id"], "readiness_pending",
+                        json.dumps({"reason": "hpo_routes"}), now,
+                    ),
+                )
+                changed += 1
+        return changed
+
     def remaining_chain_count(self) -> int:
         """Count unresolved research chains, avoiding significance/baseline double-counting."""
         with self.connect() as connection:

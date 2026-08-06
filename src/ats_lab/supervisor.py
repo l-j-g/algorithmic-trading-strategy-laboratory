@@ -166,6 +166,8 @@ class BatchSupervisor:
             return self._analyze_pending(
                 pending_failures, recovered=recovered, promoted=0,
             )
+        if hasattr(self.database, "mark_unroutable_hpo_requirements_pending"):
+            self.database.mark_unroutable_hpo_requirements_pending()
         self.database.refresh_synthesis_cohorts()
         promoted = self.database.promote_due_retries()
         promoted += self.database.promote_scheduled_runnable(
