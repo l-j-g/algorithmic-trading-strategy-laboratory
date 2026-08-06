@@ -21,6 +21,9 @@ jesse = "/absolute/path/to/jesse-workspace"
 executable = "executor"
 profile = "ats-lab"
 timeout_seconds = 3600
+# Strategy preparation is bounded separately so one Jesse inspection cannot
+# hold the supervisor for the full general-purpose Agent timeout.
+preparation_timeout_seconds = 300
 # model = "provider/model"
 # provider = "provider"
 # Defaults shown explicitly:

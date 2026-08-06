@@ -24,6 +24,7 @@ class AgentLauncherConfig:
     executable: str = "executor"
     profile: str | None = None
     timeout_seconds: float = 3600
+    preparation_timeout_seconds: float = 300
     model: str | None = None
     provider: str | None = None
     execution_model: str | None = None
@@ -51,6 +52,11 @@ def load_config(path: Path) -> AgentLauncherConfig:
     timeout = float(executor.get("timeout_seconds", 3600))
     if timeout <= 0:
         raise ValueError("executor.timeout_seconds must be positive")
+    preparation_timeout = float(
+        executor.get("preparation_timeout_seconds", 300)
+    )
+    if preparation_timeout <= 0:
+        raise ValueError("executor.preparation_timeout_seconds must be positive")
     def toolsets(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
         value = executor.get(name, list(default))
         if (
@@ -74,6 +80,7 @@ def load_config(path: Path) -> AgentLauncherConfig:
         executable=executable,
         profile=_optional_string(executor.get("profile"), "executor.profile"),
         timeout_seconds=timeout,
+        preparation_timeout_seconds=preparation_timeout,
         model=_optional_string(executor.get("model"), "executor.model"),
         provider=_optional_string(executor.get("provider"), "executor.provider"),
         execution_model=_optional_string(
@@ -331,6 +338,8 @@ def launch(
     )
     task_type = str(request.get("task_type") or "unknown")
     timeout = config.timeout_seconds
+    if request.get("task_type") == "prepare_strategies":
+        timeout = min(timeout, config.preparation_timeout_seconds)
     if request.get("task_type") in {"analyze_batch", "analyze_hpo"}:
         requested_timeout = float(
             request.get("analyzer_timeout_seconds", 900)

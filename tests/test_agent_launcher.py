@@ -302,6 +302,33 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertEqual(seen["timeout"], 720)
 
     @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
+    def test_strategy_preparation_uses_bounded_timeout(self, _which) -> None:
+        seen = {}
+
+        def runner(command, **kwargs):
+            seen["timeout"] = kwargs["timeout"]
+            return subprocess.CompletedProcess(
+                command, 0,
+                '{"outcome":"finished","prepared_work_item_ids":["JOB-1"]}',
+                "",
+            )
+
+        result = launch(
+            {
+                "task_type": "prepare_strategies",
+                "requests": [{"work_item_id": "JOB-1"}],
+            },
+            AgentLauncherConfig(
+                Path("/tmp"), timeout_seconds=3600,
+                preparation_timeout_seconds=45,
+            ),
+            runner=runner,
+        )
+
+        self.assertEqual(result["outcome"], "finished")
+        self.assertEqual(seen["timeout"], 45)
+
+    @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
     def test_analyzer_rejects_out_of_range_timeout(self, _which) -> None:
         result = launch(
             {
