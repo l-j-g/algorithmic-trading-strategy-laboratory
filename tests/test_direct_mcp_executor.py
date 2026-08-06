@@ -711,6 +711,25 @@ class DirectMcpExecutorTests(unittest.TestCase):
             self.assertEqual(fallback.requests[0]["task_type"], "prepare_strategies")
             self.assertNotIn("strategy_source", json.dumps(fallback.requests[0]))
 
+    def test_nested_entry_scope_gets_preparation_turn(self) -> None:
+        fallback = RecordingFallback()
+        request = batch_request()
+        experiment = request["requests"][0]["experiment"]
+        experiment.pop("change_scope")
+        experiment["entry_rule"] = {
+            "action": "new",
+            "change_scope": "new_entry",
+            "description": "Enter on a bounded test condition.",
+        }
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["finished"]) as server:
+            dispatcher, _ = self.make_dispatcher(tmp, server, fallback=fallback)
+
+            result = dispatcher.dispatch(request)
+
+            self.assertEqual(result.payload["results"][0]["outcome"], "finished")
+            self.assertEqual(len(fallback.requests), 1)
+            self.assertEqual(fallback.requests[0]["task_type"], "prepare_strategies")
+
     def test_disabled_feature_delegates_to_existing_dispatcher(self) -> None:
         fallback = RecordingFallback()
         with tempfile.TemporaryDirectory() as tmp:

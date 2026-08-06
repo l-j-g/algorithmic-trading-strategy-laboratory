@@ -1293,7 +1293,18 @@ class DirectMcpDispatcher:
     def _requires_preparation(request: dict[str, Any]) -> bool:
         experiment = request.get("experiment", {})
         work = request.get("work_item", {})
-        scope = work.get("change_scope") or experiment.get("change_scope")
+        work_entry = work.get("entry_rule")
+        experiment_entry = experiment.get("entry_rule")
+        entry_rule = (
+            work_entry if isinstance(work_entry, dict)
+            else experiment_entry if isinstance(experiment_entry, dict)
+            else {}
+        )
+        scope = (
+            work.get("change_scope")
+            or experiment.get("change_scope")
+            or entry_rule.get("change_scope")
+        )
         return bool(
             work.get("strategy_preparation_required")
             or experiment.get("strategy_preparation_required")
