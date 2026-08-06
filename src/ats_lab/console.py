@@ -1,6 +1,7 @@
 """Human-readable terminal monitor and operator console."""
 from __future__ import annotations
 
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from typing import Callable, Iterable, Mapping, TextIO
 
 from .database import WorkflowDatabase
 from .status import operator_status
+from .terminal_table import Alignment, FittedTable, TableColumn
 
 
 _CANDIDATE_VERDICTS = {
@@ -76,6 +78,14 @@ def monitor_snapshot(database: WorkflowDatabase) -> dict:
         }.get(row.get("verdict"), 3)
     )
     status["candidates"] = candidates[:5]
+    # Normalized evidence is the durable completion stream.  Keeping this
+    # projection separate from the active queue means a finished run remains
+    # visible after its work item leaves ``active_queue``.
+    status["recent_completions"] = [
+        item.to_dict()
+        for item in database.query_normalized_evidence(limit=12)
+        if item.completed_at
+    ][:8]
     return status
 
 
@@ -112,6 +122,83 @@ def _cell(value: object, width: int) -> str:
     if len(text) > width:
         text = text[: max(1, width - 1)] + "…"
     return text.ljust(width)
+
+
+def _metric(value: object, *, suffix: str = "", signed: bool = False) -> str:
+    """Format one operator metric without leaking raw diagnostic payloads."""
+    if value in (None, ""):
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    prefix = "+" if signed and number > 0 else ""
+    return f"{prefix}{number:.2f}{suffix}"
+
+
+def _completion_rows(rows: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Map canonical evidence into the small completion view shown to operators."""
+    result = []
+    for raw in rows:
+        row = dict(raw)
+        symbol = row.get("symbol") or "—"
+        timeframe = row.get("timeframe")
+        result.append({
+            "strategy": row.get("strategy") or row.get("experiment_id") or "—",
+            "pair": f"{symbol} {timeframe}" if timeframe else symbol,
+            "profit": _metric(row.get("net_profit_percentage"), suffix="%", signed=True),
+            "trades": (
+                str(int(row["trade_count"]))
+                if row.get("trade_count") not in (None, "") else "—"
+            ),
+            "sharpe": _metric(row.get("sharpe_ratio")),
+            "drawdown": _metric(row.get("max_drawdown_percentage"), suffix="%"),
+            "disposition": row.get("verdict") or "pending",
+        })
+    return result
+
+
+def render_completion_table(
+    rows: Iterable[Mapping[str, object]], *, width: int | None = None,
+) -> str:
+    """Render recent finished jobs as a compact width-fitting table."""
+    values = _completion_rows(rows)
+    if not values:
+        return "(none)"
+    table = FittedTable(
+        columns=(
+            TableColumn(
+                "strategy", "strategy", 26, 12, priority=90,
+                required=True, expand=True,
+            ),
+            TableColumn(
+                "pair", "pair", 16, 8, priority=80, required=True,
+            ),
+            TableColumn(
+                "profit", "profit", 9, 6, priority=30,
+                alignment=Alignment.RIGHT,
+            ),
+            TableColumn(
+                "trades", "trades", 7, 6, priority=20,
+                alignment=Alignment.RIGHT,
+            ),
+            TableColumn(
+                "sharpe", "sharpe", 8, 6, priority=10,
+                alignment=Alignment.RIGHT,
+            ),
+            TableColumn(
+                "drawdown", "dd", 8, 4, priority=5,
+                alignment=Alignment.RIGHT,
+            ),
+            TableColumn(
+                "disposition", "disposition", 20, 11, priority=40,
+            ),
+        ),
+        width=width or shutil.get_terminal_size((120, 20)).columns,
+    )
+    return "\n".join((table.render_header(), "  ".join(
+        "-" * column.preferred_width for column in table.fitted_columns()
+    ), *table.render_rows(values)))
 
 
 def render_monitor(snapshot: dict) -> str:
@@ -193,6 +280,9 @@ def render_monitor(snapshot: dict) -> str:
             )
         ),
         f"NEXT   {snapshot['next_action']}",
+        "",
+        "COMPLETED",
+        render_completion_table(snapshot.get("recent_completions", [])),
         "",
         "ACTIVE",
         (

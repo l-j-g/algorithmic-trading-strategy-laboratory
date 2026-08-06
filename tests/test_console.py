@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ats_lab.console import (
     monitor_snapshot,
+    render_completion_table,
     render_analyzer,
     render_hpo_detail,
     render_hpo_studies,
@@ -49,6 +50,52 @@ class TerminalConsoleTests(unittest.TestCase):
             self.assertIn("ready=1", rendered)
             self.assertIn("JOB-1", rendered)
             self.assertIn("control pause", rendered)
+
+    def test_monitor_shows_recent_completed_job_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            database.add_run(RunResult(
+                id="RUN-1", experiment_id="EXP-1", work_item_id="JOB-1",
+                session_id="SESSION-1", status=RunStatus.FINISHED,
+                route={
+                    "exchange": "Binance Perpetual Futures",
+                    "symbol": "BTC-USDT", "timeframe": "1h",
+                    "start_date": "2026-01-01", "finish_date": "2026-02-01",
+                },
+                metrics={
+                    "net_profit_percentage": 12.345,
+                    "trade_count": 42,
+                    "sharpe_ratio": 1.23,
+                    "max_drawdown_percentage": -4.5,
+                },
+                finished_at="2026-02-01T00:00:00Z",
+            ))
+
+            rendered = render_monitor(monitor_snapshot(database))
+
+            self.assertIn("COMPLETED", rendered)
+            self.assertIn("TestStrategy", rendered)
+            self.assertIn("BTC-USDT 1h", rendered)
+            self.assertIn("+12.35%", rendered)
+            self.assertIn("42", rendered)
+            self.assertIn("1.23", rendered)
+            self.assertIn("4.50%", rendered)
+
+    def test_completion_table_fits_narrow_terminal_without_misalignment(self) -> None:
+        rendered = render_completion_table(({
+            "strategy": "VeryLongStrategyNameThatNeedsTruncation",
+            "symbol": "BTC-USDT", "timeframe": "1h",
+            "net_profit_percentage": 3.1, "trade_count": 10,
+            "sharpe_ratio": 0.9, "max_drawdown_percentage": -2.2,
+            "verdict": "revise",
+        },), width=64)
+
+        lines = rendered.splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(len(line) <= 64 for line in lines))
+        self.assertIn("strategy", lines[0])
+        self.assertIn("pair", lines[0])
+        self.assertIn("…", rendered)
 
     def test_console_pause_status_resume_and_quit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
