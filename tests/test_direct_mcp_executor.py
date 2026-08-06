@@ -177,6 +177,12 @@ class RecordingFallback:
             "work_item_id": "JOB-1",
             "strategy_name": "ExistingStrategy",
             "status": "ready",
+            "contract_checks": [
+                {"code": code, "status": "pass"}
+                for code in (
+                    "positive_quantity", "exit_shape", "indicator_api", "callback_api",
+                )
+            ],
         }]
 
     def dispatch(self, request: dict) -> DispatchResult:
@@ -819,6 +825,41 @@ class DirectMcpExecutorTests(unittest.TestCase):
             item = result.payload["results"][0]
             self.assertEqual(item["outcome"], "blocked")
             self.assertEqual(item["blocker_code"], "source_strategy_not_found")
+            self.assertEqual(server.http.run_calls, 0)
+
+    def test_explicit_contract_defect_is_blocked_before_jesse(self) -> None:
+        request = batch_request()
+        request["requests"][0]["experiment"]["sizing_model"] = (
+            "risk_to_qty from starting balance"
+        )
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["finished"]) as server:
+            dispatcher, _ = self.make_dispatcher(tmp, server)
+
+            result = dispatcher.dispatch(request)
+
+            item = result.payload["results"][0]
+            self.assertEqual(item["outcome"], "blocked")
+            self.assertEqual(item["blocker_code"], "strategy_contract_invalid")
+            self.assertEqual(server.http.run_calls, 0)
+
+    def test_failed_contract_receipt_blocks_before_jesse(self) -> None:
+        fallback = RecordingFallback()
+        fallback.preparation_outcome = "blocked"
+        fallback.preparation_readiness[0]["status"] = "invalid"
+        fallback.preparation_readiness[0]["detail"] = "scalar stop_loss"
+        fallback.preparation_readiness[0]["contract_checks"][1] = {
+            "code": "exit_shape", "status": "fail",
+            "detail": "scalar stop_loss",
+        }
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["finished"]) as server:
+            dispatcher, _ = self.make_dispatcher(tmp, server, fallback=fallback)
+
+            result = dispatcher.dispatch(batch_request(change_scope="entry_changed"))
+
+            item = result.payload["results"][0]
+            self.assertEqual(item["outcome"], "blocked")
+            self.assertEqual(item["blocker_code"], "invalid_strategy_preparation")
+            self.assertIn("scalar stop_loss", item["detail"])
             self.assertEqual(server.http.run_calls, 0)
 
     def test_preparation_requires_readiness_evidence(self) -> None:

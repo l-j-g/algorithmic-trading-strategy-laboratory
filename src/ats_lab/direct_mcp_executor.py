@@ -19,6 +19,7 @@ from typing import Any, Callable
 from .database import WorkflowDatabase
 from .models import utc_now
 from .session_recovery import SessionRecoveryPolicy
+from .strategy_contracts import StrategyContractValidator
 from .worker import DispatchResult, Dispatcher
 
 
@@ -456,6 +457,7 @@ class DirectMcpDispatcher:
         sleep: Callable[[float], None] = time.sleep,
         client_factory: Callable[[str, float], McpClient] = McpClient,
         dashboard_client: DashboardClient | None = None,
+        contract_validator: StrategyContractValidator | None = None,
     ) -> None:
         self.database = database
         self.config = config
@@ -466,6 +468,7 @@ class DirectMcpDispatcher:
         self.dashboard_client = dashboard_client or DashboardClient.from_environment(
             config.dashboard_api_base_url, timeout=config.timeout_seconds,
         )
+        self.contract_validator = contract_validator or StrategyContractValidator()
 
     def dispatch(self, request: dict[str, Any]) -> DispatchResult:
         if not self.config.enabled or request.get("task_type") != "execute_batch":
@@ -478,6 +481,22 @@ class DirectMcpDispatcher:
             )
         direct = [item for item in requests if self._mechanical_backtest(item)]
         delegated = [item for item in requests if item not in direct]
+        results: list[dict[str, Any]] = []
+        contract_valid: list[dict[str, Any]] = []
+        for item in direct:
+            issues = self.contract_validator.validate_request(item)
+            if issues:
+                results.append({
+                    "work_item_id": item.get("work_item_id"),
+                    "outcome": "blocked",
+                    "blocker_code": "strategy_contract_invalid",
+                    "detail": "; ".join(
+                        f"{issue.code}: {issue.detail}" for issue in issues
+                    )[:1000],
+                })
+            else:
+                contract_valid.append(item)
+        direct = contract_valid
         preparation = [
             item for item in direct
             if self._requires_preparation(item)
@@ -542,7 +561,6 @@ class DirectMcpDispatcher:
                     ),
                     payload=payload,
                 )
-            results: list[dict[str, Any]] = []
             for item in preparation:
                 status = readiness[item["work_item_id"]]
                 if status["status"] == "ready":
@@ -558,8 +576,6 @@ class DirectMcpDispatcher:
                     ),
                     "detail": status["detail"],
                 })
-        else:
-            results = []
         for item in direct:
             if any(
                 result.get("work_item_id") == item.get("work_item_id")
@@ -591,9 +607,8 @@ class DirectMcpDispatcher:
             payload={"outcome": overall, "results": results},
         )
 
-    @staticmethod
     def _strategy_readiness(
-        payload: dict[str, Any], preparation: list[dict[str, Any]],
+        self, payload: dict[str, Any], preparation: list[dict[str, Any]],
     ) -> tuple[dict[str, dict[str, str]], str | None]:
         """Validate model-reported Jesse strategy discoverability.
 
@@ -630,8 +645,11 @@ class DirectMcpDispatcher:
             ):
                 return {}, "strategy_readiness strategy_name does not match request"
             detail = " ".join(str(entry.get("detail") or "").split())[:1000]
-            if status != "ready" and not detail:
-                return {}, "non-ready strategy_readiness entries require detail"
+            validation = self.contract_validator.validate_readiness(entry)
+            if validation.malformed:
+                return {}, f"strategy_readiness {work_item_id}: {validation.detail}"
+            status = validation.status
+            detail = validation.detail
             by_id[work_item_id] = {
                 "status": status,
                 "detail": detail or "Jesse strategy is discoverable and loadable",

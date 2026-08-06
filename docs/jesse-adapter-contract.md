@@ -39,9 +39,13 @@ duplicate valid execution.
 New or materially changed strategy source gets one separate bounded
 `prepare_strategies` Agent turn. That turn must use Jesse MCP and return one
 bounded `strategy_readiness` entry per work item (`ready`, `missing`, or
-`invalid`) plus IDs for entries marked ready. Direct execution proceeds only
-for discoverable, loadable strategies. Missing or invalid classes become
-terminal strategy evidence for analysis; source and patches are forbidden from
-ATS payloads.
+`invalid`) plus IDs for entries marked ready. `ready` entries also carry four
+bounded contract receipts: positive quantity/95% available-margin sizing,
+Jesse-shaped stop-loss/take-profit sequences, indicator signatures, and
+strategy callback signatures. The ATS-side validator rejects missing or failed
+receipts before any backtest session is created. Direct execution proceeds only
+for discoverable, loadable strategies with all receipts passing. Missing or
+invalid classes and contract failures become terminal strategy evidence for
+analysis; source and patches are forbidden from ATS payloads.
 Unsupported operations remain on the existing Agent path. Set
 `jesse_executor.enabled = false` for full fallback.
