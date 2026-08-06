@@ -93,6 +93,11 @@ ats-lab configure-hpo-validation-routes HPO-STUDY-ID \
 ats-lab supervisor --plan
 ```
 
+Route files may include `hpo`, `oos`, and `rolling` entries. An explicit
+`hpo` route is required to release a route-less optimizer; OOS and rolling
+routes release only their matching validation jobs and are never reused for
+optimizer execution.
+
 These commands render human tables by default. Add `--format json` only for
 machine-readable normalized/status data.
 
