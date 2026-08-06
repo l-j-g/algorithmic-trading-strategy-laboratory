@@ -64,19 +64,19 @@ class ExecutionDispositionPolicy:
             return ExecutionDisposition(
                 ExecutionRoute.OPERATOR, FailureKind.OPERATOR, code, detail,
             )
-        if (
-            code in INFRASTRUCTURE_FAILURE_CODES
-            or result.get("attempt_charged") is False
-        ):
-            return ExecutionDisposition(
-                ExecutionRoute.RETRY, FailureKind.INFRASTRUCTURE, code, detail,
-            )
         if result.get("outcome") == "blocked" or result.get("attempt_charged") is True:
             return ExecutionDisposition(
                 ExecutionRoute.ANALYSIS,
                 FailureKind.STRATEGY_OR_HARNESS,
                 code,
                 detail,
+            )
+        if (
+            code in INFRASTRUCTURE_FAILURE_CODES
+            or result.get("attempt_charged") is False
+        ):
+            return ExecutionDisposition(
+                ExecutionRoute.RETRY, FailureKind.INFRASTRUCTURE, code, detail,
             )
         return ExecutionDisposition(
             ExecutionRoute.RETRY, FailureKind.INFRASTRUCTURE, code, detail,

@@ -37,6 +37,17 @@ class ExecutionDispositionTests(unittest.TestCase):
         self.assertIs(disposition.route, ExecutionRoute.RETRY)
         self.assertIs(disposition.kind, FailureKind.INFRASTRUCTURE)
 
+    def test_blocked_infrastructure_session_routes_to_analysis(self) -> None:
+        disposition = self.policy.classify({
+            "outcome": "blocked",
+            "blocker_code": "jesse_start_recovery_failed",
+            "detail": "bounded session recovery exhausted",
+            "attempt_charged": True,
+        })
+
+        self.assertIs(disposition.route, ExecutionRoute.ANALYSIS)
+        self.assertIs(disposition.kind, FailureKind.STRATEGY_OR_HARNESS)
+
     def test_operator_requirement_remains_explicit(self) -> None:
         disposition = self.policy.classify({
             "outcome": "blocked",
