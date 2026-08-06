@@ -278,6 +278,7 @@ def _render_live_monitor(
         for name in ("ready", "running", "waiting_retry", "blocked", "finished")
     )
     timing = next(iter((snapshot.get("hpo") or {}).get("recent_timings", [])), None)
+    route_readiness = (snapshot.get("hpo") or {}).get("route_readiness") or {}
     stage = (
         f"{timing.get('stage') or '—'} {timing.get('state') or '—'} "
         f"({_duration(timing.get('duration_seconds'))})"
@@ -290,11 +291,20 @@ def _render_live_monitor(
         f"heartbeat={_age(runtime.get('heartbeat_at'))}", width,
     )
     queue_line = _fit_line(f"QUEUE  {queue}", width)
+    routes_line = _fit_line(
+        "ROUTES "
+        f"missing={route_readiness.get('missing_route_studies', 0)} "
+        f"hpo={route_readiness.get('missing_routes', {}).get('hpo', 0)} "
+        f"oos={route_readiness.get('missing_routes', {}).get('oos', 0)} "
+        f"rolling={route_readiness.get('missing_routes', {}).get('rolling', 0)}",
+        width,
+    )
     stage_line = _fit_line(f"STAGE  {stage}", width)
     lines = [
         _paint(title, "bold", color),
         _paint(status, _state_style(progress), color),
         _paint(queue_line, "cyan", color),
+        _paint(routes_line, "yellow" if route_readiness.get("missing_route_studies") else "cyan", color),
         stage_line,
     ]
     completions = snapshot.get("recent_completions", [])
