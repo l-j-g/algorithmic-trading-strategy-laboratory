@@ -7,10 +7,12 @@ from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import (
+    Evaluation,
     ExperimentSpec,
     ExperimentType,
     RunResult,
     RunStatus,
+    Verdict,
     WorkItem,
     WorkState,
 )
@@ -449,6 +451,46 @@ class BatchSupervisorTests(unittest.TestCase):
             self.assertEqual(work["state"], "scheduled")
             self.assertEqual(
                 json.loads(work["specification_json"])["operation"], "hpo",
+            )
+
+    def test_hpo_execution_uses_public_study_id_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            database.transition_work_item(
+                "JOB-1", WorkState.FINISHED,
+                allowed_from=(WorkState.READY,),
+            )
+            database.transition_work_item(
+                "JOB-2", WorkState.ARCHIVED,
+                allowed_from=(WorkState.READY,),
+            )
+            database.add_evaluation(Evaluation(
+                experiment_id="EXP-1", verdict=Verdict.HPO_CANDIDATE,
+                evaluator="test",
+            ))
+            study = database.schedule_hpo_candidate("EXP-1", "JOB-1")
+            supervisor = BatchSupervisor(
+                database,
+                SequenceDispatcher([
+                    DispatchResult(outcome="retry", detail="temporary"),
+                ]),
+                "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            result = supervisor.run_round()
+
+            self.assertEqual(result["status"], "execution_failed")
+            self.assertEqual(
+                database.hpo_study_detail(study["id"])["lifecycle_state"],
+                "hpo_running",
+            )
+            self.assertEqual(
+                database.rows(
+                    "SELECT state FROM work_items WHERE id=?",
+                    (study["hpo_work_item_id"],),
+                )[0]["state"],
+                "waiting_retry",
             )
 
     def test_failed_analysis_retries_once_then_persists_blocker(self) -> None:

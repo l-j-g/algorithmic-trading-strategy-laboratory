@@ -227,7 +227,9 @@ class BatchSupervisor:
                 and study.get("lifecycle_state") == "hpo_scheduled"
                 and hasattr(self.database, "start_hpo_study")
             ):
-                self.database.start_hpo_study(study["id"])
+                study_id = study.get("study_id") or study.get("id")
+                if study_id:
+                    self.database.start_hpo_study(str(study_id))
             request["resource_policy"] = self.resource_policy.to_dict()
             requests.append(request)
         execution_started = time.perf_counter()
@@ -304,7 +306,12 @@ class BatchSupervisor:
                         else None
                     )
                     if hpo_study:
-                        self.database.complete_hpo_study(hpo_study["id"])
+                        study_id = (
+                            hpo_study.get("study_id")
+                            or hpo_study.get("id")
+                        )
+                        if study_id:
+                            self.database.complete_hpo_study(str(study_id))
                         self.database.add_evaluation(Evaluation(
                             experiment_id=item["experiment_id"],
                             verdict=Verdict.PASS,
