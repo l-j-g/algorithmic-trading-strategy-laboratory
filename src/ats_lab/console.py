@@ -124,7 +124,7 @@ def monitor_snapshot(database: WorkflowDatabase) -> dict:
     # visible after its work item leaves ``active_queue``.
     completions = [
         item.to_dict()
-        for item in database.query_normalized_evidence(limit=12)
+        for item in database.query_normalized_evidence(limit=5000)
         if item.completed_at
     ]
     # Finished runs without metrics (for example a terminal contract failure)

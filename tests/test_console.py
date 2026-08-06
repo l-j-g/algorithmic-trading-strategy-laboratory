@@ -84,7 +84,7 @@ class TerminalConsoleTests(unittest.TestCase):
     def test_monitor_prioritizes_metric_results_over_empty_terminal_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
-            for index in range(9):
+            for index in range(20):
                 database.add_run(RunResult(
                     id=f"EMPTY-{index}", experiment_id="EXP-1", work_item_id="JOB-1",
                     session_id=f"EMPTY-SESSION-{index}", status=RunStatus.FINISHED,
