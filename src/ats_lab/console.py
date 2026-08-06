@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -18,6 +19,42 @@ _CANDIDATE_VERDICTS = {
 _SPLIT_PRIORITY = {
     "oos": 0, "holdout": 1, "rolling": 2, "train": 3, None: 4,
 }
+
+
+# Keep ANSI at the renderer edge.  Snapshot and table data stay plain, so
+# JSON/non-TTY callers never receive terminal control bytes.
+_ANSI_RESET = "\033[0m"
+_ANSI = {
+    "bold": "\033[1m",
+    "cyan": "\033[36m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "red": "\033[31m",
+    "muted": "\033[2m",
+}
+
+
+def _paint(value: object, style: str, enabled: bool) -> str:
+    text = str(value)
+    if not enabled or style not in _ANSI:
+        return text
+    return f"{_ANSI[style]}{text}{_ANSI_RESET}"
+
+
+def _color_enabled(output: TextIO) -> bool:
+    """Enable colour only for interactive terminals unless explicitly forced."""
+    return bool(getattr(output, "isatty", lambda: False)()) and not os.environ.get("NO_COLOR")
+
+
+def _state_style(value: object) -> str:
+    state = str(value or "").lower()
+    if state in {"finished", "healthy", "paper_trade_candidate", "hpo_candidate"}:
+        return "green"
+    if state in {"blocked", "reject", "error", "attention"}:
+        return "red"
+    if state in {"waiting_retry", "requirements_pending", "revise", "scheduled"}:
+        return "yellow"
+    return "cyan"
 
 
 def distinct_candidate_evidence(rows: Iterable[object]) -> list[object]:
@@ -124,6 +161,14 @@ def _cell(value: object, width: int) -> str:
     return text.ljust(width)
 
 
+def _fit_line(value: object, width: int) -> str:
+    """Clip one composed status line to terminal width."""
+    text = str(value)
+    if width <= 0 or len(text) <= width:
+        return text
+    return text[:max(1, width - 1)] + "…"
+
+
 def _metric(value: object, *, suffix: str = "", signed: bool = False) -> str:
     """Format one operator metric without leaking raw diagnostic payloads."""
     if value in (None, ""):
@@ -160,6 +205,7 @@ def _completion_rows(rows: Iterable[Mapping[str, object]]) -> list[dict[str, obj
 
 def render_completion_table(
     rows: Iterable[Mapping[str, object]], *, width: int | None = None,
+    color: bool = False,
 ) -> str:
     """Render recent finished jobs as a compact width-fitting table."""
     values = _completion_rows(rows)
@@ -196,12 +242,90 @@ def render_completion_table(
         ),
         width=width or shutil.get_terminal_size((120, 20)).columns,
     )
-    return "\n".join((table.render_header(), "  ".join(
+    rendered_rows = table.render_rows(values)
+    if color:
+        rendered_rows = [
+            _paint(line, _state_style(row.get("disposition")), True)
+            for line, row in zip(rendered_rows, values)
+        ]
+    return "\n".join((
+        _paint(table.render_header(), "bold", color),
+        "  ".join(
         "-" * column.preferred_width for column in table.fitted_columns()
-    ), *table.render_rows(values)))
+        ), *rendered_rows,
+    ))
 
 
-def render_monitor(snapshot: dict) -> str:
+def _render_live_monitor(
+    snapshot: dict, *, width: int | None = None, color: bool = False,
+) -> str:
+    """Render the low-noise view used by ``monitor --watch``.
+
+    It intentionally contains only changing operator signals: health, queue,
+    current stage, completed results, and active jobs.  Deep HPO/analyzer and
+    candidate diagnostics remain available through their dedicated commands.
+    """
+    control = snapshot["control"]
+    runtime = snapshot.get("supervisor") or {}
+    states = snapshot.get("work_states") or {}
+    progress = str(snapshot.get("progress_state") or (
+        "healthy" if snapshot.get("healthy") else "attention"
+    )).upper()
+    health = _paint(progress, _state_style(progress), color)
+    phase = _paint(runtime.get("phase") or "idle", _state_style(runtime.get("phase")), color)
+    desired = _paint(control.get("desired_state") or "running", _state_style(control.get("desired_state")), color)
+    queue = " ".join(
+        f"{name}={int(states.get(name, 0) or 0)}"
+        for name in ("ready", "running", "waiting_retry", "blocked", "finished")
+    )
+    timing = next(iter((snapshot.get("hpo") or {}).get("recent_timings", [])), None)
+    stage = (
+        f"{timing.get('stage') or '—'} {timing.get('state') or '—'} "
+        f"({_duration(timing.get('duration_seconds'))})"
+        if timing else "idle"
+    )
+    width = width or shutil.get_terminal_size((120, 20)).columns
+    lines = [
+        _fit_line(f"{_paint('ATS LAB LIVE', 'bold', color)}  {snapshot['checked_at']}", width),
+        _fit_line(f"STATUS {health}  control={desired}  stage={phase}  heartbeat={_age(runtime.get('heartbeat_at'))}", width),
+        _fit_line(_paint(f"QUEUE  {queue}", "cyan", color), width),
+        _fit_line(f"STAGE  {stage}", width),
+    ]
+    completions = snapshot.get("recent_completions", [])
+    if completions:
+        lines.extend([
+            "",
+            _paint(f"RECENT RESULTS  {len(completions)}", "bold", color),
+            render_completion_table(completions, width=width, color=color),
+        ])
+    lines.extend(["", _paint(f"LIVE  {len(snapshot.get('active_items', []))} jobs", "bold", color)])
+    active = snapshot.get("active_items") or []
+    if active:
+        active_table = FittedTable(
+            columns=(
+                TableColumn("state", "state", 15, 8, priority=50, required=True),
+                TableColumn("strategy", "strategy", 28, 12, priority=80, required=True, expand=True),
+                TableColumn("id", "job", 28, 10, priority=40),
+                TableColumn("blocker_code", "blocker", 20, 7, priority=20),
+            ),
+            width=width,
+        )
+        lines.append(_paint(active_table.render_header(), "bold", color))
+        lines.extend(
+            _paint(active_table.render_row(item), _state_style(item.get("state")), color)
+            for item in active
+        )
+    else:
+        lines.append(_paint("(none)", "muted", color))
+    return "\n".join(lines)
+
+
+def render_monitor(
+    snapshot: dict, *, width: int | None = None, color: bool = False,
+    compact: bool = False,
+) -> str:
+    if compact:
+        return _render_live_monitor(snapshot, width=width, color=color)
     control = snapshot["control"]
     runtime = snapshot.get("supervisor")
     synthesis = snapshot["synthesis"]
@@ -282,7 +406,9 @@ def render_monitor(snapshot: dict) -> str:
         f"NEXT   {snapshot['next_action']}",
         "",
         "COMPLETED",
-        render_completion_table(snapshot.get("recent_completions", [])),
+        render_completion_table(
+            snapshot.get("recent_completions", []), width=width, color=color,
+        ),
         "",
         "ACTIVE",
         (
@@ -323,10 +449,16 @@ def watch_monitor(
     output: TextIO = sys.stdout,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
+    color = _color_enabled(output)
     while True:
         if getattr(output, "isatty", lambda: False)():
             output.write("\033[2J\033[H")
-        output.write(render_monitor(monitor_snapshot(database)) + "\n")
+        output.write(render_monitor(
+            monitor_snapshot(database),
+            width=shutil.get_terminal_size((120, 20)).columns,
+            color=color,
+            compact=True,
+        ) + "\n")
         output.flush()
         sleep(interval)
 

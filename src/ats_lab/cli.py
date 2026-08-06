@@ -642,13 +642,17 @@ def main() -> int:
         if args.format == "json":
             emit(operator_status(database))
         else:
-            print(render_monitor(monitor_snapshot(database)))
+            print(render_monitor(
+                monitor_snapshot(database), color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"),
+            ))
     elif args.command == "monitor":
         if args.interval <= 0:
             parser.error("--interval must be positive")
         database.initialize()
         if not args.watch:
-            print(render_monitor(monitor_snapshot(database)))
+            print(render_monitor(
+                monitor_snapshot(database), color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"),
+            ))
         else:
             try:
                 watch_monitor(database, interval=args.interval)

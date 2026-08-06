@@ -66,6 +66,12 @@ For plain logs or non-interactive terminals, use:
 ats-lab monitor --watch
 ```
 
+In an interactive terminal this view clears and redraws a compact live panel:
+the status/stage/heartbeat banner, queue counters, active jobs, and recent
+completed results (`strategy`, `pair`, profit, trades, Sharpe, drawdown, and
+disposition).  Rows are colour-coded by state.  Set `NO_COLOR=1` for plain
+ANSI-free output; JSON output remains unchanged.
+
 ## Reusable architecture
 
 - `tui_types.py`: typed views, actions, roles, states, and immutable lines.

@@ -97,6 +97,36 @@ class TerminalConsoleTests(unittest.TestCase):
         self.assertIn("pair", lines[0])
         self.assertIn("…", rendered)
 
+    def test_live_monitor_is_compact_and_hides_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            rendered = render_monitor(
+                monitor_snapshot(database), width=72, compact=True,
+            )
+
+            self.assertIn("ATS LAB LIVE", rendered)
+            self.assertIn("STATUS", rendered)
+            self.assertIn("QUEUE", rendered)
+            self.assertIn("LIVE", rendered)
+            self.assertIn("TestStrategy", rendered)
+            self.assertNotIn("CANDIDATES", rendered)
+            self.assertNotIn("NEXT   ", rendered)
+            self.assertNotIn("ANALYZER", rendered)
+            self.assertNotIn("{", rendered)
+            self.assertTrue(all(len(line) <= 72 for line in rendered.splitlines()))
+
+    def test_live_monitor_color_is_opt_in_at_renderer_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            plain = render_monitor(monitor_snapshot(database), compact=True)
+            colored = render_monitor(
+                monitor_snapshot(database), compact=True, color=True,
+            )
+
+            self.assertNotIn("\033[", plain)
+            self.assertIn("\033[", colored)
+            self.assertIn("ATS LAB LIVE", colored)
+
     def test_console_pause_status_resume_and_quit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
