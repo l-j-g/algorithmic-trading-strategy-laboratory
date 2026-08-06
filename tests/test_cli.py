@@ -282,6 +282,16 @@ class CliEvidenceTests(unittest.TestCase):
         ))
         self.assertEqual(payload[0]["lifecycle_state"], "hpo_scheduled")
 
+    def test_hpo_doctor_shows_missing_routes_and_next_command(self) -> None:
+        human = self.invoke("hpo", "--doctor")
+        payload = json.loads(self.invoke("hpo", "--doctor", "--format", "json"))
+
+        self.assertIn("HPO ROUTES", human)
+        self.assertIn("missing", human)
+        self.assertIn("configure-hpo-validation-routes", human)
+        self.assertEqual(payload["next_action"], "configure_hpo_validation_routes")
+        self.assertEqual(payload["missing_routes"]["hpo"], 1)
+
     def test_hpo_timings_and_analyzer_are_supervisable(self) -> None:
         with (
             patch.object(

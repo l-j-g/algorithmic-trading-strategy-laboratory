@@ -392,6 +392,16 @@ def render_monitor(
             )
         ),
         (
+            "ROUTES "
+            + (
+                f"missing={hpo.get('route_readiness', {}).get('missing_route_studies', 0)} "
+                f"hpo={hpo.get('route_readiness', {}).get('missing_routes', {}).get('hpo', 0)} "
+                f"oos={hpo.get('route_readiness', {}).get('missing_routes', {}).get('oos', 0)} "
+                f"rolling={hpo.get('route_readiness', {}).get('missing_routes', {}).get('rolling', 0)}"
+                if hpo.get("route_readiness") else "unknown"
+            )
+        ),
+        (
             "ANALYZER "
             + (
                 f"{analyzer.get('state') or '—'} "
@@ -518,6 +528,56 @@ def render_hpo_studies(rows: Iterable[Mapping[str, object]]) -> str:
         ("disposition", "disposition", 18),
         ("next_action", "next action", 28),
     ))
+
+
+def render_hpo_readiness(snapshot: Mapping[str, object]) -> str:
+    """Render HPO route readiness without printing route values."""
+    readiness = snapshot.get("route_readiness") or {}
+    studies = readiness.get("studies") or []
+    if not studies:
+        return "HPO ROUTES\n(none)"
+    rows = []
+    for item in studies:
+        routes = item.get("routes") or {}
+        missing = item.get("missing") or []
+        rows.append({
+            "strategy": item.get("strategy") or item.get("study_id"),
+            "study_id": item.get("study_id"),
+            "lifecycle_state": item.get("lifecycle_state"),
+            "hpo": routes.get("hpo", 0),
+            "oos": routes.get("oos", 0),
+            "rolling": routes.get("rolling", 0),
+            "validation_jobs": item.get("validation_jobs", 0),
+            "missing": ",".join(str(value) for value in missing) or "—",
+            "next_action": item.get("next_action") or "—",
+        })
+    table = render_table(rows, (
+        ("lifecycle_state", "lifecycle", 18),
+        ("strategy", "strategy", 24),
+        ("study_id", "study", 24),
+        ("hpo", "hpo", 4),
+        ("oos", "oos", 4),
+        ("rolling", "roll", 4),
+        ("validation_jobs", "jobs", 5),
+        ("missing", "missing", 14),
+        ("next_action", "next action", 34),
+    ))
+    missing = readiness.get("missing_routes") or {}
+    jobs = readiness.get("validation_jobs") or {}
+    summary = (
+        f"missing studies={int(readiness.get('missing_route_studies', 0) or 0)}  "
+        f"hpo={int(missing.get('hpo', 0) or 0)}  "
+        f"oos={int(missing.get('oos', 0) or 0)}  "
+        f"rolling={int(missing.get('rolling', 0) or 0)}  "
+        f"validation_jobs={int(jobs.get('total', 0) or 0)}"
+    )
+    next_action = readiness.get("next_action")
+    command = (
+        "ats-lab configure-hpo-validation-routes STUDY_ID --file validation-routes.json"
+        if next_action == "configure_hpo_validation_routes"
+        else "ats-lab monitor --watch"
+    )
+    return "\n".join(("HPO ROUTES", table, summary, f"NEXT  {command}"))
 
 
 def render_stage_timings(rows: Iterable[Mapping[str, object]]) -> str:

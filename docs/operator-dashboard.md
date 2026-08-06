@@ -83,6 +83,7 @@ ats-lab status
 ats-lab evidence
 ats-lab candidates
 ats-lab hpo
+ats-lab hpo --doctor
 ats-lab hpo-detail HPO-STUDY-ID
 ats-lab hpo-route-plan HPO-STUDY-ID
 ats-lab analyzer
@@ -120,6 +121,12 @@ executions awaiting batch analysis, HPO lifecycle counts, analyzer state, recent
 stage timing, oldest unresolved claim, cohort state and one recommended next
 action. `supervisor --plan` adds active execution/synthesis policy. Both are
 read-only.
+
+`hpo --doctor` is the route gate view. It shows each study's lifecycle, configured
+route counts for HPO/OOS/rolling, queued validation-job count, missing splits, and
+the exact route-configuration command. It never prints route values. A study with
+missing routes is held in `requirements_pending`; the supervisor reports this
+state instead of silently waiting or spending execution retries.
 
 `requeue-hpo-analysis` is an explicit recovery control, not an automatic retry.
 It accepts only terminal jobs, records reason/operator in event log, resets

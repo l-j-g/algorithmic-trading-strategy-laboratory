@@ -28,6 +28,7 @@ from .console import (
     render_analyzer,
     render_control,
     render_evidence,
+    render_hpo_readiness,
     render_hpo_detail,
     render_hpo_studies,
     render_monitor,
@@ -336,6 +337,10 @@ def main() -> int:
     )
     hpo.add_argument("--strategy")
     hpo.add_argument("--limit", type=int, default=100)
+    hpo.add_argument(
+        "--doctor", action="store_true",
+        help="Show route readiness, validation jobs, and the next HPO action.",
+    )
     hpo.add_argument("--format", choices=("table", "json"), default="table")
     hpo_detail = sub.add_parser(
         "hpo-detail", help="Show selected trials, validation, and timings."
@@ -840,7 +845,13 @@ def main() -> int:
         }
         query = getattr(database, "hpo_studies", None)
         rows = query(filters=filters, limit=args.limit) if query else []
-        if args.format == "json":
+        if args.doctor:
+            readiness = operator_status(database)["hpo"]
+            if args.format == "json":
+                emit(readiness.get("route_readiness", {}))
+            else:
+                print(render_hpo_readiness(readiness))
+        elif args.format == "json":
             emit(rows)
         else:
             print(render_hpo_studies(rows))

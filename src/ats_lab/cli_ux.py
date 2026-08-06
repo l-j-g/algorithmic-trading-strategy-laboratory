@@ -32,6 +32,7 @@ RESEARCH MEMORY
 
 ANALYSIS
   ats-lab hpo                     Show optimization lifecycle
+  ats-lab hpo --doctor            Show route gates and next HPO action
   ats-lab analyzer                Show analyzer state
   ats-lab timings                 Show stage durations
   ats-lab dashboard               Open local read-only dashboard server
@@ -108,6 +109,19 @@ def next_guidance(
             "action": "Initialize advisory research memory",
             "reason": "no research memory has been initialized",
             "command": "ats-lab memory init",
+        }
+    hpo = snapshot.get("hpo") or {}
+    route_readiness = hpo.get("route_readiness") or {}
+    if route_readiness.get("missing_route_studies"):
+        missing = route_readiness.get("missing_routes") or {}
+        splits = ",".join(
+            split for split in ("hpo", "oos", "rolling")
+            if int(missing.get(split, 0) or 0)
+        )
+        return {
+            "action": "Configure HPO validation routes",
+            "reason": f"HPO studies are held until routes exist ({splits})",
+            "command": "ats-lab hpo --doctor",
         }
     waiting_retry = int(states.get("waiting_retry", 0) or 0)
     if (
