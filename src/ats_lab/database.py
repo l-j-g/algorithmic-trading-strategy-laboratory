@@ -7,6 +7,7 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict
+from datetime import date
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -57,6 +58,43 @@ def _duration_ms(started_at: str, finished_at: str) -> int:
     def parse(value: str) -> datetime:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     return max(0, int((parse(finished_at) - parse(started_at)).total_seconds() * 1000))
+
+
+def _validate_hpo_route_partitions(routes_by_split: Mapping[str, list[dict[str, str]]]) -> None:
+    """Reject malformed or train/validation-overlapping HPO route files."""
+    parsed: dict[str, list[tuple[dict[str, str], date, date]]] = {}
+    for split, routes in routes_by_split.items():
+        parsed[split] = []
+        for route in routes:
+            try:
+                start = date.fromisoformat(route["start_date"])
+                finish = date.fromisoformat(route["finish_date"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"route dates must use YYYY-MM-DD: {split}"
+                ) from error
+            if start >= finish:
+                raise ValueError(
+                    f"route start_date must precede finish_date: {split}"
+                )
+            parsed[split].append((route, start, finish))
+    training = parsed.get("hpo", [])
+    for train, train_start, train_finish in training:
+        for split in ("oos", "rolling"):
+            for validation, validation_start, validation_finish in parsed.get(split, []):
+                same_market = all(
+                    train.get(field) == validation.get(field)
+                    for field in ("exchange", "symbol", "timeframe")
+                )
+                overlaps = (
+                    train_start < validation_finish
+                    and validation_start < train_finish
+                )
+                if same_market and overlaps:
+                    raise ValueError(
+                        f"{split} route overlaps hpo training for "
+                        f"{validation.get('symbol')} {validation.get('timeframe')}"
+                    )
 
 
 class WorkflowDatabase:
@@ -1025,6 +1063,7 @@ class WorkflowDatabase:
             normalized[split] = routes
         if not normalized:
             raise ValueError("at least one validation split is required")
+        _validate_hpo_route_partitions(normalized)
         now = utc_now()
         updated = []
         with self.connect() as connection:

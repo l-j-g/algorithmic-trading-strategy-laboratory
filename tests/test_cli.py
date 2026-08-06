@@ -370,6 +370,20 @@ class CliEvidenceTests(unittest.TestCase):
         self.assertEqual(configure.call_args.args[0], "HPO-1")
         self.assertEqual(configure.call_args.kwargs["updated_by"], "test")
 
+    def test_hpo_route_plan_is_read_only_and_operator_friendly(self) -> None:
+        human = self.invoke("hpo-route-plan", self.study_id)
+        payload = json.loads(self.invoke(
+            "hpo-route-plan", self.study_id, "--format", "json",
+        ))
+
+        self.assertIn("HPO ROUTES", human)
+        self.assertIn("hpo", human)
+        self.assertIn("configure-hpo-validation-routes", human)
+        self.assertEqual(payload["study_id"], self.study_id)
+        self.assertEqual(
+            set(payload["required_file_shape"]), {"hpo", "oos", "rolling"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

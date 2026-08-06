@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .audit import build_audit, render_markdown
 from .database import WorkflowDatabase
+from .hpo_routes import HpoRoutePlanner, render_hpo_route_plan
 from .direct_mcp_executor import (
     DirectMcpDispatcher,
     McpClient,
@@ -343,6 +344,14 @@ def main() -> int:
     hpo_detail.add_argument(
         "--format", choices=("table", "json"), default="table"
     )
+    hpo_route_plan = sub.add_parser(
+        "hpo-route-plan",
+        help="Show required HPO/OOS/rolling route readiness without changing state.",
+    )
+    hpo_route_plan.add_argument("study_id")
+    hpo_route_plan.add_argument(
+        "--format", choices=("table", "json"), default="table",
+    )
     timings = sub.add_parser(
         "timings", help="Show lifecycle stage durations."
     )
@@ -477,7 +486,7 @@ def main() -> int:
         "console", "recover-claims", "resolve-blocker", "requeue-evaluation",
         "queue", "candidates", "evidence", "diagnostic-export",
         "diagnostic-hpo-trial",
-        "hpo", "hpo-detail", "timings", "telemetry", "analyzer",
+        "hpo", "hpo-detail", "hpo-route-plan", "timings", "telemetry", "analyzer",
         "requeue-hpo-analysis", "configure-hpo-validation-routes",
         "memory-status", "memory-sync", "memory", "memory-backfill",
         "home", "next", "doctor", "preflight", "recovery-audit", "tui", "loop",
@@ -844,6 +853,16 @@ def main() -> int:
             emit(detail)
         else:
             print(render_hpo_detail(detail))
+    elif args.command == "hpo-route-plan":
+        database.initialize()
+        try:
+            plan = HpoRoutePlanner(database).build(args.study_id)
+        except (KeyError, ValueError) as error:
+            parser.error(str(error))
+        if args.format == "json":
+            emit(plan.to_dict())
+        else:
+            print(render_hpo_route_plan(plan))
     elif args.command == "timings":
         if args.limit < 1 or args.limit > 5000:
             parser.error("--limit must be between 1 and 5000")

@@ -178,6 +178,37 @@ class HpoPersistenceTests(unittest.TestCase):
         )[0]
         self.assertEqual(len(json.loads(experiment["specification_json"])["routes"]), 1)
 
+    def test_route_configuration_rejects_training_validation_overlap(self) -> None:
+        study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
+        with self.assertRaisesRegex(ValueError, "overlaps hpo training"):
+            self.database.configure_hpo_validation_routes(
+                study["id"],
+                {
+                    "hpo": [{
+                        "exchange": "Binance Perpetual Futures",
+                        "symbol": "BTC-USDT", "timeframe": "1h",
+                        "start_date": "2024-01-01", "finish_date": "2025-01-01",
+                    }],
+                    "oos": [{
+                        "exchange": "Binance Perpetual Futures",
+                        "symbol": "BTC-USDT", "timeframe": "1h",
+                        "start_date": "2024-12-01", "finish_date": "2025-03-01",
+                    }],
+                },
+            )
+
+    def test_route_configuration_rejects_invalid_date_order(self) -> None:
+        study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
+        with self.assertRaisesRegex(ValueError, "start_date must precede"):
+            self.database.configure_hpo_validation_routes(
+                study["id"],
+                {"hpo": [{
+                    "exchange": "Binance Perpetual Futures",
+                    "symbol": "BTC-USDT", "timeframe": "1h",
+                    "start_date": "2025-01-01", "finish_date": "2024-01-01",
+                }]},
+            )
+
     def test_terminal_analysis_can_be_explicitly_requeued(self) -> None:
         study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
         self.database.complete_hpo_study(study["id"])

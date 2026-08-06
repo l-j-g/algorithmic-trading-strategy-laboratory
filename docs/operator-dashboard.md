@@ -84,6 +84,7 @@ ats-lab evidence
 ats-lab candidates
 ats-lab hpo
 ats-lab hpo-detail HPO-STUDY-ID
+ats-lab hpo-route-plan HPO-STUDY-ID
 ats-lab analyzer
 ats-lab timings
 ats-lab requeue-hpo-analysis HPO-ANALYSIS-JOB-ID \
@@ -97,6 +98,14 @@ Route files may include `hpo`, `oos`, and `rolling` entries. An explicit
 `hpo` route is required to release a route-less optimizer; OOS and rolling
 routes release only their matching validation jobs and are never reused for
 optimizer execution.
+
+`hpo-route-plan` is read-only. It shows the three required roles (optimizer
+training, unseen holdout, and unseen rolling validation), configured counts,
+known route shapes observed for the strategy, and the exact configuration
+command. Known route shapes are evidence only; the operator must choose dates
+from verified Jesse candle availability. Route configuration rejects malformed
+date ranges and overlapping HPO training versus OOS/rolling periods for the
+same exchange, symbol, and timeframe.
 
 These commands render human tables by default. Add `--format json` only for
 machine-readable normalized/status data.
