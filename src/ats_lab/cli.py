@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import shlex
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 from .audit import build_audit, render_markdown
 from .database import WorkflowDatabase
 from .hpo_routes import HpoRoutePlanner, render_hpo_route_plan
+from .hpo import import_optuna_study
 from .direct_mcp_executor import (
     DirectMcpDispatcher,
     McpClient,
@@ -394,6 +396,18 @@ def main() -> int:
     validation_routes.add_argument(
         "--operator", default=os.environ.get("USER", "operator")
     )
+    hpo_import = sub.add_parser(
+        "hpo-import",
+        help="Attach completed Optuna trials to a parked HPO study and resume analysis.",
+    )
+    hpo_import.add_argument("study_id", help="Existing ATS HPO study to resume.")
+    hpo_import.add_argument("--file", type=Path, required=True, help="Optuna SQLite database.")
+    hpo_import.add_argument("--study-name", required=True, help="Exact Optuna study name.")
+    hpo_import.add_argument(
+        "--classifications", type=Path,
+        help="Optional JSON object mapping trial numbers to classifications.",
+    )
+    hpo_import.add_argument("--format", choices=("table", "json"), default="table")
     claim = sub.add_parser("claim")
     claim.add_argument("--worker", default=os.environ.get("ATS_LAB_WORKER_ID", "ats-lab"))
     inventory_parser = sub.add_parser("inventory")
@@ -944,6 +958,46 @@ def main() -> int:
             ))
         except (KeyError, OSError, ValueError, json.JSONDecodeError) as error:
             parser.error(str(error))
+    elif args.command == "hpo-import":
+        database.initialize()
+        source_path = args.file if args.file.is_absolute() else repo / args.file
+        classifications = None
+        try:
+            if args.classifications:
+                classification_path = (
+                    args.classifications
+                    if args.classifications.is_absolute()
+                    else repo / args.classifications
+                )
+                raw = json.loads(classification_path.read_text())
+                if not isinstance(raw, dict):
+                    raise ValueError("classifications file must contain an object")
+                classifications = {}
+                for number, value in raw.items():
+                    if not isinstance(value, dict):
+                        raise ValueError(
+                            f"classification for trial {number} must be an object"
+                        )
+                    classifications[int(number)] = value
+            result = import_optuna_study(
+                database,
+                source_path,
+                study_name=args.study_name,
+                target_study_id=args.study_id,
+                classifications=classifications,
+            )
+        except (KeyError, OSError, ValueError, json.JSONDecodeError,
+                sqlite3.Error) as error:
+            parser.error(str(error))
+        if args.format == "json":
+            emit(result)
+        else:
+            print(
+                f"HPO IMPORTED  study={result['study_id']} "
+                f"trials={result['trials_imported']} "
+                f"evidence={result['normalized_evidence_rows']} "
+                f"job={result['analysis_job_id']} state={result['lifecycle_state']}"
+            )
     elif args.command == "claim":
         database.initialize()
         emit(database.claim_next(args.worker))

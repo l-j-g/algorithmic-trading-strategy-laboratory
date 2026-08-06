@@ -113,6 +113,21 @@ An HPO execution that returns no durable completed trials is parked with
 external-optimizer handoff: import the completed Optuna study before resuming
 analysis. The supervisor will not repeatedly retry an empty analyzer payload.
 
+Resume a parked study by attaching the exact external Optuna study. The import
+is read-only against the source SQLite file, validates its schema and study
+name, and refuses a source already attached to another ATS study:
+
+```bash
+ats-lab hpo-import HPO-STUDY-ID \
+  --file /path/to/optuna.sqlite3 \
+  --study-name ExactOptunaStudyName
+```
+
+Optional trial classifications can be supplied as a JSON object keyed by trial
+number. Completed trial rows are written before `hpo_trials_required` is
+cleared; the parked optimizer work item is marked finished and its existing
+analyzer job is returned to `pending`. No duplicate ATS study is created.
+
 These commands render human tables by default. Add `--format json` only for
 machine-readable normalized/status data.
 

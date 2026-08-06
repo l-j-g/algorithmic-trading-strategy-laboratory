@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
 from ats_lab.hpo import import_optuna_study, read_optuna_study
-from ats_lab.models import ExperimentSpec, ExperimentType, WorkItem, WorkState
+from ats_lab.models import ExperimentSpec, ExperimentType, WorkItem, WorkState, utc_now
 
 
 class OptunaImportTests(unittest.TestCase):
@@ -257,6 +257,78 @@ class OptunaImportTests(unittest.TestCase):
         }
         self.assertEqual(states, {"oos": "ready", "rolling": "requirements_pending"})
         self.assertEqual(len(validations), 2)
+
+    def test_import_resumes_existing_parked_study_without_duplicate(self) -> None:
+        now = utc_now()
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """INSERT INTO hpo_studies(
+                       id,study_name,strategy,parent_experiment_id,
+                       parent_work_item_id,hpo_experiment_id,hpo_work_item_id,
+                       lifecycle_state,objective_name,direction,created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?,'hpo_scheduled',?,?,?,?)""",
+                (
+                    "HPO-PARKED", "Trend_optuna", "Trend", "EXP-HPO",
+                    "JOB-HPO", "EXP-HPO", "JOB-HPO", "holdout_score",
+                    "maximize", now, now,
+                ),
+            )
+        parked = self.database.complete_hpo_study(
+            "HPO-PARKED", require_trial_evidence=True,
+        )
+        self.assertEqual(parked["state"], "waiting_retry")
+        self.assertEqual(
+            self.database.rows(
+                "SELECT blocker_code FROM work_items WHERE id='JOB-HPO'",
+            )[0]["blocker_code"],
+            "hpo_trials_required",
+        )
+
+        result = import_optuna_study(
+            self.database,
+            self.source,
+            study_name="Trend_optuna",
+            target_study_id="HPO-PARKED",
+            classifications={7: {"classification": "validation_candidate"}},
+        )
+
+        self.assertEqual(result["study_id"], "HPO-PARKED")
+        self.assertEqual(
+            self.database.hpo_studies({"id": "HPO-PARKED"})[0]["lifecycle_state"],
+            "hpo_analysis",
+        )
+        self.assertEqual(
+            self.database.rows(
+                "SELECT COUNT(*) AS count FROM hpo_studies",
+            )[0]["count"],
+            1,
+        )
+        job = self.database.rows(
+            "SELECT state,last_error FROM hpo_analysis_jobs WHERE id=?",
+            (parked["id"],),
+        )[0]
+        self.assertEqual(job["state"], "pending")
+        self.assertIsNone(job["last_error"])
+        work = self.database.rows(
+            "SELECT state,blocker_code,specification_json FROM work_items WHERE id='JOB-HPO'",
+        )[0]
+        self.assertEqual(work["state"], "finished")
+        self.assertIsNone(work["blocker_code"])
+        self.assertEqual(json.loads(work["specification_json"])["readiness"]["status"], "ready")
+        self.assertEqual(
+            self.database.rows(
+                """SELECT COUNT(*) AS count FROM events
+                   WHERE aggregate_id='HPO-PARKED' AND event_type='hpo_trials_imported'""",
+            )[0]["count"],
+            1,
+        )
+
+    def test_read_rejects_partial_optuna_schema(self) -> None:
+        partial = Path(self.temp.name) / "partial.sqlite3"
+        sqlite3.connect(partial).close()
+        with self.assertRaisesRegex(ValueError, "missing table studies"):
+            read_optuna_study(partial, study_name="Trend_optuna")
 
 
 if __name__ == "__main__":

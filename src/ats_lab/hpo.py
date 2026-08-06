@@ -69,6 +69,8 @@ EMA_V7_CLASSIFICATIONS = {
     },
 }
 
+_OPTUNA_STATES = frozenset({"RUNNING", "COMPLETE", "PRUNED", "FAIL", "WAITING"})
+
 
 def read_optuna_study(
     source_path: Path,
@@ -83,6 +85,7 @@ def read_optuna_study(
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
     try:
+        _validate_optuna_schema(connection)
         study = connection.execute(
             "SELECT study_id,study_name FROM studies WHERE study_name=?",
             (study_name,),
@@ -98,6 +101,8 @@ def read_optuna_study(
             str(direction_row["direction"]).lower()
             if direction_row else "maximize"
         )
+        if direction not in {"maximize", "minimize"}:
+            raise ValueError(f"unsupported Optuna direction: {direction}")
         trials = []
         for row in connection.execute(
             """SELECT t.trial_id,t.number,t.state,t.datetime_start,
@@ -120,9 +125,12 @@ def read_optuna_study(
                 params[parameter["param_name"]] = _decode_parameter(
                     parameter["param_value"], distribution,
                 )
+            state = str(row["state"]).upper()
+            if state not in _OPTUNA_STATES:
+                raise ValueError(f"unsupported Optuna trial state: {state}")
             trials.append(OptunaTrial(
                 number=int(row["number"]),
-                state=str(row["state"]),
+                state=state,
                 objective_value=_finite(row["objective"]),
                 started_at=_timestamp(row["datetime_start"]),
                 completed_at=_timestamp(row["datetime_complete"]),
@@ -145,24 +153,64 @@ def read_optuna_study(
         connection.close()
 
 
+def _validate_optuna_schema(connection: sqlite3.Connection) -> None:
+    """Reject non-Optuna or partially copied SQLite files before importing."""
+    required = {
+        "studies": {"study_id", "study_name"},
+        "study_directions": {"study_id", "direction", "objective"},
+        "trials": {
+            "trial_id", "number", "study_id", "state",
+            "datetime_start", "datetime_complete",
+        },
+        "trial_values": {"trial_id", "objective", "value"},
+        "trial_params": {
+            "trial_id", "param_name", "param_value", "distribution_json",
+        },
+        "trial_user_attributes": {"trial_id", "key", "value_json"},
+        "trial_system_attributes": {"trial_id", "key", "value_json"},
+    }
+    for table, columns in required.items():
+        try:
+            actual = {
+                str(row[1])
+                for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+        except sqlite3.DatabaseError as error:
+            raise ValueError(f"invalid Optuna database table: {table}") from error
+        if not actual:
+            raise ValueError(f"invalid Optuna database: missing table {table}")
+        missing = sorted(columns - actual)
+        if missing:
+            raise ValueError(
+                f"invalid Optuna database: {table} missing {', '.join(missing)}"
+            )
+
+
 def import_optuna_study(
     database: WorkflowDatabase,
     source_path: Path,
     *,
     study_name: str,
-    parent_experiment_id: str,
-    parent_work_item_id: str,
-    strategy: str,
-    objective_name: str = "holdout_score",
+    parent_experiment_id: str | None = None,
+    parent_work_item_id: str | None = None,
+    strategy: str | None = None,
+    objective_name: str | None = None,
     classifications: Mapping[int, Mapping[str, Any]] | None = None,
+    target_study_id: str | None = None,
 ) -> dict[str, Any]:
-    """Import Optuna state, normalized trial evidence, and analyzer handoff."""
+    """Import Optuna state and queue analysis.
+
+    ``target_study_id`` attaches rows to an already scheduled/parked ATS HPO
+    study. This is the safe resume path for an external optimizer: the target
+    identity and source identity are checked before any durable write. Without
+    a target, the historical source-hash study behavior is retained.
+    """
     snapshot = read_optuna_study(source_path, study_name=study_name)
     source_path = source_path.resolve()
     stable = hashlib.sha256(
         f"{source_path}:{snapshot.source_study_id}".encode()
     ).hexdigest()[:12].upper()
-    study_id = f"OPTUNA-{stable}"
+    study_id = target_study_id or f"OPTUNA-{stable}"
     classifications = dict(
         classifications
         if classifications is not None
@@ -184,6 +232,45 @@ def import_optuna_study(
     evidence_rows = 0
     with database.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        target = connection.execute(
+            "SELECT * FROM hpo_studies WHERE id=?", (study_id,),
+        ).fetchone() if target_study_id else None
+        if target_study_id and target is None:
+            raise KeyError(f"unknown target HPO study: {target_study_id}")
+        if target is not None:
+            if target["lifecycle_state"] not in {
+                "hpo_scheduled", "hpo_running", "hpo_analysis",
+            }:
+                raise ValueError(
+                    "target HPO study is not awaiting optimizer import: "
+                    f"{target['lifecycle_state']}"
+                )
+            if target["study_name"] != snapshot.name:
+                raise ValueError(
+                    "Optuna study name does not match target HPO study: "
+                    f"{snapshot.name!r} != {target['study_name']!r}"
+                )
+            existing_source = connection.execute(
+                """SELECT id FROM hpo_studies
+                   WHERE source_database_path=? AND source_study_id=? AND id<>?""",
+                (str(source_path), snapshot.source_study_id, study_id),
+            ).fetchone()
+            if existing_source is not None:
+                raise ValueError(
+                    "Optuna source is already attached to another HPO study: "
+                    f"{existing_source['id']}"
+                )
+            parent_experiment_id = target["parent_experiment_id"]
+            parent_work_item_id = target["parent_work_item_id"]
+            strategy = target["strategy"] or strategy
+            objective_name = target["objective_name"] or objective_name
+        objective_name = objective_name or "holdout_score"
+        if not parent_experiment_id or not parent_work_item_id:
+            raise ValueError(
+                "parent experiment/work item required when no target HPO study"
+            )
+        if not target_study_id and not strategy:
+            raise ValueError("strategy required when no target HPO study")
         parent = connection.execute(
             """SELECT e.id,e.specification_json,w.id AS work_item_id
                FROM experiments e JOIN work_items w
@@ -202,6 +289,14 @@ def import_optuna_study(
             and isinstance(parent_routes[0], dict)
             else {}
         )
+        if target is None:
+            hpo_experiment_id = parent_experiment_id
+            hpo_work_item_id = parent_work_item_id
+            created_at = now
+        else:
+            hpo_experiment_id = target["hpo_experiment_id"]
+            hpo_work_item_id = target["hpo_work_item_id"]
+            created_at = target["created_at"]
         connection.execute(
             """INSERT INTO hpo_studies(
                    id,study_name,strategy,parent_experiment_id,
@@ -226,12 +321,12 @@ def import_optuna_study(
             (
                 study_id, snapshot.name, strategy,
                 parent_experiment_id, parent_work_item_id,
-                parent_experiment_id, parent_work_item_id,
+                hpo_experiment_id, hpo_work_item_id,
                 objective_name, snapshot.direction,
                 str(source_path), snapshot.source_study_id,
                 len(snapshot.trials),
                 sum(trial.state == "COMPLETE" for trial in snapshot.trials),
-                started_at, completed_at, now, now,
+                started_at, completed_at, created_at, now,
             ),
         )
         connection.execute(
@@ -324,10 +419,13 @@ def import_optuna_study(
         _persist_candidate_defaults_and_ranges(
             connection, study_id, snapshot, classifications, now,
         )
+        completed_trials = sum(
+            trial.state.upper() == "COMPLETE" for trial in snapshot.trials
+        )
         job = connection.execute(
             """SELECT id FROM hpo_analysis_jobs
                WHERE study_id=? AND state IN (
-                 'pending','running','waiting_retry','abandoned'
+                 'pending','running','waiting_retry','abandoned','terminal'
                ) ORDER BY created_at DESC LIMIT 1""",
             (study_id,),
         ).fetchone()
@@ -343,6 +441,50 @@ def import_optuna_study(
             )
         else:
             job_id = job["id"]
+            if completed_trials:
+                connection.execute(
+                    """UPDATE hpo_analysis_jobs SET state='pending',
+                       last_error=NULL,retry_after=NULL,claimed_by=NULL,
+                       claimed_at=NULL,completed_at=NULL,updated_at=?
+                       WHERE id=? AND state IN (
+                         'waiting_retry','abandoned','terminal'
+                       )""",
+                    (now, job_id),
+                )
+        if completed_trials:
+            # Only a durable COMPLETE trial clears the parked external
+            # optimizer handoff. Keep ordinary scheduled jobs from running
+            # the optimizer a second time: analysis is the next stage.
+            work_item_id = hpo_work_item_id
+            if work_item_id:
+                work = connection.execute(
+                    "SELECT specification_json,blocker_code,state FROM work_items WHERE id=?",
+                    (work_item_id,),
+                ).fetchone()
+                if work is not None and work["blocker_code"] == "hpo_trials_required":
+                    specification = _decode_json(work["specification_json"])
+                    specification["readiness"] = {"status": "ready", "missing": []}
+                    connection.execute(
+                        """UPDATE work_items SET specification_json=?,state='finished',
+                           blocker_code=NULL,blocker_detail=NULL,updated_at=?
+                           WHERE id=? AND blocker_code='hpo_trials_required'""",
+                        (json.dumps(specification, sort_keys=True), now, work_item_id),
+                    )
+                    connection.execute(
+                        """INSERT INTO events(
+                               aggregate_type,aggregate_id,event_type,
+                               payload_json,occurred_at
+                           ) VALUES ('hpo_study',?,'hpo_trials_imported',?,?)""",
+                        (
+                            study_id,
+                            json.dumps({
+                                "trials_imported": imported,
+                                "completed_trials": completed_trials,
+                                "analysis_job_id": job_id,
+                            }, sort_keys=True),
+                            now,
+                        ),
+                    )
     return {
         "study_id": study_id,
         "source_study_id": snapshot.source_study_id,

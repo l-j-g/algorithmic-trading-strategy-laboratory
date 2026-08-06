@@ -33,6 +33,7 @@ RESEARCH MEMORY
 ANALYSIS
   ats-lab hpo                     Show optimization lifecycle
   ats-lab hpo --doctor            Show route gates and next HPO action
+  ats-lab hpo-import STUDY ...    Attach external Optuna trials and resume
   ats-lab analyzer                Show analyzer state
   ats-lab timings                 Show stage durations
   ats-lab dashboard               Open local read-only dashboard server
