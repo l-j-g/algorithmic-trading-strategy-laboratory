@@ -60,6 +60,13 @@ Analysis chooses `revise` or `reject`; neither remains an active queue blocker.
 Only transient infrastructure retries and explicit operator requirements block
 progression.
 
+Promotion has one additional deterministic boundary: an explicit
+`paper_trade_candidate` (or a validation-stage `pass`) must include positive
+OOS/rolling evidence and an explicit passing cost-stress result. Missing
+validation is `inconclusive`; failed validation is `reject`. Baseline and HPO
+evidence remain eligible for analysis and optimization, but cannot be mistaken
+for paper-trade readiness.
+
 ## Storage
 
 SQLite supplies transactions, foreign keys, idempotent imports and queryable

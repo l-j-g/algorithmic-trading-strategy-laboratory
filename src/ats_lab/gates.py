@@ -29,6 +29,83 @@ class GateDecision:
         return "Deterministic gates: " + "; ".join(parts) + "."
 
 
+@dataclass(frozen=True)
+class PromotionDecision:
+    """Evidence gate for claims that a strategy is ready for paper review.
+
+    Baseline and optimization evidence can remain useful for analysis without
+    being treated as deployable research.  This separate decision keeps those
+    stages permissive while requiring validation evidence for promotion.
+    """
+
+    allowed: bool
+    failed: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+
+    @property
+    def finding(self) -> str:
+        parts = []
+        if self.failed:
+            parts.append("failed=" + ",".join(self.failed))
+        if self.missing:
+            parts.append("missing=" + ",".join(self.missing))
+        if not parts:
+            parts.append("validation and cost-stress evidence passed")
+        return "Promotion evidence: " + "; ".join(parts) + "."
+
+
+def evaluate_promotion(
+    evidence: Iterable[NormalizedEvidence],
+    *,
+    policy: ResourcePolicy,
+) -> PromotionDecision:
+    """Require OOS/rolling and explicit cost-stress evidence for promotion.
+
+    This is intentionally separate from :func:`evaluate_gates`: a profitable
+    baseline remains valid research evidence and should still reach analysis,
+    while a paper-trade claim must survive an unseen window and fee stress.
+    """
+    rows = tuple(evidence)
+    validation = tuple(
+        row for row in rows
+        if row.evidence_split in {"oos", "rolling"}
+        or row.lifecycle_stage == "out_of_sample"
+    )
+    failed: list[str] = []
+    missing: list[str] = []
+    if not validation:
+        missing.append("oos_or_rolling")
+    else:
+        quality = evaluate_gates(validation, policy=policy)
+        failed.extend(quality.failed)
+        missing.extend(
+            name for name in quality.missing
+            if name != "fees_cost_sensitivity"
+        )
+
+    cost_rows = tuple(
+        row for row in rows
+        if row.lifecycle_stage == "cost_sensitivity"
+        or row.cost_stress_status is not None
+    )
+    if not cost_rows:
+        missing.append("fees_cost_sensitivity")
+    elif any(row.cost_stress_status == "fail" for row in cost_rows):
+        failed.append("fees_cost_sensitivity")
+    elif any(row.cost_stress_status is None for row in cost_rows):
+        missing.append("fees_cost_sensitivity")
+
+    # Stable order makes findings and tests deterministic when rows arrive in
+    # different route order.
+    failed = list(dict.fromkeys(failed))
+    missing = list(dict.fromkeys(missing))
+    return PromotionDecision(
+        allowed=not failed and not missing,
+        failed=tuple(failed),
+        missing=tuple(missing),
+    )
+
+
 def evaluate_gates(
     evidence: Iterable[NormalizedEvidence],
     *,

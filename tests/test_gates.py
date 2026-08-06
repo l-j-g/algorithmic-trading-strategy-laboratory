@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from ats_lab.evidence import EvidenceSplit, NormalizedEvidence
-from ats_lab.gates import evaluate_gates
+from ats_lab.evidence import CostStressStatus, EvidenceSplit, NormalizedEvidence
+from ats_lab.gates import evaluate_gates, evaluate_promotion
 from ats_lab.models import Verdict
 from ats_lab.resources import ResourcePolicy
 
@@ -68,6 +68,44 @@ class GateTests(unittest.TestCase):
         )
         self.assertEqual(decision.holdout_degradation_percentage, 75.0)
         self.assertIn("train_holdout_degradation", decision.failed)
+
+    def test_promotion_requires_unseen_window_and_cost_stress(self) -> None:
+        decision = evaluate_promotion(
+            [self.row()], policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.missing,
+            ("oos_or_rolling", "fees_cost_sensitivity"),
+        )
+
+    def test_promotion_passes_valid_oos_and_cost_stress(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(
+                    evidence_split=EvidenceSplit.OOS,
+                    cost_stress_status=CostStressStatus.PASS,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.failed, ())
+        self.assertEqual(decision.missing, ())
+
+    def test_promotion_rejects_failed_oos_quality(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(
+                    evidence_split=EvidenceSplit.ROLLING,
+                    net_profit_percentage=-1,
+                    cost_stress_status=CostStressStatus.PASS,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("net_profit", decision.failed)
 
 
 if __name__ == "__main__":

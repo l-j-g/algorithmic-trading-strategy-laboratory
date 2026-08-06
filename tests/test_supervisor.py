@@ -454,6 +454,31 @@ class BatchSupervisorTests(unittest.TestCase):
                 json.loads(work["specification_json"])["operation"], "hpo",
             )
 
+    def test_paper_trade_claim_without_validation_is_inconclusive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            analysis = self.analysis_result()
+            analysis.payload["evaluations"][0]["verdict"] = (
+                "paper_trade_candidate"
+            )
+            dispatcher = SequenceDispatcher([
+                self.execution_result(), analysis,
+            ])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            self.assertEqual(supervisor.run_round()["status"], "batch_complete")
+
+            evaluation = database.rows(
+                """SELECT verdict,summary,next_step FROM evaluations
+                   WHERE experiment_id='EXP-1'"""
+            )[0]
+            self.assertEqual(evaluation["verdict"], "inconclusive")
+            self.assertIn("oos_or_rolling", evaluation["summary"])
+            self.assertIn("cost-stress", evaluation["next_step"])
+
     def test_hpo_execution_uses_public_study_id_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)

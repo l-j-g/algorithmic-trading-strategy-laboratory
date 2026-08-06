@@ -22,7 +22,7 @@ from .execution_disposition import (
     ExecutionRoute,
     TerminalFailureRecovery,
 )
-from .gates import GateDecision, evaluate_gates
+from .gates import GateDecision, evaluate_gates, evaluate_promotion
 from .models import (
     Evaluation,
     RouteSpec,
@@ -977,6 +977,39 @@ class BatchSupervisor:
                 evaluation = replace(
                     evaluation, verdict=Verdict.REJECT,
                 )
+            # Keep baseline/significance PASS semantics unchanged.  Only an
+            # explicit paper-trade claim, or PASS backed by validation-stage
+            # evidence, is a promotion claim and must clear unseen-window and
+            # fee-stress evidence gates.
+            promotion_stage = any(
+                item.evidence_split in {"oos", "rolling"}
+                or item.lifecycle_stage in {"out_of_sample", "paper_trade"}
+                for item in normalized
+            )
+            promotion_claim = (
+                evaluation.verdict is Verdict.PAPER_TRADE_CANDIDATE
+                or (evaluation.verdict is Verdict.PASS and promotion_stage)
+            )
+            if not execution_failed and promotion_claim:
+                promotion = evaluate_promotion(
+                    normalized, policy=self.resource_policy,
+                )
+                if not promotion.allowed:
+                    evaluation = replace(
+                        evaluation,
+                        verdict=(
+                            Verdict.REJECT
+                            if promotion.failed else Verdict.INCONCLUSIVE
+                        ),
+                        summary=(
+                            f"{evaluation.summary.rstrip()} "
+                            f"{promotion.finding}"
+                        ).strip(),
+                        next_step=(
+                            "Complete OOS/rolling validation and cost-stress "
+                            "checks before paper-trade review."
+                        ),
+                    )
             operation = self._operation(run_row)
             if (
                 not execution_failed
