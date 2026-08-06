@@ -579,6 +579,72 @@ class BatchSupervisorTests(unittest.TestCase):
                 "waiting_retry",
             )
 
+    def test_hpo_execution_without_trials_does_not_loop_analyzer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1", strategy_name="Strategy1",
+                routes=(RouteSpec(
+                    "Binance Perpetual Futures", "BTC-USDT", "1h",
+                    "2025-01-01", "2025-06-01",
+                ),),
+            ))
+            database.transition_work_item(
+                "JOB-1", WorkState.FINISHED,
+                allowed_from=(WorkState.READY,),
+            )
+            database.transition_work_item(
+                "JOB-2", WorkState.ARCHIVED,
+                allowed_from=(WorkState.READY,),
+            )
+            database.add_evaluation(Evaluation(
+                experiment_id="EXP-1", verdict=Verdict.HPO_CANDIDATE,
+                evaluator="test",
+            ))
+            study = database.schedule_hpo_candidate("EXP-1", "JOB-1")
+            database.configure_hpo_validation_routes(study["id"], {
+                "hpo": [{
+                    "exchange": "Binance Perpetual Futures",
+                    "symbol": "BTC-USDT", "timeframe": "1h",
+                    "start_date": "2024-01-01", "finish_date": "2025-01-01",
+                }],
+            })
+            execution = DispatchResult(outcome="finished", payload={
+                "outcome": "finished",
+                "results": [{
+                    "work_item_id": study["hpo_work_item_id"],
+                    "outcome": "finished",
+                    "evidence": {"run": {
+                        "session_id": "hpo-session",
+                        "status": "finished",
+                        "metrics": {"net_profit_percentage": 1.0},
+                        "raw_result": {
+                            "session_id": "hpo-session",
+                            "status": "finished",
+                            "metrics": {"net_profit_percentage": 1.0},
+                        },
+                    }},
+                }],
+            })
+            dispatcher = SequenceDispatcher([execution])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            first = supervisor.run_round()
+
+            self.assertEqual(first["status"], "batch_terminal")
+            self.assertEqual(
+                [request["task_type"] for request in dispatcher.requests],
+                ["execute_batch"],
+            )
+            self.assertIsNone(database.claim_hpo_analysis("analyzer"))
+            detail = database.hpo_study_detail(study["id"])
+            self.assertEqual(detail["lifecycle_state"], "hpo_analysis")
+            self.assertEqual(detail["analysis_job"]["state"], "waiting_retry")
+            self.assertIn("hpo_trials_required", detail["analysis_job"]["last_error"])
+
     def test_failed_analysis_retries_once_then_persists_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)

@@ -447,6 +447,12 @@ status, analyzer state, stage durations, and normalized run/session evidence
 links. It never prints raw optimizer JSON. Use `diagnostic-hpo-trial` only when
 investigating optimizer internals.
 
+Scheduled HPO execution does not invent trial rows. If the optimizer returns a
+completed run without durable trial/import evidence, ATS Lab parks analysis with
+`hpo_trials_required` and readiness `requirements_pending`; it will not spend
+analyzer retries on an empty payload. Import the completed Optuna study through
+the HPO import workflow, then resume the resulting `hpo_analysis` job.
+
 Validation jobs keep trial parameters out of normal UI and analyzer payloads.
 Executor hydrates selected parameters into execution-only context. Jobs remain
 `requirements_pending` when canonical validation routes are absent; worker will

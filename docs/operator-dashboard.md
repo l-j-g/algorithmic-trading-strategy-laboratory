@@ -107,6 +107,11 @@ from verified Jesse candle availability. Route configuration rejects malformed
 date ranges and overlapping HPO training versus OOS/rolling periods for the
 same exchange, symbol, and timeframe.
 
+An HPO execution that returns no durable completed trials is parked with
+`hpo_trials_required` and readiness `requirements_pending`. This is an explicit
+external-optimizer handoff: import the completed Optuna study before resuming
+analysis. The supervisor will not repeatedly retry an empty analyzer payload.
+
 These commands render human tables by default. Add `--format json` only for
 machine-readable normalized/status data.
 

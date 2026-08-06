@@ -115,6 +115,36 @@ class HpoPersistenceTests(unittest.TestCase):
         self.assertEqual(work["state"], "ready")
         self.assertEqual(work["blocker_code"], "requirements_pending")
 
+    def test_empty_scheduled_hpo_is_parked_until_trials_are_imported(self) -> None:
+        study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
+        self.database.start_hpo_study(study["id"])
+
+        job = self.database.complete_hpo_study(
+            study["id"], require_trial_evidence=True,
+        )
+
+        self.assertEqual(job["state"], "waiting_retry")
+        self.assertIn("hpo_trials_required", job["last_error"])
+        self.assertIsNone(self.database.claim_hpo_analysis("analyzer"))
+        work = self.database.rows(
+            """SELECT state,blocker_code,blocker_detail,specification_json
+               FROM work_items WHERE id=?""",
+            (study["hpo_work_item_id"],),
+        )[0]
+        self.assertEqual(work["state"], "scheduled")
+        self.assertEqual(work["blocker_code"], "hpo_trials_required")
+        self.assertIn("Import completed optimizer trials", work["blocker_detail"])
+        self.assertEqual(
+            json.loads(work["specification_json"])["readiness"],
+            {"missing": ["hpo_trials"], "status": "requirements_pending"},
+        )
+        event = self.database.rows(
+            """SELECT payload_json FROM events
+               WHERE aggregate_id=? AND event_type='hpo_trials_required'""",
+            (study["id"],),
+        )[0]
+        self.assertIn("Import completed optimizer trials", event["payload_json"])
+
     def test_configured_routes_release_hpo_before_validation_jobs_exist(self) -> None:
         study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
         self.database.promote_scheduled_runnable(1)

@@ -1333,8 +1333,16 @@ class WorkflowDatabase:
         study_id: str,
         *,
         completed_at: str | None = None,
+        require_trial_evidence: bool = False,
     ) -> dict:
-        """Move a finished study into durable analyzer queue atomically."""
+        """Move a finished study into durable analyzer queue atomically.
+
+        Scheduled optimizer runs are expected to persist/import trial rows
+        before analysis.  When ``require_trial_evidence`` is enabled and the
+        run produced no completed trials, park the analyzer handoff instead
+        of repeatedly claiming an empty payload.  An external optimizer
+        import can later reopen the parked job after durable trials exist.
+        """
         now = completed_at or utc_now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1358,6 +1366,9 @@ class WorkflowDatabase:
                     now, now, study_id,
                 ),
             )
+            missing_trials = require_trial_evidence and not int(
+                counts["complete"] or 0
+            )
             job = connection.execute(
                 """SELECT * FROM hpo_analysis_jobs
                    WHERE study_id=? AND state IN (
@@ -1369,13 +1380,73 @@ class WorkflowDatabase:
                 job_id = f"HPO-ANALYSIS-{uuid.uuid4().hex[:12].upper()}"
                 connection.execute(
                     """INSERT INTO hpo_analysis_jobs(
-                           id,study_id,state,created_at,updated_at
-                       ) VALUES (?,?,'pending',?,?)""",
-                    (job_id, study_id, now, now),
+                           id,study_id,state,last_error,created_at,updated_at
+                       ) VALUES (?,?,?,?,?,?)""",
+                    (
+                        job_id, study_id,
+                        "waiting_retry" if missing_trials else "pending",
+                        (
+                            "hpo_trials_required: import completed optimizer "
+                            "trials before HPO analysis"
+                            if missing_trials else None
+                        ),
+                        now, now,
+                    ),
                 )
                 job = connection.execute(
                     "SELECT * FROM hpo_analysis_jobs WHERE id=?", (job_id,),
                 ).fetchone()
+            elif missing_trials:
+                connection.execute(
+                    """UPDATE hpo_analysis_jobs SET state='waiting_retry',
+                       last_error=?,retry_after=NULL,claimed_by=NULL,
+                       claimed_at=NULL,updated_at=? WHERE id=?""",
+                    (
+                        "hpo_trials_required: import completed optimizer "
+                        "trials before HPO analysis",
+                        now, job["id"],
+                    ),
+                )
+                job = connection.execute(
+                    "SELECT * FROM hpo_analysis_jobs WHERE id=?", (job["id"],),
+                ).fetchone()
+            if missing_trials:
+                work_item_id = study["hpo_work_item_id"]
+                if work_item_id:
+                    work = connection.execute(
+                        "SELECT specification_json FROM work_items WHERE id=?",
+                        (work_item_id,),
+                    ).fetchone()
+                    specification = _json_object(
+                        work["specification_json"] if work else "{}"
+                    )
+                    specification["readiness"] = {
+                        "status": "requirements_pending",
+                        "missing": ["hpo_trials"],
+                    }
+                    connection.execute(
+                        """UPDATE work_items SET specification_json=?,
+                           blocker_code='hpo_trials_required',
+                           blocker_detail='Import completed optimizer trials before HPO analysis',
+                           updated_at=? WHERE id=?""",
+                        (json.dumps(specification, sort_keys=True), now, work_item_id),
+                    )
+                    connection.execute(
+                        """INSERT INTO events(
+                               aggregate_type,aggregate_id,event_type,
+                               payload_json,occurred_at
+                           ) VALUES ('hpo_study',?,'hpo_trials_required',?,?)""",
+                        (
+                            study_id,
+                            json.dumps({
+                                "next_action": (
+                                    "Import completed optimizer trials, then "
+                                    "resume HPO analysis."
+                                ),
+                            }, sort_keys=True),
+                            now,
+                        ),
+                    )
             return dict(job)
 
     def claim_hpo_analysis(

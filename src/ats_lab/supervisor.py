@@ -325,7 +325,13 @@ class BatchSupervisor:
                             or hpo_study.get("id")
                         )
                         if study_id:
-                            self.database.complete_hpo_study(str(study_id))
+                            # A scheduled HPO run must persist completed
+                            # optimizer trials before analysis can claim it.
+                            # Park an empty handoff for explicit import instead
+                            # of burning analyzer retries on an empty payload.
+                            self.database.complete_hpo_study(
+                                str(study_id), require_trial_evidence=True,
+                            )
                         self.database.add_evaluation(Evaluation(
                             experiment_id=item["experiment_id"],
                             verdict=Verdict.PASS,
