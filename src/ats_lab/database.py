@@ -1075,6 +1075,33 @@ class WorkflowDatabase:
             ).fetchone()
             if study is None:
                 raise KeyError(f"unknown HPO study: {study_id}")
+            existing_experiment = connection.execute(
+                "SELECT specification_json FROM experiments WHERE id=?",
+                (study["hpo_experiment_id"],),
+            ).fetchone()
+            existing_specification = _json_object(
+                existing_experiment["specification_json"]
+                if existing_experiment is not None else None,
+            )
+            existing_validation = existing_specification.get("validation_routes")
+            combined_routes = {
+                split: list(value)
+                for split, value in existing_validation.items()
+            } if isinstance(existing_validation, dict) else {}
+            combined_routes.update({
+                split: routes for split, routes in normalized.items()
+                if split != "hpo"
+            })
+            if "hpo" in normalized:
+                combined_routes["hpo"] = normalized["hpo"]
+            else:
+                existing_routes = existing_specification.get("routes")
+                combined_routes["hpo"] = (
+                    [dict(route) for route in existing_routes
+                     if isinstance(route, dict)]
+                    if isinstance(existing_routes, list) else []
+                )
+            _validate_hpo_route_partitions(combined_routes)
             hpo_routes = [
                 route
                 for split in ("hpo",)
