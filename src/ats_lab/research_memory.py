@@ -590,6 +590,8 @@ def compact_advisory_memory(
     max_items: int = 5,
     max_bytes: int = 8000,
     max_text_chars: int = 600,
+    max_queries: int | None = None,
+    stop_on_failure: bool = False,
 ) -> dict[str, Any]:
     existing = {
         str(item.get(key))
@@ -603,14 +605,21 @@ def compact_advisory_memory(
     }
     recalled: list[dict[str, Any]] = []
     recall_failed = False
-    for query in _recall_queries(context):
+    queries = _recall_queries(context)
+    if max_queries is not None:
+        queries = queries[:max(0, max_queries)]
+    for query in queries:
         try:
             batch = adapter.recall(query, limit=max_items * 2)
         except Exception:
             recall_failed = True
+            if stop_on_failure:
+                break
             continue
         if not isinstance(batch, list):
             recall_failed = True
+            if stop_on_failure:
+                break
             continue
         recalled.extend(item for item in batch if isinstance(item, dict))
     if not recalled and recall_failed:

@@ -44,6 +44,14 @@ under `advisory_memory` with `trust=untrusted_advisory_data`. Malformed or
 unavailable memory sets `memory_degraded=true`; synthesis remains SQLite-only.
 Historical verdicts remain observations, never readiness or promotion inputs.
 
+Model-based analyzer turns may receive up to three relevant Memory learnings as
+the same bounded `advisory_memory` block (maximum 3,200 bytes and 240
+characters per text field). This is a continuity hint only: canonical SQLite
+executions and deterministic gates remain authoritative, and lifecycle-only
+cohorts avoid the analyzer turn entirely. Memory outage or malformed recall
+stops the bounded recall after the first failure, adds `memory_degraded=true`
+with an empty hint list, and does not block analysis.
+
 ## Operator commands
 
 ```bash

@@ -102,6 +102,8 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertNotIn("metrics_summary", analysis)
         self.assertIn('"net_profit_percentage":5.0', analysis)
         self.assertNotIn("route_runs", analysis)
+        self.assertIn("untrusted historical hints", analysis)
+        self.assertIn("canonical executions", analysis)
 
         hpo = build_prompt({
             "task_type": "analyze_hpo", "executions": [],

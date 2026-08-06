@@ -140,6 +140,59 @@ class BatchSupervisorTests(unittest.TestCase):
                 database.rows("SELECT COUNT(*) count FROM evaluations")[0]["count"], 2,
             )
 
+    def test_analyzer_receives_bounded_untrusted_memory_hints(self) -> None:
+        class Memory:
+            def __init__(self) -> None:
+                self.queries: list[str] = []
+
+            def deliver(self, _payload: dict) -> None:
+                return
+
+            def recall(self, query: str, *, limit: int) -> list[dict]:
+                self.queries.append(query)
+                return [{
+                    "schema_version": 1,
+                    "learning_id": "learn-history-1",
+                    "experiment_id": "HISTORY-1",
+                    "strategy": "HistoryStrategy",
+                    "archetype": "trend",
+                    "change_scope": "entry",
+                    "target_regime": "liquid trend",
+                    "failure_regime": "range chop",
+                    "lifecycle_stage": "baseline",
+                    "verdict": "revise",
+                    "reason_codes": ["deterministic_gate_failed"],
+                    "normalized_metrics": {},
+                    "lesson": "Historical evidence failed in range chop.",
+                    "next_refinement_constraint": "Change one entry trigger.",
+                    "evaluated_at": "2026-08-01T00:00:00Z",
+                }][:limit]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            memory = Memory()
+            dispatcher = SequenceDispatcher([
+                self.execution_result(), self.analysis_result(),
+            ])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker", memory_adapter=memory,
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            self.assertEqual(supervisor.run_round()["status"], "batch_complete")
+
+            request = dispatcher.requests[1]
+            self.assertEqual(len(request["advisory_memory"]), 1)
+            self.assertEqual(
+                request["advisory_memory"][0]["trust"],
+                "untrusted_advisory_data",
+            )
+            self.assertFalse(request["memory_degraded"])
+            self.assertLessEqual(
+                len(json.dumps(request["advisory_memory"]).encode()), 3_200,
+            )
+            self.assertTrue(any("Strategy1" in query for query in memory.queries))
+
     def test_infrastructure_retry_does_not_consume_strategy_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)

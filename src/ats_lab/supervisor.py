@@ -45,6 +45,13 @@ from .worker import DispatchResult, Dispatcher
 
 INFRASTRUCTURE_BLOCKERS = INFRASTRUCTURE_FAILURE_CODES
 
+# Analyzer memory is a small advisory hint, not a second evidence payload.
+# Keep this below the synthesis memory budget so continuity cannot materially
+# inflate analyzer turns.
+ANALYZER_MEMORY_MAX_ITEMS = 3
+ANALYZER_MEMORY_MAX_BYTES = 3_200
+ANALYZER_MEMORY_MAX_TEXT_CHARS = 240
+
 
 class BatchSupervisor:
     """Spend one agent turn executing a batch, then one turn judging the batch."""
@@ -773,6 +780,9 @@ class BatchSupervisor:
             ),
             "executions": compact_executions,
         }
+        memory = self._analyzer_advisory_memory(rows)
+        request["advisory_memory"] = memory["advisory_memory"]
+        request["memory_degraded"] = memory["memory_degraded"]
         payload_bytes = len(json.dumps(
             request, separators=(",", ":"), sort_keys=True,
         ).encode())
@@ -1432,6 +1442,42 @@ class BatchSupervisor:
             else self._normalized_evidence(row)
         )
         return self.analysis_input_builder.build(row, evidence)
+
+    def _analyzer_advisory_memory(self, rows: list[dict]) -> dict[str, Any]:
+        """Recall bounded, untrusted hints for model analysis only.
+
+        Canonical SQLite evidence remains in ``executions`` and is the only
+        source used by deterministic gates and persisted evaluations. Memory
+        outage or malformed recall degrades to an empty hint block.
+        """
+        if self.memory_adapter is None:
+            return {"advisory_memory": [], "memory_degraded": True}
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                specification = json.loads(row.get("experiment_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                specification = {}
+            if not isinstance(specification, dict):
+                specification = {}
+            candidates.append({
+                "source_experiment_id": row.get("experiment_id"),
+                "strategy": specification.get("strategy_name"),
+                "archetype": specification.get("archetype"),
+                "target_regime": specification.get("target_regime"),
+                "failure_regime": specification.get("failure_regime"),
+                "specification_json": row.get("experiment_json"),
+            })
+        return compact_advisory_memory(
+            self.memory_adapter,
+            {"improvement_candidates": candidates,
+             "scheduled_candidates": [], "concept_learnings": []},
+            max_items=ANALYZER_MEMORY_MAX_ITEMS,
+            max_bytes=ANALYZER_MEMORY_MAX_BYTES,
+            max_text_chars=ANALYZER_MEMORY_MAX_TEXT_CHARS,
+            max_queries=3,
+            stop_on_failure=True,
+        )
 
     def _operation(self, row: dict) -> str:
         work = self.database.rows(
