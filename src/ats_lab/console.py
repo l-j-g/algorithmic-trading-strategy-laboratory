@@ -19,6 +19,10 @@ _CANDIDATE_VERDICTS = {
 _SPLIT_PRIORITY = {
     "oos": 0, "holdout": 1, "rolling": 2, "train": 3, None: 4,
 }
+_COMPLETION_METRIC_FIELDS = (
+    "net_profit_percentage", "trade_count", "sharpe_ratio",
+    "max_drawdown_percentage",
+)
 
 
 # Keep ANSI at the renderer edge.  Snapshot and table data stay plain, so
@@ -118,11 +122,24 @@ def monitor_snapshot(database: WorkflowDatabase) -> dict:
     # Normalized evidence is the durable completion stream.  Keeping this
     # projection separate from the active queue means a finished run remains
     # visible after its work item leaves ``active_queue``.
-    status["recent_completions"] = [
+    completions = [
         item.to_dict()
         for item in database.query_normalized_evidence(limit=12)
         if item.completed_at
-    ][:8]
+    ]
+    # Finished runs without metrics (for example a terminal contract failure)
+    # must not crowd metric-bearing results out of the live operator view.
+    # Preserve query order within each group, then fill remaining slots with
+    # the newest terminal rows so failures remain visible without fabricating
+    # values.
+    metric_rows = [
+        row for row in completions
+        if any(row.get(field) is not None for field in _COMPLETION_METRIC_FIELDS)
+    ]
+    no_metric_rows = [row for row in completions if row not in metric_rows]
+    status["recent_completions"] = (
+        metric_rows[:8] + no_metric_rows[: max(0, 8 - len(metric_rows))]
+    )[:8]
     return status
 
 

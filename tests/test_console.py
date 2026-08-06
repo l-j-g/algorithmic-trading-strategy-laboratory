@@ -81,6 +81,34 @@ class TerminalConsoleTests(unittest.TestCase):
             self.assertIn("1.23", rendered)
             self.assertIn("4.50%", rendered)
 
+    def test_monitor_prioritizes_metric_results_over_empty_terminal_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            for index in range(9):
+                database.add_run(RunResult(
+                    id=f"EMPTY-{index}", experiment_id="EXP-1", work_item_id="JOB-1",
+                    session_id=f"EMPTY-SESSION-{index}", status=RunStatus.FINISHED,
+                    finished_at=f"2026-03-{index + 1:02d}T00:00:00Z",
+                ))
+            database.add_run(RunResult(
+                id="METRIC-OLD", experiment_id="EXP-1", work_item_id="JOB-1",
+                session_id="METRIC-SESSION", status=RunStatus.FINISHED,
+                metrics={"net_profit_percentage": 9.5, "trade_count": 17},
+                finished_at="2026-01-01T00:00:00Z",
+            ))
+
+            snapshot = monitor_snapshot(database)
+
+            self.assertEqual(len(snapshot["recent_completions"]), 8)
+            self.assertIn(
+                "METRIC-OLD",
+                {row["run_id"] for row in snapshot["recent_completions"]},
+            )
+            self.assertTrue(any(
+                row.get("net_profit_percentage") == 9.5
+                for row in snapshot["recent_completions"]
+            ))
+
     def test_completion_table_fits_narrow_terminal_without_misalignment(self) -> None:
         rendered = render_completion_table(({
             "strategy": "VeryLongStrategyNameThatNeedsTruncation",
