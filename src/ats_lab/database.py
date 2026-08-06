@@ -32,6 +32,11 @@ from .retry_schedule import resolve_retry_after
 _EVIDENCE_COLUMNS = tuple(NormalizedEvidence.__dataclass_fields__)
 _EVIDENCE_FILTERS = frozenset(_EVIDENCE_COLUMNS)
 
+# A malformed synthesis response must get one immediate replacement attempt
+# while unresolved chains remain. Two consecutive failures then honor the
+# configured cooldown so a continuous supervisor cannot spin on the provider.
+_MAX_RECENT_SYNTHESIS_FAILURES = 2
+
 
 def _json_object(value: str | None) -> dict[str, Any]:
     if not value:
@@ -2234,14 +2239,20 @@ class WorkflowDatabase:
                 "SELECT 1 FROM synthesis_cohorts WHERE status='planning' LIMIT 1"
             ).fetchone():
                 return None
-            if connection.execute(
-                """SELECT 1 FROM synthesis_cohorts
-                   WHERE status='failed' AND updated_at>? LIMIT 1""",
-                (cooldown_start,),
-            ).fetchone():
-                return None
             remaining = self._remaining_chain_count(connection)
             if remaining > low_watermark:
+                return None
+            recent_failures = connection.execute(
+                """SELECT COUNT(*) FROM synthesis_cohorts
+                   WHERE status='failed' AND updated_at>?""",
+                (cooldown_start,),
+            ).fetchone()[0]
+            # A failed planning response is not a blocker for an underfilled
+            # queue: permit one replacement attempt. Bound repeated provider
+            # failures with the normal retry cooldown after two attempts.
+            if int(recent_failures) >= _MAX_RECENT_SYNTHESIS_FAILURES or (
+                int(recent_failures) and remaining <= 0
+            ):
                 return None
             cohort_id = f"COHORT-{uuid.uuid4().hex[:12].upper()}"
             connection.execute(

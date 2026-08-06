@@ -273,6 +273,34 @@ class BatchSynthesisTests(unittest.TestCase):
             )
             self.assertIsNone(cooldown)
 
+    def test_underfilled_queue_gets_one_bounded_replacement_after_failed_cohort(self) -> None:
+        """A malformed plan must not strand one remaining chain indefinitely."""
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            self.add_source(database, "PENDING", Verdict.REVISE)
+            with database.connect() as connection:
+                connection.execute("UPDATE work_items SET state='scheduled' WHERE id='PENDING'")
+
+            first = database.reserve_synthesis_cohort(
+                worker_id="worker-1", requested_count=25, low_watermark=5,
+                lease_seconds=60, retry_cooldown_seconds=300,
+            )
+            self.assertIsNotNone(first)
+            database.fail_synthesis_cohort(first["id"], "synthesis cohort returned 20/25 requests")
+
+            replacement = database.reserve_synthesis_cohort(
+                worker_id="worker-1", requested_count=25, low_watermark=5,
+                lease_seconds=60, retry_cooldown_seconds=300,
+            )
+            self.assertIsNotNone(replacement)
+            database.fail_synthesis_cohort(replacement["id"], "synthesis cohort returned 20/25 requests")
+
+            cooldown = database.reserve_synthesis_cohort(
+                worker_id="worker-1", requested_count=25, low_watermark=5,
+                lease_seconds=60, retry_cooldown_seconds=300,
+            )
+            self.assertIsNone(cooldown)
+
 
 if __name__ == "__main__":
     unittest.main()
