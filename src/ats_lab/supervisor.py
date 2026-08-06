@@ -718,6 +718,48 @@ class BatchSupervisor:
                 rows, cohort_id, attempt,
                 f"normalized evidence unavailable: {error}",
             )
+
+        # Lifecycle-only cohorts do not need another model turn.  Significance
+        # and cost-sensitivity verdicts are already determined by canonical
+        # evidence; asking Agent to restate them adds tokens without adding
+        # research judgment.  Keep mixed cohorts on the model path so an
+        # interpretation is still available for rows with unresolved gates.
+        deterministic = [
+            payload for row in rows
+            if (payload := self._deterministic_analysis_payload(row)) is not None
+        ]
+        if len(deterministic) == len(rows):
+            for row in rows:
+                self._record_stage(
+                    row["work_item_id"], "analysis", duration_ms=0,
+                    state="running", analyzer_attempt=attempt,
+                    cohort_id=cohort_id,
+                )
+            started = time.perf_counter()
+            try:
+                finalized = self._finalize_analysis(rows, deterministic)
+            except (KeyError, StopIteration, TypeError, ValueError) as error:
+                return self._analysis_failure(
+                    rows, cohort_id, attempt, str(error),
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    payload_bytes=0,
+                )
+            duration_ms = (time.perf_counter() - started) * 1000
+            for row in rows:
+                self._record_stage(
+                    row["work_item_id"], "analysis", duration_ms=duration_ms,
+                    state="finished", analyzer_attempt=attempt,
+                    cohort_id=cohort_id,
+                )
+            return {
+                "status": "finished",
+                "cohort_id": cohort_id,
+                "task_type": task_type,
+                "attempt": attempt,
+                "payload_bytes": 0,
+                "analysis_calls_avoided": 1,
+                "evaluated": finalized,
+            }
         request = {
             "schema_version": 1,
             "task_type": task_type,
@@ -827,6 +869,34 @@ class BatchSupervisor:
             "attempt": attempt,
             "payload_bytes": payload_bytes,
             "evaluated": finalized,
+        }
+
+    def _deterministic_analysis_payload(self, row: dict) -> dict[str, Any] | None:
+        """Build a complete evaluation when lifecycle gates are authoritative."""
+        if row.get("run_status") != RunStatus.FINISHED.value:
+            return None
+        try:
+            evidence, gates = self._gated_evidence(row)
+            verdict = self._deterministic_verdict(evidence)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if verdict is None:
+            return None
+        next_action = {
+            Verdict.PASS: "Continue to the next validation route.",
+            Verdict.INCONCLUSIVE: "Collect missing evidence before promotion.",
+            Verdict.REJECT: "Archive this candidate and generate a controlled revision.",
+        }[verdict]
+        return {
+            "experiment_id": row["experiment_id"],
+            "verdict": verdict.value,
+            "finding": f"Lifecycle gate: {verdict.value}. {gates.finding}",
+            "next_action": next_action,
+            "metrics_summary": json.dumps(
+                self.analysis_input_builder.metrics_summary(row, evidence),
+                separators=(",", ":"), sort_keys=True,
+            ),
+            "evaluator": "ats-lab-deterministic-analyzer",
         }
 
     def _validate_analysis_response(

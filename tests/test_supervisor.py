@@ -897,26 +897,20 @@ class BatchSupervisorTests(unittest.TestCase):
                     }},
                 }],
             })
-            analysis = DispatchResult(outcome="finished", payload={
-                "outcome": "finished",
-                "evaluations": [{
-                    "experiment_id": "SIG-1",
-                    "verdict": "reject",
-                    "finding": "Agent verdict should not override gate.",
-                    "next_action": "Release dependent baseline.",
-                }],
-                "synthesis_requests": [],
-            })
-            dispatcher = SequenceDispatcher([execution, analysis])
+            # Significance verdict is fully determined by canonical p-value;
+            # supervisor should persist it without spending an analyzer turn.
+            dispatcher = SequenceDispatcher([execution])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
                 resource_policy=ResourcePolicy(synthesis_low_watermark=0),
             )
 
-            self.assertEqual(supervisor.run_round()["status"], "batch_complete")
-            supplied = dispatcher.requests[1]["executions"][0]["evidence"][0]
-            self.assertEqual(supplied["significance_p_value"], 0.03)
-            self.assertEqual(supplied["verdict"], "pass")
+            round_result = supervisor.run_round()
+            self.assertEqual(round_result["status"], "batch_complete")
+            self.assertEqual(
+                round_result["cohorts"][0]["analysis_calls_avoided"], 1,
+            )
+            self.assertEqual(len(dispatcher.requests), 1)
             verdict = database.rows(
                 "SELECT verdict FROM evaluations WHERE experiment_id='SIG-1'"
             )[0]["verdict"]

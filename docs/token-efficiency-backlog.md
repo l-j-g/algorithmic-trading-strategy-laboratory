@@ -98,7 +98,7 @@ It reports per-task totals and p50/p95 values for calls, tokens, cache reads,
 and transport bytes. Alarms flag model calls on the direct execution path and
 oversized synthesis requests. File rotation and retention remain separate work.
 
-## 5. Deterministic verdict expansion
+## 5. Deterministic verdict expansion — implemented
 
 Expected impact: eliminate analysis model calls where existing gates fully
 determine verdict and next action.
@@ -110,3 +110,11 @@ Acceptance criteria:
 - Golden tests preserve route splits, HPO stability evidence, and promotion
   safety.
 - Telemetry compares calls avoided against unchanged dispositions.
+
+`BatchSupervisor` now bypasses the analyzer turn when every row in a cohort has
+an authoritative significance or cost-sensitivity lifecycle verdict. It builds
+the same bounded metrics summary and persists through the normal finalization
+and dependent-route gates. Mixed cohorts remain on the analyzer path, and HPO
+interpretation is never bypassed. The result reports
+`analysis_calls_avoided=1` so operators can measure savings without recording
+prompt or response content.
