@@ -309,7 +309,7 @@ class AgentLauncherTests(unittest.TestCase):
             seen["timeout"] = kwargs["timeout"]
             return subprocess.CompletedProcess(
                 command, 0,
-                '{"outcome":"finished","prepared_work_item_ids":["JOB-1"]}',
+                '{"outcome":"finished","prepared_work_item_ids":["JOB-1"],"strategy_readiness":[{"work_item_id":"JOB-1","strategy_name":"TestStrategy","status":"ready"}]}',
                 "",
             )
 

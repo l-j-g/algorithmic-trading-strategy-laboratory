@@ -171,13 +171,30 @@ class FakeMcpServer:
 class RecordingFallback:
     def __init__(self) -> None:
         self.requests: list[dict] = []
+        self.preparation_outcome = "finished"
+        self.preparation_readiness: list[dict] = [{
+            "work_item_id": "JOB-1",
+            "strategy_name": "ExistingStrategy",
+            "status": "ready",
+        }]
 
     def dispatch(self, request: dict) -> DispatchResult:
         self.requests.append(request)
-        return DispatchResult(
-            outcome="finished",
-            payload={"outcome": "finished", "prepared_work_item_ids": ["JOB-1"]},
-        )
+        if request.get("task_type") == "prepare_strategies":
+            ready_ids = [
+                entry["work_item_id"]
+                for entry in self.preparation_readiness
+                if entry.get("status") == "ready"
+            ]
+            return DispatchResult(
+                outcome=self.preparation_outcome,
+                payload={
+                    "outcome": self.preparation_outcome,
+                    "prepared_work_item_ids": ready_ids,
+                    "strategy_readiness": self.preparation_readiness,
+                },
+            )
+        return DispatchResult(outcome="finished", payload={"outcome": "finished"})
 
 
 class FakeDashboard:
@@ -729,6 +746,37 @@ class DirectMcpExecutorTests(unittest.TestCase):
             self.assertEqual(result.payload["results"][0]["outcome"], "finished")
             self.assertEqual(len(fallback.requests), 1)
             self.assertEqual(fallback.requests[0]["task_type"], "prepare_strategies")
+
+    def test_missing_strategy_becomes_terminal_analysis_result(self) -> None:
+        fallback = RecordingFallback()
+        fallback.preparation_outcome = "blocked"
+        fallback.preparation_readiness = [{
+            "work_item_id": "JOB-1",
+            "strategy_name": "ExistingStrategy",
+            "status": "missing",
+            "detail": "Jesse could not discover the named strategy class",
+        }]
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["finished"]) as server:
+            dispatcher, _ = self.make_dispatcher(tmp, server, fallback=fallback)
+
+            result = dispatcher.dispatch(batch_request(change_scope="entry_changed"))
+
+            item = result.payload["results"][0]
+            self.assertEqual(item["outcome"], "blocked")
+            self.assertEqual(item["blocker_code"], "source_strategy_not_found")
+            self.assertEqual(server.http.run_calls, 0)
+
+    def test_preparation_requires_readiness_evidence(self) -> None:
+        fallback = RecordingFallback()
+        fallback.preparation_readiness = []
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["finished"]) as server:
+            dispatcher, _ = self.make_dispatcher(tmp, server, fallback=fallback)
+
+            result = dispatcher.dispatch(batch_request(change_scope="entry_changed"))
+
+            self.assertEqual(result.outcome, "retry")
+            self.assertEqual(result.blocker_code, "invalid_strategy_preparation")
+            self.assertEqual(server.http.run_calls, 0)
 
     def test_disabled_feature_delegates_to_existing_dispatcher(self) -> None:
         fallback = RecordingFallback()

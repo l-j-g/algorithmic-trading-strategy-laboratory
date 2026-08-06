@@ -37,7 +37,11 @@ session. Any finished run prevents checkpoint invalidation and requeue, avoiding
 duplicate valid execution.
 
 New or materially changed strategy source gets one separate bounded
-`prepare_strategies` Agent turn. That turn must use Jesse MCP and return only
-covered work-item IDs; source and patches are forbidden from ATS payloads.
+`prepare_strategies` Agent turn. That turn must use Jesse MCP and return one
+bounded `strategy_readiness` entry per work item (`ready`, `missing`, or
+`invalid`) plus IDs for entries marked ready. Direct execution proceeds only
+for discoverable, loadable strategies. Missing or invalid classes become
+terminal strategy evidence for analysis; source and patches are forbidden from
+ATS payloads.
 Unsupported operations remain on the existing Agent path. Set
 `jesse_executor.enabled = false` for full fallback.

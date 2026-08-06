@@ -493,25 +493,77 @@ class DirectMcpDispatcher:
                 ),
                 "requests": [self._preparation_request(item) for item in preparation],
             })
-            if prepared.outcome != "finished":
+            if prepared.outcome not in {"finished", "blocked"}:
                 return prepared
             payload = prepared.payload or {}
+            readiness, readiness_error = self._strategy_readiness(
+                payload, preparation,
+            )
+            if readiness_error:
+                return DispatchResult(
+                    outcome="retry",
+                    blocker_code="invalid_strategy_preparation",
+                    detail=readiness_error,
+                    payload=payload,
+                )
+            ready_ids = {
+                work_item_id for work_item_id, status in readiness.items()
+                if status["status"] == "ready"
+            }
+            nonready_ids = set(readiness) - ready_ids
+            if prepared.outcome == "finished" and nonready_ids:
+                return DispatchResult(
+                    outcome="retry",
+                    blocker_code="invalid_strategy_preparation",
+                    detail="finished preparation cannot contain non-ready strategies",
+                    payload=payload,
+                )
+            if prepared.outcome == "blocked" and not nonready_ids:
+                return DispatchResult(
+                    outcome="retry",
+                    blocker_code="invalid_strategy_preparation",
+                    detail="blocked preparation must identify a non-ready strategy",
+                    payload=payload,
+                )
             prepared_ids = payload.get("prepared_work_item_ids")
-            expected_ids = [item["work_item_id"] for item in preparation]
             if (
                 not isinstance(prepared_ids, list)
-                or sorted(prepared_ids) != sorted(expected_ids)
+                or not all(isinstance(item_id, str) for item_id in prepared_ids)
+                or sorted(prepared_ids) != sorted(ready_ids)
             ):
                 return DispatchResult(
                     outcome="retry",
                     blocker_code="invalid_strategy_preparation",
-                    detail="preparation must cover every requested work item exactly",
+                    detail=(
+                        "prepared_work_item_ids must exactly match strategy "
+                        "readiness entries marked ready"
+                    ),
                     payload=payload,
                 )
+            results: list[dict[str, Any]] = []
             for item in preparation:
-                self._mark_prepared(item)
-        results: list[dict[str, Any]] = []
+                status = readiness[item["work_item_id"]]
+                if status["status"] == "ready":
+                    self._mark_prepared(item)
+                    continue
+                results.append({
+                    "work_item_id": item["work_item_id"],
+                    "outcome": "blocked",
+                    "blocker_code": (
+                        "source_strategy_not_found"
+                        if status["status"] == "missing"
+                        else "invalid_strategy_preparation"
+                    ),
+                    "detail": status["detail"],
+                })
+        else:
+            results = []
         for item in direct:
+            if any(
+                result.get("work_item_id") == item.get("work_item_id")
+                for result in results
+            ):
+                continue
             results.append(self._execute_one(item))
         if delegated:
             delegated_result = self._fallback({
@@ -536,6 +588,55 @@ class DirectMcpDispatcher:
             outcome=overall,
             payload={"outcome": overall, "results": results},
         )
+
+    @staticmethod
+    def _strategy_readiness(
+        payload: dict[str, Any], preparation: list[dict[str, Any]],
+    ) -> tuple[dict[str, dict[str, str]], str | None]:
+        """Validate model-reported Jesse strategy discoverability.
+
+        Preparation is a separate model turn, so its success envelope must
+        carry bounded readiness evidence before direct execution is allowed.
+        Missing or invalid classes become per-item terminal research failures;
+        malformed evidence remains a retryable contract failure.
+        """
+        entries = payload.get("strategy_readiness")
+        if not isinstance(entries, list):
+            return {}, "preparation requires strategy_readiness array"
+        expected = {
+            str(item["work_item_id"]): item for item in preparation
+        }
+        by_id: dict[str, dict[str, str]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return {}, "strategy_readiness entries must be objects"
+            work_item_id = entry.get("work_item_id")
+            status = entry.get("status")
+            if not isinstance(work_item_id, str) or work_item_id not in expected:
+                return {}, "strategy_readiness must cover requested work items exactly"
+            if work_item_id in by_id:
+                return {}, "strategy_readiness contains duplicate work item"
+            if status not in {"ready", "missing", "invalid"}:
+                return {}, "strategy_readiness status must be ready, missing, or invalid"
+            expected_strategy = expected[work_item_id].get("experiment", {}).get(
+                "strategy_name"
+            )
+            reported_strategy = entry.get("strategy_name")
+            if (
+                isinstance(expected_strategy, str) and expected_strategy
+                and reported_strategy != expected_strategy
+            ):
+                return {}, "strategy_readiness strategy_name does not match request"
+            detail = " ".join(str(entry.get("detail") or "").split())[:1000]
+            if status != "ready" and not detail:
+                return {}, "non-ready strategy_readiness entries require detail"
+            by_id[work_item_id] = {
+                "status": status,
+                "detail": detail or "Jesse strategy is discoverable and loadable",
+            }
+        if set(by_id) != set(expected):
+            return {}, "strategy_readiness must cover every requested work item exactly"
+        return by_id, None
 
     def _execute_one(self, request: dict[str, Any]) -> dict[str, Any]:
         work_item_id = str(request.get("work_item_id") or "")

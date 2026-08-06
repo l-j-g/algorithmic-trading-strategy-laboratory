@@ -113,9 +113,9 @@ def build_prompt(request: Mapping[str, Any]) -> str:
     task_type = request.get("task_type")
     if task_type == "prepare_strategies":
         result_contract = """Result contract:
-{"outcome":"finished|blocked|retry","blocker_code":null,"detail":null,"prepared_work_item_ids":["must match prepared requests"]}
+{"outcome":"finished|blocked|retry","blocker_code":null,"detail":null,"prepared_work_item_ids":["ready work item ids only"],"strategy_readiness":[{"work_item_id":"must match request","strategy_name":"...","status":"ready|missing|invalid","detail":null}]}
 
-One bounded preparation turn only. Inspect each named strategy through Jesse MCP. Create missing strategy source or apply only requested material change. Enforce entry notional at 1x <=95% of available_margin, never starting balance. Do not create, run, poll, or fetch backtests. Do not return strategy source, patches, tool payloads, or private source in result."""
+One bounded preparation turn only. Inspect each named strategy through Jesse MCP and confirm it is discoverable and loadable by the configured Jesse runtime before reporting status ready. Create missing strategy source or apply only requested material change. Enforce entry notional at 1x <=95% of available_margin, never starting balance. Do not create, run, poll, or fetch backtests. Return one strategy_readiness entry for every request exactly once. Use missing when the named class cannot be discovered, invalid when it is discovered but cannot be loaded or violates the requested contract; include a short reason. Use blocked when any entry is missing or invalid, finished only when every entry is ready. Do not return strategy source, patches, tool payloads, or private source in result."""
     elif task_type == "execute_batch":
         result_contract = """Result contract:
 {"outcome":"finished|retry","blocker_code":null,"detail":null,"results":[{"work_item_id":"must match request","outcome":"finished|blocked|retry","blocker_code":null,"detail":null,"retry_after":null,"evidence":{"run":{"id":"...","session_id":"...","status":"finished","dashboard_url":"...","metrics":{},"raw_result":{},"route":null,"error":null,"started_at":null,"finished_at":null}}}]}
