@@ -241,6 +241,29 @@ def enqueue_learning(
     return payload
 
 
+def enqueue_learning_safely(
+    connection: sqlite3.Connection, evaluation: Evaluation,
+) -> dict[str, Any] | None:
+    """Keep unsafe advisory text out of memory without failing evaluation."""
+    try:
+        return enqueue_learning(connection, evaluation)
+    except ValueError as error:
+        if "unsafe" not in str(error).casefold():
+            raise
+        connection.execute(
+            """INSERT INTO events(
+                   aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+               ) VALUES ('research_memory',?,?,?,?)""",
+            (
+                evaluation.experiment_id,
+                "learning_excluded",
+                json.dumps({"reason": "unsafe_learning_text"}),
+                utc_now(),
+            ),
+        )
+        return None
+
+
 def memory_status(database: WorkflowDatabase) -> dict[str, int]:
     rows = database.rows(
         "SELECT state,COUNT(*) AS count FROM research_memory_outbox GROUP BY state"

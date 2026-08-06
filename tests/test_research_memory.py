@@ -128,6 +128,41 @@ class ResearchMemoryTests(unittest.TestCase):
             "SELECT COUNT(*) n FROM research_memory_outbox"
         )[0]["n"], 1)
 
+    def test_unsafe_lesson_is_excluded_without_rolling_back_evaluation(self) -> None:
+        evaluation = self._awaiting_evaluation()
+        unsafe = Evaluation(
+            experiment_id=evaluation.experiment_id,
+            verdict=evaluation.verdict,
+            summary="credential text must not enter advisory memory",
+            next_step=evaluation.next_step,
+            evaluator=evaluation.evaluator,
+            evaluated_at=evaluation.evaluated_at,
+        )
+
+        self.database.finalize_batch_evaluation(unsafe)
+
+        self.assertEqual(
+            self.database.rows(
+                "SELECT state FROM work_items WHERE id=?",
+                (evaluation.experiment_id,),
+            )[0]["state"],
+            "finished",
+        )
+        self.assertEqual(
+            self.database.rows(
+                "SELECT COUNT(*) AS count FROM research_memory_outbox"
+            )[0]["count"],
+            0,
+        )
+        self.assertEqual(
+            self.database.rows(
+                """SELECT payload_json FROM events
+                   WHERE aggregate_type='research_memory'
+                     AND event_type='learning_excluded'"""
+            )[0]["payload_json"],
+            '{"reason": "unsafe_learning_text"}',
+        )
+
     def test_missing_metrics_stay_missing_and_significance_pass_has_constraint(self) -> None:
         evaluation = self._awaiting_evaluation(
             experiment_id="SIG-1", experiment_type=ExperimentType.SIGNIFICANCE,
