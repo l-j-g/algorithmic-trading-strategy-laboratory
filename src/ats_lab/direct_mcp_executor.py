@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from .database import WorkflowDatabase
 from .models import utc_now
+from .session_recovery import SessionRecoveryPolicy
 from .worker import DispatchResult, Dispatcher
 
 
@@ -461,6 +462,7 @@ class DirectMcpDispatcher:
         self.fallback = fallback
         self.sleep = sleep
         self.client_factory = client_factory
+        self.session_recovery_policy = SessionRecoveryPolicy()
         self.dashboard_client = dashboard_client or DashboardClient.from_environment(
             config.dashboard_api_base_url, timeout=config.timeout_seconds,
         )
@@ -690,12 +692,14 @@ class DirectMcpDispatcher:
                 if self._status(session) == "draft":
                     if checkpoint["state"] == "start_recovery_failed":
                         return self._record_and_return(
-                            client, work_item_id, polls, "retry",
+                            client, work_item_id, polls, "blocked",
                             blocker_code="jesse_start_recovery_failed",
                             detail=(
                                 f"session {session_id} remains draft after prior "
-                                "start recovery"
+                                "start recovery; bounded session recovery exhausted "
+                                "and requires strategy or harness analysis"
                             ),
+                            attempt_charged=True,
                         )
                     self._save_checkpoint(
                         work_item_id, experiment_id, session_id, fingerprint,
@@ -761,10 +765,29 @@ class DirectMcpDispatcher:
                         detail=detail,
                     )
                 if classification.state == "malformed_session":
+                    checkpoint = self._checkpoint(work_item_id) or {}
+                    if self.session_recovery_policy.exhausted(
+                        classification.state,
+                        recovery_attempted=bool(checkpoint.get("recovery_attempted")),
+                    ):
+                        return self._record_and_return(
+                            client, work_item_id, polls, "blocked",
+                            blocker_code="malformed_jesse_session",
+                            detail=(
+                                f"session {session_id} remained malformed after one "
+                                "bounded reconciliation; pass execution evidence to "
+                                "strategy or harness analysis"
+                            ),
+                            attempt_charged=True,
+                        )
+                    self._mark_recovery_attempted(work_item_id)
                     return self._record_and_return(
                         client, work_item_id, polls, "retry",
                         blocker_code="malformed_jesse_session",
-                        detail="Jesse session response lacks required execution state",
+                        detail=(
+                            f"session {session_id} response lacks required execution "
+                            "state; one bounded reconciliation will be attempted"
+                        ),
                         attempt_charged=False,
                     )
                 if classification.state == "draft_not_started":
@@ -795,13 +818,14 @@ class DirectMcpDispatcher:
                         attempt_charged=False,
                     )
                 return self._record_and_return(
-                    client, work_item_id, polls, "retry",
+                    client, work_item_id, polls, "blocked",
                     blocker_code="jesse_zombie_recovery_required",
                     detail=(
                         f"session {session_id} remains non-executing after one "
-                        "reconciliation"
+                        "reconciliation; bounded session recovery exhausted and "
+                        "requires strategy or harness analysis"
                     ),
-                    attempt_charged=False,
+                    attempt_charged=True,
                 )
             return self._record_and_return(
                 client, work_item_id, polls, "retry",

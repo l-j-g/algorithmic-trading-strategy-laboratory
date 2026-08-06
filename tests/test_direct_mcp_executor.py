@@ -18,6 +18,7 @@ from ats_lab.direct_mcp_executor import (
     load_direct_execution_config,
 )
 from ats_lab.models import ExperimentSpec, WorkItem, WorkState
+from ats_lab.session_recovery import SessionRecoveryPolicy
 from ats_lab.worker import DispatchResult
 
 
@@ -303,6 +304,15 @@ class DirectMcpExecutorTests(unittest.TestCase):
             "malformed_session",
         )
 
+    def test_session_recovery_policy_is_bounded(self) -> None:
+        policy = SessionRecoveryPolicy()
+        self.assertFalse(policy.exhausted("malformed_session"))
+        self.assertTrue(policy.exhausted(
+            "malformed_session", recovery_attempted=True,
+        ))
+        self.assertTrue(policy.exhausted("start_recovery_failed"))
+        self.assertTrue(policy.exhausted("zombie_recovery_required"))
+
     def make_dispatcher(
         self,
         root: str,
@@ -451,6 +461,51 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 "SELECT state FROM direct_execution_sessions WHERE work_item_id='JOB-1'"
             )[0]
             self.assertEqual(checkpoint["state"], "start_recovery_failed")
+            terminal = dispatcher.dispatch(batch_request()).payload["results"][0]
+            self.assertEqual(terminal["outcome"], "blocked")
+            self.assertTrue(terminal["attempt_charged"])
+            self.assertIn("bounded session recovery exhausted", terminal["detail"])
+
+    def test_malformed_session_reconciles_once_then_routes_to_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["running"]) as server:
+            dispatcher, database = self.make_dispatcher(tmp, server)
+            malformed = {
+                "id": "jesse-session-1", "status": "running", "state": {},
+            }
+            with patch.object(dispatcher, "_fetch_session", return_value=malformed):
+                first = dispatcher.dispatch(batch_request()).payload["results"][0]
+                second = dispatcher.dispatch(batch_request()).payload["results"][0]
+            self.assertEqual(first["outcome"], "retry")
+            self.assertFalse(first["attempt_charged"])
+            self.assertEqual(second["outcome"], "blocked")
+            self.assertTrue(second["attempt_charged"])
+            self.assertIn("bounded reconciliation", second["detail"])
+            checkpoint = database.rows(
+                "SELECT state,recovery_attempted FROM direct_execution_sessions "
+                "WHERE work_item_id='JOB-1'"
+            )[0]
+            self.assertEqual(checkpoint["state"], "malformed_session")
+            self.assertEqual(checkpoint["recovery_attempted"], 1)
+
+    def test_zombie_session_is_terminal_after_one_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["running"]) as server:
+            dispatcher, _database = self.make_dispatcher(tmp, server, max_polls=2)
+            zombie = {
+                "id": "jesse-session-1", "status": "running",
+                "updated_at": "1970-01-01T00:00:00Z",
+                "state": {"results": {
+                    "executing": False, "progressbar": {"current": 0},
+                    "metrics": {}, "trades": [], "charts": {"equity_curve": []},
+                }},
+            }
+            with patch.object(dispatcher, "_fetch_session", return_value=zombie):
+                first = dispatcher.dispatch(batch_request()).payload["results"][0]
+                second = dispatcher.dispatch(batch_request()).payload["results"][0]
+            self.assertEqual(first["blocker_code"], "jesse_zombie_recovery_pending")
+            self.assertEqual(first["outcome"], "retry")
+            self.assertEqual(second["blocker_code"], "jesse_zombie_recovery_required")
+            self.assertEqual(second["outcome"], "blocked")
+            self.assertTrue(second["attempt_charged"])
 
     def test_resume_running_checkpoint_that_is_draft_recovers_once(self) -> None:
         dashboard = FakeDashboard()
