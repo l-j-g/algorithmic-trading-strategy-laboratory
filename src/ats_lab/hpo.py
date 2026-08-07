@@ -461,13 +461,27 @@ def import_optuna_study(
                     "SELECT specification_json,blocker_code,state FROM work_items WHERE id=?",
                     (work_item_id,),
                 ).fetchone()
-                if work is not None and work["blocker_code"] == "hpo_trials_required":
+                parked = (
+                    work is not None
+                    and work["blocker_code"] == "hpo_trials_required"
+                )
+                imported_target = (
+                    target_study_id is not None
+                    and work is not None
+                    and work["state"] in {
+                        "scheduled", "ready", "running", "waiting_retry",
+                    }
+                )
+                if parked or imported_target:
                     specification = _decode_json(work["specification_json"])
                     specification["readiness"] = {"status": "ready", "missing": []}
                     connection.execute(
                         """UPDATE work_items SET specification_json=?,state='finished',
-                           blocker_code=NULL,blocker_detail=NULL,updated_at=?
-                           WHERE id=? AND blocker_code='hpo_trials_required'""",
+                           blocker_code=CASE WHEN blocker_code='hpo_trials_required'
+                               THEN NULL ELSE blocker_code END,
+                           blocker_detail=CASE WHEN blocker_code='hpo_trials_required'
+                               THEN NULL ELSE blocker_detail END,
+                           updated_at=? WHERE id=?""",
                         (json.dumps(specification, sort_keys=True), now, work_item_id),
                     )
                     connection.execute(
