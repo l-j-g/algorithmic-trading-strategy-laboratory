@@ -474,17 +474,24 @@ research/automation/ats_lab.sh configure-hpo-validation-routes \
     "symbol": "BTC-USDT",
     "timeframe": "1h",
     "start_date": "2026-01-01",
-    "finish_date": "2026-03-31"
+    "finish_date": "2026-04-01"
   }],
   "rolling": [{
     "exchange": "Binance Perpetual Futures",
     "symbol": "BTC-USDT",
     "timeframe": "1h",
     "start_date": "2025-01-01",
-    "finish_date": "2026-03-31"
+    "finish_date": "2026-01-01"
   }]
 }
 ```
+
+For a quick local bootstrap, ATS Lab includes a conservative, disjoint
+BTC-USDT 1h policy (`hpo` 2024-01-01..2025-01-01, `rolling`
+2025-01-01..2026-01-01, `oos` 2026-01-01..2026-04-01). Preview it with
+`ats-lab hpo-defaults`; apply it only to untouched scheduled studies with
+`ats-lab hpo-defaults --apply`. Verify candle availability before production
+research; explicit route files always take precedence.
 
 For a newly scheduled HPO study with no inherited training route, include an
 explicit `hpo` entry in the same file.  HPO execution never reuses OOS or

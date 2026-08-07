@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
-from ats_lab.hpo_routes import HpoRoutePlanner
+from ats_lab.hpo_routes import HpoRoutePlanner, default_hpo_routes
 from ats_lab.models import Evaluation, ExperimentSpec, Verdict, WorkItem, WorkState
 
 
@@ -57,6 +57,36 @@ class HpoRoutePlannerTests(unittest.TestCase):
         self.assertTrue(plan["splits"]["hpo"]["ready"])
         self.assertFalse(plan["splits"]["oos"]["ready"])
         self.assertFalse(plan["splits"]["rolling"]["ready"])
+
+    def test_default_routes_are_disjoint_and_release_scheduled_study(self) -> None:
+        study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
+        routes = default_hpo_routes()
+        self.assertEqual(routes["hpo"][0]["start_date"], "2024-01-01")
+        self.assertEqual(routes["rolling"][0]["start_date"], "2025-01-01")
+        self.assertEqual(routes["oos"][0]["start_date"], "2026-01-01")
+        self.database.configure_default_hpo_routes(study["id"], routes)
+        plan = HpoRoutePlanner(self.database).build(study["id"])
+        self.assertTrue(all(item["ready"] for item in plan.splits.values()))
+        work = self.database.rows(
+            "SELECT state,blocker_code FROM work_items WHERE id=?",
+            (study["hpo_work_item_id"],),
+        )[0]
+        self.assertEqual(work["state"], "scheduled")
+        self.assertIsNone(work["blocker_code"])
+
+    def test_default_routes_never_overwrite_partial_operator_routes(self) -> None:
+        study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
+        self.database.configure_hpo_validation_routes(study["id"], {
+            "hpo": [{
+                "exchange": "Binance Perpetual Futures", "symbol": "BTC-USDT",
+                "timeframe": "1h", "start_date": "2020-01-01",
+                "finish_date": "2021-01-01",
+            }],
+        })
+        with self.assertRaises(ValueError):
+            self.database.configure_default_hpo_routes(
+                study["id"], default_hpo_routes(),
+            )
 
 
 if __name__ == "__main__":

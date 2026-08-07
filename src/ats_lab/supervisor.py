@@ -23,6 +23,7 @@ from .execution_disposition import (
     TerminalFailureRecovery,
 )
 from .gates import GateDecision, evaluate_gates, evaluate_promotion
+from .hpo_routes import default_hpo_routes
 from .models import (
     Evaluation,
     RouteSpec,
@@ -178,6 +179,7 @@ class BatchSupervisor:
             return self._analyze_pending(
                 pending_failures, recovered=recovered, promoted=0,
             )
+        self._apply_default_hpo_routes()
         if hasattr(self.database, "mark_unroutable_hpo_requirements_pending"):
             self.database.mark_unroutable_hpo_requirements_pending()
         self.database.refresh_synthesis_cohorts()
@@ -211,6 +213,29 @@ class BatchSupervisor:
             "status": "idle", "recovered": recovered, "promoted": promoted,
             "operator": operator_status(self.database),
         }
+
+    def _apply_default_hpo_routes(self) -> list[str]:
+        """Bootstrap only untouched scheduled HPO studies.
+
+        Explicit route files always win. Partial or already-running studies
+        are excluded by the database guard. This keeps the continuous loop
+        moving while preserving operator-owned route decisions.
+        """
+        if not hasattr(self.database, "hpo_studies_needing_default_routes"):
+            return []
+        applied: list[str] = []
+        for study in self.database.hpo_studies_needing_default_routes():
+            study_id = str(study["study_id"])
+            self.database.configure_default_hpo_routes(
+                study_id, default_hpo_routes(),
+            )
+            applied.append(study_id)
+        if applied:
+            self._runtime(
+                "route_defaults_applied",
+                detail={"studies": applied},
+            )
+        return applied
 
     def _execute(
         self, claimed: list[dict], *, recovered: int, promoted: int,

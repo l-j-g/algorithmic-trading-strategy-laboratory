@@ -86,6 +86,8 @@ ats-lab hpo
 ats-lab hpo --doctor
 ats-lab hpo-detail HPO-STUDY-ID
 ats-lab hpo-route-plan HPO-STUDY-ID
+ats-lab hpo-defaults
+ats-lab hpo-defaults --apply
 ats-lab analyzer
 ats-lab timings
 ats-lab requeue-hpo-analysis HPO-ANALYSIS-JOB-ID \
@@ -107,6 +109,11 @@ command. Known route shapes are evidence only; the operator must choose dates
 from verified Jesse candle availability. Route configuration rejects malformed
 date ranges and overlapping HPO training versus OOS/rolling periods for the
 same exchange, symbol, and timeframe.
+
+`hpo-defaults` previews the bootstrap BTC-USDT 1h policy with disjoint
+historical periods. `--apply` releases only untouched `hpo_scheduled` studies;
+partial or explicit route choices are never overwritten. Check candle
+availability before relying on this local bootstrap policy.
 
 An HPO execution that returns no durable completed trials is parked with
 `hpo_trials_required` and readiness `requirements_pending`. This is an explicit

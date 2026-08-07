@@ -721,6 +721,59 @@ class WorkflowDatabase:
         })
         return studies[0]
 
+    def hpo_studies_needing_default_routes(self) -> list[dict]:
+        """Return scheduled HPO studies with no operator route choices.
+
+        Partial route files are intentionally excluded. They represent an
+        operator decision and must not be silently overwritten by bootstrap
+        policy.
+        """
+        rows = self.rows(
+            """SELECT s.id AS study_id,s.strategy,s.lifecycle_state,
+                      e.specification_json AS experiment_json,
+                      w.state AS work_state
+                 FROM hpo_studies s
+                 JOIN experiments e ON e.id=s.hpo_experiment_id
+                 JOIN work_items w ON w.id=s.hpo_work_item_id
+                WHERE s.lifecycle_state='hpo_scheduled'
+                  AND w.state IN ('scheduled','ready','running')
+                ORDER BY s.updated_at,s.id"""
+        )
+        eligible = []
+        for row in rows:
+            specification = _json_object(row.get("experiment_json"))
+            routes = specification.get("routes")
+            validation = specification.get("validation_routes")
+            if isinstance(routes, list) and routes:
+                continue
+            if isinstance(validation, dict) and any(
+                isinstance(value, list) and value
+                for value in validation.values()
+            ):
+                continue
+            eligible.append({
+                key: row.get(key)
+                for key in ("study_id", "strategy", "lifecycle_state", "work_state")
+            })
+        return eligible
+
+    def configure_default_hpo_routes(
+        self,
+        study_id: str,
+        routes_by_split: Mapping[str, object],
+        *,
+        updated_by: str = "ats-lab-defaults",
+    ) -> dict:
+        """Apply bootstrap routes only to an untouched scheduled study."""
+        if not any(item.get("study_id") == study_id
+                   for item in self.hpo_studies_needing_default_routes()):
+            raise ValueError(
+                "default routes only apply to a scheduled HPO study with no routes"
+            )
+        return self.configure_hpo_validation_routes(
+            study_id, routes_by_split, updated_by=updated_by,
+        )
+
     def diagnostic_hpo_trial_details(
         self, study_id: str, trial_number: int,
     ) -> dict | None:
@@ -1102,6 +1155,24 @@ class WorkflowDatabase:
                     if isinstance(existing_routes, list) else []
                 )
             _validate_hpo_route_partitions(combined_routes)
+            # Keep the study's route projection complete. Validation jobs may
+            # not exist yet, so storing only their child experiment metadata
+            # would make `hpo-route-plan` report false missing splits.
+            existing_specification["validation_routes"] = {
+                split: routes
+                for split, routes in combined_routes.items()
+                if split in {"oos", "rolling"} and routes
+            }
+            if combined_routes.get("hpo"):
+                existing_specification["routes"] = combined_routes["hpo"]
+            connection.execute(
+                """UPDATE experiments SET specification_json=?,updated_at=?
+                   WHERE id=?""",
+                (
+                    json.dumps(existing_specification, sort_keys=True),
+                    now, study["hpo_experiment_id"],
+                ),
+            )
             hpo_routes = [
                 route
                 for split in ("hpo",)

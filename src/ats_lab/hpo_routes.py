@@ -1,10 +1,9 @@
-"""Read-only HPO route planning and operator guidance.
+"""HPO route planning, safe defaults, and operator guidance.
 
-Route planning deliberately does not choose market dates.  Dates are an
-operator-owned data provenance decision and must be supplied explicitly after
-checking Jesse's available candles.  This module reports what the study needs,
-what is already configured, and compatible route shapes observed in canonical
-evidence.
+The default policy is deliberately conservative: one BTC-USDT 1h route with
+three disjoint historical periods.  It is a bootstrap policy for a local
+research loop, not a claim that Jesse has every candle; operators can replace
+it with a verified route file at any time.
 """
 from __future__ import annotations
 
@@ -16,6 +15,29 @@ from .database import WorkflowDatabase
 
 
 REQUIRED_SPLITS = ("hpo", "oos", "rolling")
+
+DEFAULT_ROUTE = {
+    "exchange": "Binance Perpetual Futures",
+    "symbol": "BTC-USDT",
+    "timeframe": "1h",
+}
+DEFAULT_ROUTE_PERIODS = {
+    "hpo": ("2024-01-01", "2025-01-01"),
+    "rolling": ("2025-01-01", "2026-01-01"),
+    "oos": ("2026-01-01", "2026-04-01"),
+}
+
+
+def default_hpo_routes() -> dict[str, list[dict[str, str]]]:
+    """Return fresh, disjoint bootstrap routes for a scheduled HPO study."""
+    return {
+        split: [{
+            **DEFAULT_ROUTE,
+            "start_date": start,
+            "finish_date": finish,
+        }]
+        for split, (start, finish) in DEFAULT_ROUTE_PERIODS.items()
+    }
 
 
 @dataclass(frozen=True)
@@ -101,6 +123,10 @@ class HpoRoutePlanner:
             warnings=tuple(dict.fromkeys(warnings)),
         )
 
+    def default_payload(self) -> dict[str, list[dict[str, str]]]:
+        """Expose the explicit bootstrap policy without database mutation."""
+        return default_hpo_routes()
+
     def _known_routes(self, strategy: str) -> list[dict[str, str]]:
         """Return route shapes seen for this strategy, never recommendations."""
         rows = self.database.rows(
@@ -161,7 +187,8 @@ def render_hpo_route_plan(plan: HpoRoutePlan) -> str:
             )
     for warning in payload["warnings"]:
         lines.append(f"\nWARNING  {warning}")
-    lines.append("\nFILE SHAPE  {\"hpo\": [...], \"oos\": [...], \"rolling\": [...]}")
+    lines.append("\nDEFAULTS  ats-lab hpo-defaults --apply")
+    lines.append("FILE SHAPE  {\"hpo\": [...], \"oos\": [...], \"rolling\": [...]}")
     lines.append(f"NEXT      {payload['operator_command']}")
     return "\n".join(lines)
 

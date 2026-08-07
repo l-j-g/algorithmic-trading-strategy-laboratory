@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .audit import build_audit, render_markdown
 from .database import WorkflowDatabase
-from .hpo_routes import HpoRoutePlanner, render_hpo_route_plan
+from .hpo_routes import HpoRoutePlanner, default_hpo_routes, render_hpo_route_plan
 from .hpo import import_optuna_study
 from .direct_mcp_executor import (
     DirectMcpDispatcher,
@@ -359,6 +359,19 @@ def main() -> int:
     hpo_route_plan.add_argument(
         "--format", choices=("table", "json"), default="table",
     )
+    hpo_defaults = sub.add_parser(
+        "hpo-defaults",
+        help="Show or apply disjoint bootstrap routes for untouched HPO studies.",
+    )
+    hpo_defaults.add_argument(
+        "study_id", nargs="?",
+        help="One scheduled study; omit to apply/show all eligible studies.",
+    )
+    hpo_defaults.add_argument(
+        "--apply", action="store_true",
+        help="Persist defaults and release matching scheduled HPO work.",
+    )
+    hpo_defaults.add_argument("--format", choices=("table", "json"), default="table")
     timings = sub.add_parser(
         "timings", help="Show lifecycle stage durations."
     )
@@ -505,7 +518,7 @@ def main() -> int:
         "console", "recover-claims", "resolve-blocker", "requeue-evaluation",
         "queue", "candidates", "evidence", "diagnostic-export",
         "diagnostic-hpo-trial",
-        "hpo", "hpo-detail", "hpo-route-plan", "timings", "telemetry", "analyzer",
+        "hpo", "hpo-detail", "hpo-route-plan", "hpo-defaults", "timings", "telemetry", "analyzer",
         "requeue-hpo-analysis", "configure-hpo-validation-routes",
         "memory-status", "memory-sync", "memory", "memory-backfill",
         "home", "next", "doctor", "preflight", "recovery-audit", "tui", "loop",
@@ -888,6 +901,50 @@ def main() -> int:
             emit(plan.to_dict())
         else:
             print(render_hpo_route_plan(plan))
+    elif args.command == "hpo-defaults":
+        database.initialize()
+        routes = default_hpo_routes()
+        eligible = database.hpo_studies_needing_default_routes()
+        if args.study_id:
+            eligible = [
+                item for item in eligible
+                if item.get("study_id") == args.study_id
+            ]
+            if not eligible:
+                parser.error(
+                    "study is not a scheduled HPO study with empty routes: "
+                    f"{args.study_id}"
+                )
+        applied = []
+        if args.apply:
+            for item in eligible:
+                applied.append(database.configure_default_hpo_routes(
+                    str(item["study_id"]), routes,
+                ))
+        payload = {
+            "policy": routes,
+            "eligible": eligible,
+            "applied": [item.get("study_id") for item in applied],
+            "next_action": (
+                "ats-lab hpo --doctor" if applied
+                else "ats-lab hpo-defaults --apply"
+            ),
+        }
+        if args.format == "json":
+            emit(payload)
+        else:
+            print("HPO DEFAULT ROUTES  disjoint historical bootstrap policy")
+            for split, route_list in routes.items():
+                route = route_list[0]
+                print(
+                    f"{split:<8} {route['symbol']:<9} {route['timeframe']:<4} "
+                    f"{route['start_date']} -> {route['finish_date']}"
+                )
+            print(f"ELIGIBLE  {len(eligible)}")
+            if args.apply:
+                print(f"APPLIED   {len(applied)}")
+            else:
+                print("NEXT      ats-lab hpo-defaults --apply")
     elif args.command == "timings":
         if args.limit < 1 or args.limit > 5000:
             parser.error("--limit must be between 1 and 5000")
