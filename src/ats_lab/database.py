@@ -2112,7 +2112,10 @@ class WorkflowDatabase:
                          json_extract(specification_json, '$.readiness.status'),
                          'ready'
                      ) != 'requirements_pending'
-                   ORDER BY priority,created_at,id LIMIT ?""",
+                   ORDER BY CASE WHEN json_extract(
+                       specification_json, '$.operation'
+                   ) = 'hpo' THEN 0 ELSE 1 END,
+                   priority,created_at,id LIMIT ?""",
                 (limit,),
             ).fetchall()
             if not rows:

@@ -183,6 +183,28 @@ class HpoPersistenceTests(unittest.TestCase):
             "state": "ready", "blocker_code": None, "attempts": 0,
         })
 
+    def test_hpo_execution_is_not_starved_by_lower_priority_backtests(self) -> None:
+        self.database.upsert_work_item(WorkItem(
+            id="JOB-2",
+            experiment_id="EXP-1",
+            priority=1,
+            state=WorkState.READY,
+        ))
+        study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
+        self.database.start_hpo_study(study["id"])
+        self.database.transition_work_item(
+            study["hpo_work_item_id"], WorkState.FINISHED,
+            allowed_from=(WorkState.SCHEDULED,),
+        )
+        self.database.reconcile_finished_hpo_work()
+        self.database.requeue_hpo_execution(
+            study["id"], reason="provider repaired", updated_by="test",
+        )
+
+        claimed = self.database.claim_batch("worker", 1)
+
+        self.assertEqual([item["id"] for item in claimed], [study["hpo_work_item_id"]])
+
     def test_configured_routes_release_hpo_before_validation_jobs_exist(self) -> None:
         study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
         self.database.promote_scheduled_runnable(1)
