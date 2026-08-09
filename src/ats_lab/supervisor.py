@@ -101,7 +101,6 @@ class BatchSupervisor:
             raise ValueError("heartbeat interval must be positive")
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        self._recovered = False
 
     def plan(self) -> dict[str, Any]:
         result = operator_status(self.database)
@@ -149,21 +148,17 @@ class BatchSupervisor:
                     "detail": infrastructure.get("detail"),
                 }
 
-        if not self._recovered:
-            cutoff = (
-                datetime.now(timezone.utc)
-                - timedelta(seconds=self.resource_policy.claim_timeout_seconds)
-            ).isoformat().replace("+00:00", "Z")
-            recovered = len(self.database.recover_stale_unexecuted_claims(
-                cutoff, apply=True,
-            )["recoverable"])
-            if hasattr(self.database, "recover_abandoned_hpo_analysis"):
-                recovered += len(
-                    self.database.recover_abandoned_hpo_analysis(cutoff)
-                )
-            self._recovered = True
-        else:
-            recovered = 0
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=self.resource_policy.claim_timeout_seconds)
+        ).isoformat().replace("+00:00", "Z")
+        recovered = len(self.database.recover_stale_unexecuted_claims(
+            cutoff, apply=True,
+        )["recoverable"])
+        if hasattr(self.database, "recover_abandoned_hpo_analysis"):
+            recovered += len(
+                self.database.recover_abandoned_hpo_analysis(cutoff)
+            )
         recovery_batch = f"ANALYZE-FAILURES-{uuid.uuid4().hex[:12].upper()}"
         recovered_failures = self.terminal_failure_recovery.recover(
             batch_id=recovery_batch,
