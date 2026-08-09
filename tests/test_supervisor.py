@@ -579,6 +579,69 @@ class BatchSupervisorTests(unittest.TestCase):
                 "waiting_retry",
             )
 
+    def test_terminal_hpo_failure_parks_external_trial_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1", strategy_name="Strategy1",
+                routes=(RouteSpec(
+                    "Binance Perpetual Futures", "BTC-USDT", "1h",
+                    "2025-01-01", "2025-06-01",
+                ),),
+            ))
+            database.transition_work_item(
+                "JOB-1", WorkState.FINISHED,
+                allowed_from=(WorkState.READY,),
+            )
+            database.transition_work_item(
+                "JOB-2", WorkState.ARCHIVED,
+                allowed_from=(WorkState.READY,),
+            )
+            database.add_evaluation(Evaluation(
+                experiment_id="EXP-1", verdict=Verdict.HPO_CANDIDATE,
+                evaluator="test",
+            ))
+            study = database.schedule_hpo_candidate("EXP-1", "JOB-1")
+            analysis = DispatchResult(outcome="finished", payload={
+                "outcome": "finished",
+                "evaluations": [{
+                    "experiment_id": study["hpo_experiment_id"],
+                    "verdict": "reject",
+                    "finding": "Optimizer execution failed before trial evidence.",
+                    "next_action": "Import completed optimizer trials.",
+                }],
+            })
+            execution = DispatchResult(outcome="finished", payload={
+                "outcome": "finished",
+                "results": [{
+                    "work_item_id": study["hpo_work_item_id"],
+                    "outcome": "blocked",
+                    "blocker_code": "executor_timeout",
+                    "detail": "Agent execution timed out",
+                }],
+            })
+            supervisor = BatchSupervisor(
+                database, SequenceDispatcher([execution, analysis]),
+                "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            result = supervisor.run_round()
+
+            self.assertEqual(result["status"], "batch_complete")
+            detail = database.hpo_study_detail(study["id"])
+            self.assertEqual(detail["lifecycle_state"], "hpo_analysis")
+            self.assertEqual(detail["analysis_job"]["state"], "waiting_retry")
+            self.assertIn(
+                "hpo_trials_required", detail["analysis_job"]["last_error"],
+            )
+            work = database.rows(
+                "SELECT state,blocker_code FROM work_items WHERE id=?",
+                (study["hpo_work_item_id"],),
+            )[0]
+            self.assertEqual(work["state"], "finished")
+            self.assertEqual(work["blocker_code"], "hpo_trials_required")
+
     def test_hpo_execution_without_trials_does_not_loop_analyzer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)

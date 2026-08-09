@@ -145,6 +145,22 @@ class HpoPersistenceTests(unittest.TestCase):
         )[0]
         self.assertIn("Import completed optimizer trials", event["payload_json"])
 
+    def test_reconcile_finished_hpo_work_repairs_stuck_lifecycle(self) -> None:
+        study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
+        self.database.start_hpo_study(study["id"])
+        self.database.transition_work_item(
+            study["hpo_work_item_id"], WorkState.FINISHED,
+            allowed_from=(WorkState.SCHEDULED,),
+        )
+
+        repaired = self.database.reconcile_finished_hpo_work()
+
+        self.assertEqual(repaired, [study["id"]])
+        detail = self.database.hpo_study_detail(study["id"])
+        self.assertEqual(detail["lifecycle_state"], "hpo_analysis")
+        self.assertEqual(detail["analysis_job"]["state"], "waiting_retry")
+        self.assertIn("hpo_trials_required", detail["analysis_job"]["last_error"])
+
     def test_configured_routes_release_hpo_before_validation_jobs_exist(self) -> None:
         study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
         self.database.promote_scheduled_runnable(1)

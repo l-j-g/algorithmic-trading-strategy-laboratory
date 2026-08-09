@@ -1520,6 +1520,30 @@ class WorkflowDatabase:
                     )
             return dict(job)
 
+    def reconcile_finished_hpo_work(self, *, limit: int = 100) -> list[str]:
+        """Repair HPO studies left running after terminal execution handling.
+
+        Older supervisor paths could finish an HPO work item through failure
+        analysis without creating the analyzer handoff. Only finished HPO work
+        is eligible; active optimizer claims remain untouched.
+        """
+        rows = self.rows(
+            """SELECT s.id AS study_id
+                 FROM hpo_studies s
+                 JOIN work_items w ON w.id=s.hpo_work_item_id
+                WHERE s.lifecycle_state='hpo_running'
+                  AND w.state='finished'
+                ORDER BY s.updated_at,s.id LIMIT ?""",
+            (max(1, min(int(limit), 1000)),),
+        )
+        repaired: list[str] = []
+        for row in rows:
+            self.complete_hpo_study(
+                str(row["study_id"]), require_trial_evidence=True,
+            )
+            repaired.append(str(row["study_id"]))
+        return repaired
+
     def claim_hpo_analysis(
         self,
         worker_id: str,

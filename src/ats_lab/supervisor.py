@@ -179,6 +179,8 @@ class BatchSupervisor:
             return self._analyze_pending(
                 pending_failures, recovered=recovered, promoted=0,
             )
+        if hasattr(self.database, "reconcile_finished_hpo_work"):
+            self.database.reconcile_finished_hpo_work()
         self._apply_default_hpo_routes()
         if hasattr(self.database, "mark_unroutable_hpo_requirements_pending"):
             self.database.mark_unroutable_hpo_requirements_pending()
@@ -1075,6 +1077,17 @@ class BatchSupervisor:
             persistence_ms = (
                 time.perf_counter() - persistence_started
             ) * 1000
+            if execution_failed and operation == "hpo":
+                study = self.database.hpo_study_for_work_item(work_item_id)
+                if study is not None:
+                    # A terminal optimizer failure has no trial evidence to
+                    # analyze. Park the study at the external-trial handoff
+                    # instead of leaving it hpo_running forever after the
+                    # failure evaluation finishes the work item.
+                    self.database.complete_hpo_study(
+                        str(study["study_id"]),
+                        require_trial_evidence=True,
+                    )
             self._record_stage(
                 item["id"], "persistence", duration_ms=persistence_ms,
                 state="finished",
