@@ -2320,8 +2320,10 @@ class WorkflowDatabase:
         query = """SELECT id,claimed_by,claimed_at FROM work_items
                    WHERE state='running' AND claimed_at<?
                      AND COALESCE(blocker_code,'')!='awaiting_batch_evaluation'
-                     AND NOT EXISTS (
-                         SELECT 1 FROM runs WHERE runs.work_item_id=work_items.id
+                   AND NOT EXISTS (
+                         SELECT 1 FROM runs
+                         WHERE runs.work_item_id=work_items.id
+                           AND runs.status='finished'
                      )
                    ORDER BY claimed_at,id"""
         rows = self.rows(query, (claimed_before,))
