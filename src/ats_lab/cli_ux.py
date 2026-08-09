@@ -36,6 +36,7 @@ ANALYSIS
   ats-lab hpo-defaults            Show bootstrap route policy
   ats-lab hpo-defaults --apply    Apply it to untouched scheduled studies
   ats-lab hpo-import STUDY ...    Attach external Optuna trials and resume
+  ats-lab requeue-hpo-execution    Retry a trial-less optimizer after repair
   ats-lab analyzer                Show analyzer state
   ats-lab timings                 Show stage durations
   ats-lab dashboard               Open local read-only dashboard server

@@ -16,6 +16,9 @@ from typing import Any, Mapping, Sequence
 
 DEFAULT_CONFIG = Path(".ats-lab/config.toml")
 MAX_REQUEST_BYTES = 1_000_000
+REASONING_LEVELS = frozenset({
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+})
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,7 @@ class AgentLauncherConfig:
     preparation_timeout_seconds: float = 300
     model: str | None = None
     provider: str | None = None
+    reasoning_effort: str | None = None
     execution_model: str | None = None
     execution_toolsets: tuple[str, ...] = ("jesse",)
     analysis_toolsets: tuple[str, ...] = ("context_engine",)
@@ -63,6 +67,13 @@ def load_config(path: Path) -> AgentLauncherConfig:
     )
     if preparation_timeout <= 0:
         raise ValueError("executor.preparation_timeout_seconds must be positive")
+    reasoning_effort = executor.get("reasoning_effort")
+    if reasoning_effort is not None:
+        if reasoning_effort not in REASONING_LEVELS:
+            raise ValueError(
+                "executor.reasoning_effort must be one of: "
+                + ", ".join(sorted(REASONING_LEVELS))
+            )
     def toolsets(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
         value = executor.get(name, list(default))
         if (
@@ -90,6 +101,7 @@ def load_config(path: Path) -> AgentLauncherConfig:
         preparation_timeout_seconds=preparation_timeout,
         model=_optional_string(executor.get("model"), "executor.model"),
         provider=_optional_string(executor.get("provider"), "executor.provider"),
+        reasoning_effort=reasoning_effort,
         execution_model=_optional_string(
             executor.get("execution_model"), "executor.execution_model",
         ),
@@ -216,6 +228,11 @@ def build_command(
         command.extend(("--model", model))
     if provider:
         command.extend(("--provider", provider))
+    if (
+        config.reasoning_effort
+        and task_type not in {"execute_batch", "prepare_strategies"}
+    ):
+        command.extend(("--reasoning", config.reasoning_effort))
     command.extend(("--toolsets", ",".join(
         _toolsets_for_task(config, task_type)
     )))

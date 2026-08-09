@@ -161,6 +161,28 @@ class HpoPersistenceTests(unittest.TestCase):
         self.assertEqual(detail["analysis_job"]["state"], "waiting_retry")
         self.assertIn("hpo_trials_required", detail["analysis_job"]["last_error"])
 
+    def test_trialless_hpo_execution_can_be_requeued_after_provider_repair(self) -> None:
+        study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
+        self.database.start_hpo_study(study["id"])
+        self.database.transition_work_item(
+            study["hpo_work_item_id"], WorkState.FINISHED,
+            allowed_from=(WorkState.SCHEDULED,),
+        )
+        self.database.reconcile_finished_hpo_work()
+
+        result = self.database.requeue_hpo_execution(
+            study["id"], reason="Agent provider repaired", updated_by="test",
+        )
+
+        self.assertEqual(result["lifecycle_state"], "hpo_scheduled")
+        work = self.database.rows(
+            "SELECT state,blocker_code,attempts FROM work_items WHERE id=?",
+            (study["hpo_work_item_id"],),
+        )[0]
+        self.assertEqual(work, {
+            "state": "ready", "blocker_code": None, "attempts": 0,
+        })
+
     def test_configured_routes_release_hpo_before_validation_jobs_exist(self) -> None:
         study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
         self.database.promote_scheduled_runnable(1)

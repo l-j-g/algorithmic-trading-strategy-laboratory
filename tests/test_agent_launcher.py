@@ -25,12 +25,13 @@ class AgentLauncherTests(unittest.TestCase):
             config = root / "config.toml"
             config.write_text(
                 f'[repositories]\njesse = "{repo}"\n\n[executor]\nprofile = "ats-lab"\ntimeout_seconds = 12\n'
-                'toolsets = ["mcp"]\n'
+                'reasoning_effort = "high"\ntoolsets = ["mcp"]\n'
             )
             loaded = load_config(config)
             self.assertEqual(loaded.repository, repo.resolve())
             self.assertEqual(loaded.timeout_seconds, 12)
             self.assertEqual(loaded.profile, "ats-lab")
+            self.assertEqual(loaded.reasoning_effort, "high")
             self.assertEqual(loaded.execution_toolsets, ("jesse",))
             self.assertEqual(loaded.analysis_toolsets, ("context_engine",))
             self.assertEqual(loaded.synthesis_toolsets, ("context_engine",))
@@ -170,7 +171,9 @@ class AgentLauncherTests(unittest.TestCase):
 
     @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
     def test_command_restricts_toolsets_by_task_type(self, _which) -> None:
-        config = AgentLauncherConfig(Path("/tmp/jesse"), profile="ats-lab")
+        config = AgentLauncherConfig(
+            Path("/tmp/jesse"), profile="ats-lab", reasoning_effort="high",
+        )
         usage = Path("/tmp/usage.json")
 
         execution = build_command(
@@ -192,6 +195,10 @@ class AgentLauncherTests(unittest.TestCase):
             self.assertIn("context_engine", command)
             self.assertNotIn("jesse", command)
         self.assertEqual(execution[-2:], ["--usage-file", str(usage)])
+        self.assertNotIn("--reasoning", execution)
+        for command in (analysis, hpo, synthesis):
+            self.assertIn("--reasoning", command)
+            self.assertIn("high", command)
 
     @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
     def test_launch_rejects_complete_session_payload_before_model_call(self, _which) -> None:

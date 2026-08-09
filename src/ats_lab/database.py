@@ -1656,6 +1656,78 @@ class WorkflowDatabase:
                 "SELECT * FROM hpo_analysis_jobs WHERE id=?", (job_id,),
             ).fetchone())
 
+    def requeue_hpo_execution(
+        self,
+        study_id: str,
+        *,
+        reason: str,
+        updated_by: str = "operator",
+    ) -> dict:
+        """Reopen a trial-less optimizer after its provider is repaired."""
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("requeue reason is required")
+        now = utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            study = connection.execute(
+                """SELECT * FROM hpo_studies WHERE id=?""", (study_id,),
+            ).fetchone()
+            if study is None:
+                raise KeyError(f"unknown HPO study: {study_id}")
+            if study["lifecycle_state"] != "hpo_analysis":
+                raise ValueError(
+                    f"HPO study is not parked for execution: {study_id}"
+                )
+            complete_trials = connection.execute(
+                """SELECT COUNT(*) AS count FROM hpo_trials
+                   WHERE study_id=? AND state='COMPLETE'""", (study_id,),
+            ).fetchone()["count"]
+            if int(complete_trials or 0):
+                raise ValueError(
+                    f"HPO study already has completed trials: {study_id}"
+                )
+            work = connection.execute(
+                """SELECT * FROM work_items WHERE id=?""",
+                (study["hpo_work_item_id"],),
+            ).fetchone()
+            if work is None:
+                raise KeyError(f"missing HPO work item: {study_id}")
+            if work["blocker_code"] != "hpo_trials_required":
+                raise ValueError(
+                    f"HPO study is not waiting for trial evidence: {study_id}"
+                )
+            specification = _json_object(work["specification_json"])
+            specification["readiness"] = {"status": "ready", "missing": []}
+            connection.execute(
+                """UPDATE work_items SET state='ready',attempts=0,
+                   retry_after=NULL,blocker_code=NULL,blocker_detail=NULL,
+                   claimed_by=NULL,claimed_at=NULL,specification_json=?,updated_at=?
+                   WHERE id=?""",
+                (json.dumps(specification, sort_keys=True), now, work["id"]),
+            )
+            connection.execute(
+                """UPDATE hpo_studies SET lifecycle_state='hpo_scheduled',
+                   started_at=NULL,completed_at=NULL,updated_at=? WHERE id=?""",
+                (now, study_id),
+            )
+            connection.execute(
+                """INSERT INTO events(
+                       aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                   ) VALUES ('hpo_study',?,'hpo_execution_requeued',?,?)""",
+                (study_id, json.dumps({
+                    "reason": reason,
+                    "updated_by": updated_by,
+                    "work_item_id": work["id"],
+                }, sort_keys=True), now),
+            )
+            return {
+                "study_id": study_id,
+                "lifecycle_state": "hpo_scheduled",
+                "work_item_id": work["id"],
+                "work_state": "ready",
+            }
+
     def abandon_hpo_analysis(self, job_id: str, *, error: str) -> dict:
         with self.connect() as connection:
             cursor = connection.execute(

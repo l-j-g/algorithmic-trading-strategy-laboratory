@@ -397,6 +397,15 @@ def main() -> int:
     requeue_hpo.add_argument(
         "--operator", default=os.environ.get("USER", "operator")
     )
+    requeue_hpo_execution = sub.add_parser(
+        "requeue-hpo-execution",
+        help="Reopen a trial-less HPO optimizer after its provider is repaired.",
+    )
+    requeue_hpo_execution.add_argument("study_id")
+    requeue_hpo_execution.add_argument("--reason", required=True)
+    requeue_hpo_execution.add_argument(
+        "--operator", default=os.environ.get("USER", "operator")
+    )
     validation_routes = sub.add_parser(
         "configure-hpo-validation-routes",
         help=(
@@ -519,7 +528,8 @@ def main() -> int:
         "queue", "candidates", "evidence", "diagnostic-export",
         "diagnostic-hpo-trial",
         "hpo", "hpo-detail", "hpo-route-plan", "hpo-defaults", "timings", "telemetry", "analyzer",
-        "requeue-hpo-analysis", "configure-hpo-validation-routes",
+        "requeue-hpo-analysis", "requeue-hpo-execution",
+        "configure-hpo-validation-routes",
         "memory-status", "memory-sync", "memory", "memory-backfill",
         "home", "next", "doctor", "preflight", "recovery-audit", "tui", "loop",
     } and repo == Path.cwd().resolve():
@@ -996,6 +1006,16 @@ def main() -> int:
         try:
             emit(database.requeue_terminal_hpo_analysis(
                 args.job_id,
+                reason=args.reason,
+                updated_by=args.operator,
+            ))
+        except (KeyError, ValueError) as error:
+            parser.error(str(error))
+    elif args.command == "requeue-hpo-execution":
+        database.initialize()
+        try:
+            emit(database.requeue_hpo_execution(
+                args.study_id,
                 reason=args.reason,
                 updated_by=args.operator,
             ))
