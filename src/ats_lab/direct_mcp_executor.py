@@ -937,10 +937,16 @@ class DirectMcpDispatcher:
             "exchange": route["exchange"], "strategy": strategy,
             "symbol": route["symbol"], "timeframe": route["timeframe"],
         } for route in routes]
+        work_item = request.get("work_item", {})
+        experiment_data_routes = experiment.get("data_routes", [])
+        work_data_routes = work_item.get("data_routes", [])
+        data_routes = work_data_routes or experiment_data_routes or []
+        if not isinstance(data_routes, list):
+            raise ValueError("data_routes must be a list")
         draft = client.call_tool("create_backtest_draft", {
             "exchange": next(iter(exchanges)),
             "routes": json.dumps(mcp_routes, separators=(",", ":")),
-            "data_routes": "[]",
+            "data_routes": json.dumps(data_routes, separators=(",", ":")),
             "start_date": start_date, "finish_date": finish_date,
             "debug_mode": False, "export_csv": False, "export_json": False,
             "export_chart": True, "export_tradingview": False,

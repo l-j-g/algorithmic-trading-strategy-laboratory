@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "id": "KAMA-ADX-HPOD-HTF-2024",
+    "strategy_name": "KamaAdxPullbackHpoDefaultsHtf",
+    "experiment_type": "baseline",
+    "hypothesis": "Higher-timeframe KAMA/DI alignment removes low-quality 1h pullbacks while preserving directional edge.",
+    "archetype": "multi-timeframe trend pullback",
+    "target_regime": "1h pullbacks aligned with 4h trend",
+    "failure_regime": "trend transitions and stale higher-timeframe signals",
+    "routes": [
+      {"exchange":"Binance Perpetual Futures","symbol":"BTC-USDT","timeframe":"1h","start_date":"2024-01-01","finish_date":"2024-12-31"},
+      {"exchange":"Binance Perpetual Futures","symbol":"ETH-USDT","timeframe":"1h","start_date":"2024-01-01","finish_date":"2024-12-31"},
+      {"exchange":"Binance Perpetual Futures","symbol":"SOL-USDT","timeframe":"1h","start_date":"2024-01-01","finish_date":"2024-12-31"}
+    ],
+    "leverage": 1,
+    "fee_rate": 0.0004,
+    "sizing_model": "risk_to_qty at 0.5% risk, capped at 95% available margin",
+    "success_gates": [{"name":"net_profit_percentage","operator":">","threshold":0,"required":true},{"name":"trade_count","operator":">=","threshold":30,"required":true}],
+    "failure_gates": [{"name":"trade_count","operator":"<","threshold":30,"required":true},{"name":"net_profit_percentage","operator":"<=","threshold":0,"required":false}],
+    "parent_experiment_id": "KAMA-ADX-HPOD-BASE-2024"
+  },
+  "work_item": {
+    "id": "KAMA-ADX-HPOD-HTF-2024-JOB",
+    "experiment_id": "KAMA-ADX-HPOD-HTF-2024",
+    "priority": 16,
+    "state": "ready",
+    "dependencies": ["KAMA-ADX-HPOD-BASE-2024-JOB"],
+    "specification": {
+      "operation":"backtest",
+      "variant":"rounded_hpo_defaults_plus_higher_timeframe_gate",
+      "data_routes":[
+        {"exchange":"Binance Perpetual Futures","symbol":"BTC-USDT","timeframe":"4h"},
+        {"exchange":"Binance Perpetual Futures","symbol":"ETH-USDT","timeframe":"4h"},
+        {"exchange":"Binance Perpetual Futures","symbol":"SOL-USDT","timeframe":"4h"}
+      ],
+      "default_hyperparameters":{"kama_period":21,"kama_fast_length":4,"kama_slow_length":41,"adx_period":9,"adx_threshold":21.5,"pullback_lookback":5,"atr_period":13,"atr_stop_mult":0.65,"risk_per_trade_pct":0.5,"take_profit_r":1.85}
+    }
+  }
+}

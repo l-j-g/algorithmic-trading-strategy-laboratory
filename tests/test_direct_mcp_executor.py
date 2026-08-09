@@ -388,6 +388,28 @@ class DirectMcpExecutorTests(unittest.TestCase):
             self.assertGreater(telemetry["request_bytes"], 0)
             self.assertGreater(telemetry["mcp_call_count"], 0)
 
+    def test_backtest_forwards_work_item_data_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, _database = self.make_dispatcher(tmp, server)
+            request = batch_request()
+            request["requests"][0]["work_item"]["data_routes"] = [{
+                "exchange": "Binance Perpetual Futures",
+                "symbol": "BTC-USDT",
+                "timeframe": "4h",
+            }]
+            result = dispatcher.dispatch(request)
+            self.assertEqual(result.outcome, "finished")
+            create_args = next(
+                args for name, args in server.http.tool_calls
+                if name == "create_backtest_draft"
+            )
+            self.assertEqual(
+                json.loads(create_args["data_routes"]),
+                request["requests"][0]["work_item"]["data_routes"],
+            )
+
     def test_significance_dispatch_direct_zero_model_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["running", "finished"]

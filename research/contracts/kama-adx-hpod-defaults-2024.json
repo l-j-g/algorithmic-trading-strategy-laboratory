@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "id": "KAMA-ADX-HPOD-BASE-2024",
+    "strategy_name": "KamaAdxPullbackHpoDefaults",
+    "experiment_type": "baseline",
+    "hypothesis": "Rounded defaults from the observed Jesse HPO winner improve KamaAdxPullback route robustness after fees.",
+    "archetype": "trend pullback",
+    "target_regime": "directional crypto trend with orderly KAMA pullbacks",
+    "failure_regime": "low-ADX chop, thin ETH 1h activity, and fee-sensitive reversals",
+    "routes": [
+      {"exchange":"Binance Perpetual Futures","symbol":"BTC-USDT","timeframe":"1h","start_date":"2024-01-01","finish_date":"2024-12-31"},
+      {"exchange":"Binance Perpetual Futures","symbol":"ETH-USDT","timeframe":"1h","start_date":"2024-01-01","finish_date":"2024-12-31"},
+      {"exchange":"Binance Perpetual Futures","symbol":"SOL-USDT","timeframe":"1h","start_date":"2024-01-01","finish_date":"2024-12-31"},
+      {"exchange":"Binance Perpetual Futures","symbol":"BTC-USDT","timeframe":"4h","start_date":"2024-01-01","finish_date":"2024-12-31"},
+      {"exchange":"Binance Perpetual Futures","symbol":"ETH-USDT","timeframe":"4h","start_date":"2024-01-01","finish_date":"2024-12-31"},
+      {"exchange":"Binance Perpetual Futures","symbol":"SOL-USDT","timeframe":"4h","start_date":"2024-01-01","finish_date":"2024-12-31"}
+    ],
+    "leverage": 1,
+    "fee_rate": 0.0004,
+    "sizing_model": "risk_to_qty at 0.5% risk, capped at 95% available margin",
+    "success_gates": [
+      {"name":"net_profit_percentage","operator":">","threshold":0,"required":true},
+      {"name":"trade_count","operator":">=","threshold":30,"required":true},
+      {"name":"max_drawdown_percentage","operator":">=","threshold":-10,"required":true}
+    ],
+    "failure_gates": [
+      {"name":"trade_count","operator":"<","threshold":30,"required":true},
+      {"name":"net_profit_percentage","operator":"<=","threshold":0,"required":false}
+    ],
+    "parent_experiment_id": "COST-048-HPO-E13F54DAB11E"
+  },
+  "work_item": {
+    "id": "KAMA-ADX-HPOD-BASE-2024-JOB",
+    "experiment_id": "KAMA-ADX-HPOD-BASE-2024",
+    "priority": 15,
+    "state": "ready",
+    "dependencies": [],
+    "specification": {
+      "operation": "backtest",
+      "variant": "rounded_hpo_defaults",
+      "default_hyperparameters": {"kama_period":21,"kama_fast_length":4,"kama_slow_length":41,"adx_period":9,"adx_threshold":21.5,"pullback_lookback":5,"atr_period":13,"atr_stop_mult":0.65,"risk_per_trade_pct":0.5,"take_profit_r":1.85}
+    }
+  }
+}
