@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -341,6 +342,41 @@ def _contract_error(task_type: str, result: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _run_bounded_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    """Run Agent in a killable process group with a hard timeout."""
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=dict(environment),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            process.wait()
+        raise
+    return subprocess.CompletedProcess(
+        command, process.returncode, stdout, stderr,
+    )
+
+
 def launch(
     request: Mapping[str, Any],
     config: AgentLauncherConfig,
@@ -385,17 +421,27 @@ def launch(
     completed = None
     failure = None
     try:
-        completed = runner(
-            build_command(
-                config, prompt, task_type=task_type, usage_path=usage_path,
-            ),
-            cwd=config.repository,
-            env=dict(environment or os.environ),
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout,
+        command = build_command(
+            config, prompt, task_type=task_type, usage_path=usage_path,
         )
+        launch_environment = dict(environment or os.environ)
+        if runner is subprocess.run:
+            completed = _run_bounded_process(
+                command,
+                cwd=config.repository,
+                environment=launch_environment,
+                timeout=timeout,
+            )
+        else:
+            completed = runner(
+                command,
+                cwd=config.repository,
+                env=launch_environment,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout,
+            )
     except subprocess.TimeoutExpired:
         failure = {
             "outcome": "retry", "blocker_code": "executor_timeout",
