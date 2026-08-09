@@ -13,7 +13,7 @@ from pathlib import Path
 from .audit import build_audit, render_markdown
 from .database import WorkflowDatabase
 from .hpo_routes import HpoRoutePlanner, default_hpo_routes, render_hpo_route_plan
-from .hpo import import_optuna_study
+from .hpo import import_jesse_session_export, import_optuna_study
 from .direct_mcp_executor import (
     DirectMcpDispatcher,
     McpClient,
@@ -79,6 +79,25 @@ from .worker import CommandDispatcher, Worker
 
 def emit(value: object) -> None:
     print(json.dumps(value, indent=2, sort_keys=True, default=str))
+
+
+def _read_hpo_classifications(
+    repo: Path, source: Path | None,
+) -> dict[int, dict] | None:
+    if source is None:
+        return None
+    path = source if source.is_absolute() else repo / source
+    raw = json.loads(path.read_text())
+    if not isinstance(raw, dict):
+        raise ValueError("classifications file must contain an object")
+    classifications: dict[int, dict] = {}
+    for number, value in raw.items():
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"classification for trial {number} must be an object"
+            )
+        classifications[int(number)] = value
+    return classifications
 
 
 def emit_progress(value: object) -> None:
@@ -430,6 +449,27 @@ def main() -> int:
         help="Optional JSON object mapping trial numbers to classifications.",
     )
     hpo_import.add_argument("--format", choices=("table", "json"), default="table")
+    jesse_hpo_import = sub.add_parser(
+        "hpo-import-jesse-session",
+        help=(
+            "Attach a complete exported Jesse optimization session to a "
+            "parked HPO study."
+        ),
+    )
+    jesse_hpo_import.add_argument(
+        "study_id", help="Existing ATS HPO study to resume."
+    )
+    jesse_hpo_import.add_argument(
+        "--file", type=Path, required=True,
+        help="Versioned complete Jesse optimization-session JSON export.",
+    )
+    jesse_hpo_import.add_argument(
+        "--classifications", type=Path,
+        help="Optional JSON object mapping trial numbers to classifications.",
+    )
+    jesse_hpo_import.add_argument(
+        "--format", choices=("table", "json"), default="table",
+    )
     claim = sub.add_parser("claim")
     claim.add_argument("--worker", default=os.environ.get("ATS_LAB_WORKER_ID", "ats-lab"))
     inventory_parser = sub.add_parser("inventory")
@@ -1038,24 +1078,10 @@ def main() -> int:
     elif args.command == "hpo-import":
         database.initialize()
         source_path = args.file if args.file.is_absolute() else repo / args.file
-        classifications = None
         try:
-            if args.classifications:
-                classification_path = (
-                    args.classifications
-                    if args.classifications.is_absolute()
-                    else repo / args.classifications
-                )
-                raw = json.loads(classification_path.read_text())
-                if not isinstance(raw, dict):
-                    raise ValueError("classifications file must contain an object")
-                classifications = {}
-                for number, value in raw.items():
-                    if not isinstance(value, dict):
-                        raise ValueError(
-                            f"classification for trial {number} must be an object"
-                        )
-                    classifications[int(number)] = value
+            classifications = _read_hpo_classifications(
+                repo, args.classifications,
+            )
             result = import_optuna_study(
                 database,
                 source_path,
@@ -1071,6 +1097,31 @@ def main() -> int:
         else:
             print(
                 f"HPO IMPORTED  study={result['study_id']} "
+                f"trials={result['trials_imported']} "
+                f"evidence={result['normalized_evidence_rows']} "
+                f"job={result['analysis_job_id']} state={result['lifecycle_state']}"
+            )
+    elif args.command == "hpo-import-jesse-session":
+        database.initialize()
+        source_path = args.file if args.file.is_absolute() else repo / args.file
+        try:
+            result = import_jesse_session_export(
+                database,
+                source_path,
+                target_study_id=args.study_id,
+                classifications=_read_hpo_classifications(
+                    repo, args.classifications,
+                ),
+            )
+        except (KeyError, OSError, ValueError, json.JSONDecodeError,
+                sqlite3.Error) as error:
+            parser.error(str(error))
+        if args.format == "json":
+            emit(result)
+        else:
+            print(
+                f"JESSE HPO IMPORTED  study={result['study_id']} "
+                f"session={result['source_session_id']} "
                 f"trials={result['trials_imported']} "
                 f"evidence={result['normalized_evidence_rows']} "
                 f"job={result['analysis_job_id']} state={result['lifecycle_state']}"

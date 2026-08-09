@@ -282,6 +282,39 @@ class CliEvidenceTests(unittest.TestCase):
         ))
         self.assertEqual(payload[0]["lifecycle_state"], "hpo_scheduled")
 
+    def test_complete_jesse_session_export_import_command(self) -> None:
+        database = WorkflowDatabase(self.path)
+        study = database.hpo_studies({"id": self.study_id})[0]
+        source = self.root / "jesse-session.json"
+        source.write_text(json.dumps({
+            "schema_version": 1,
+            "source": "jesse_optimization_session",
+            "session_id": "session-cli-test",
+            "study_name": study["name"],
+            "direction": "maximize",
+            "status": "completed",
+            "trial_records_complete": True,
+            "total_trials": 1,
+            "completed_trials": 1,
+            "trials": [{
+                "number": 0,
+                "state": "COMPLETE",
+                "objective_value": 0.5,
+                "params": {"period": 12},
+                "training_metrics": {"sharpe_ratio": 1.2},
+                "testing_metrics": {"sharpe_ratio": 0.8},
+            }],
+        }))
+
+        payload = json.loads(self.invoke(
+            "hpo-import-jesse-session", self.study_id,
+            "--file", str(source), "--format", "json",
+        ))
+
+        self.assertEqual(payload["study_id"], self.study_id)
+        self.assertEqual(payload["source_session_id"], "session-cli-test")
+        self.assertEqual(payload["trials_imported"], 1)
+
     def test_hpo_doctor_shows_missing_routes_and_next_command(self) -> None:
         human = self.invoke("hpo", "--doctor")
         payload = json.loads(self.invoke("hpo", "--doctor", "--format", "json"))

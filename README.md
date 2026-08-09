@@ -450,8 +450,10 @@ investigating optimizer internals.
 Scheduled HPO execution does not invent trial rows. If the optimizer returns a
 completed run without durable trial/import evidence, ATS Lab parks analysis with
 `hpo_trials_required` and readiness `requirements_pending`; it will not spend
-analyzer retries on an empty payload. Import the completed Optuna study through
-the HPO import workflow, then resume the resulting `hpo_analysis` job.
+analyzer retries on an empty payload. Import a completed Optuna study or a
+versioned, complete Jesse per-trial session export through the HPO import
+workflow, then resume the resulting `hpo_analysis` job. Jesse dashboard
+`best_candidates` summaries remain partial and are rejected.
 
 Validation jobs keep trial parameters out of normal UI and analyzer payloads.
 Executor hydrates selected parameters into execution-only context. Jobs remain

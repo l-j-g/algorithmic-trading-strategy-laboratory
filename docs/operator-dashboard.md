@@ -135,6 +135,48 @@ number. Completed trial rows are written before `hpo_trials_required` is
 cleared; the parked optimizer work item is marked finished and its existing
 analyzer job is returned to `pending`. No duplicate ATS study is created.
 
+Complete Jesse optimization-session exports use a separate guarded importer:
+
+```bash
+ats-lab hpo-import-jesse-session HPO-STUDY-ID \
+  --file /path/to/complete-jesse-session.json
+```
+
+Accepted JSON contract:
+
+```json
+{
+  "schema_version": 1,
+  "source": "jesse_optimization_session",
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "study_name": "ExactTargetStudyName",
+  "direction": "maximize",
+  "status": "completed",
+  "trial_records_complete": true,
+  "total_trials": 2,
+  "completed_trials": 2,
+  "trials": [{
+    "number": 0,
+    "state": "COMPLETE",
+    "objective_value": 0.6575,
+    "started_at": "2026-08-01T00:00:00Z",
+    "completed_at": "2026-08-01T00:00:05Z",
+    "params": {"period": 12},
+    "training_metrics": {"sharpe_ratio": 3.12},
+    "testing_metrics": {"sharpe_ratio": 0.34}
+  }]
+}
+```
+
+`total_trials`, `completed_trials`, and `trials` length must match. Every trial
+must be `COMPLETE` with finite objective, parameter object, and non-empty train
+and test metrics. Study name must match existing ATS study. Session identity
+makes repeated import update same trial rows. Current Jesse dashboard/API
+`best_candidates` top-20 payload is partial and cannot satisfy this contract;
+importer rejects it without writing or clearing `hpo_trials_required`. Full
+per-trial export support remains required at Jesse boundary before live sessions
+can be imported safely.
+
 These commands render human tables by default. Add `--format json` only for
 machine-readable normalized/status data.
 

@@ -1,4 +1,4 @@
-"""Read-only Optuna SQLite import into durable ATS Lab HPO state."""
+"""Read-only optimizer imports into durable ATS Lab HPO state."""
 from __future__ import annotations
 
 import hashlib
@@ -32,6 +32,14 @@ class OptunaStudy:
     name: str
     direction: str
     trials: tuple[OptunaTrial, ...]
+
+
+@dataclass(frozen=True)
+class JesseSessionExport:
+    """Complete, versioned Jesse optimization-session export."""
+
+    session_id: str
+    study: OptunaStudy
 
 
 EMA_V7_CLASSIFICATIONS = {
@@ -70,6 +78,137 @@ EMA_V7_CLASSIFICATIONS = {
 }
 
 _OPTUNA_STATES = frozenset({"RUNNING", "COMPLETE", "PRUNED", "FAIL", "WAITING"})
+
+
+def read_jesse_session_export(source_path: Path) -> JesseSessionExport:
+    """Validate one complete Jesse optimization-session JSON export.
+
+    Jesse's dashboard ``best_candidates`` response is deliberately
+    insufficient. Import requires an explicit full ``trials`` array plus
+    matching terminal counts, so ranked candidates cannot be mistaken for
+    complete optimizer evidence.
+    """
+    source_path = source_path.resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(source_path)
+    try:
+        raw = json.loads(source_path.read_text())
+    except json.JSONDecodeError as error:
+        raise ValueError("invalid Jesse session export JSON") from error
+    if not isinstance(raw, dict):
+        raise ValueError("Jesse session export must contain an object")
+    if raw.get("schema_version") != 1:
+        raise ValueError("unsupported Jesse session export schema_version; expected 1")
+    if raw.get("source") != "jesse_optimization_session":
+        raise ValueError(
+            "Jesse session export source must be 'jesse_optimization_session'"
+        )
+    session_id = raw.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("Jesse session export requires non-empty session_id")
+    study_name = raw.get("study_name")
+    if not isinstance(study_name, str) or not study_name.strip():
+        raise ValueError("Jesse session export requires non-empty study_name")
+    direction = raw.get("direction")
+    if direction not in {"maximize", "minimize"}:
+        raise ValueError("Jesse session direction must be maximize or minimize")
+    if raw.get("status") != "completed":
+        raise ValueError("Jesse session export must have status='completed'")
+    if raw.get("trial_records_complete") is not True:
+        if raw.get("best_candidates") is not None:
+            raise ValueError(
+                "Jesse best_candidates is partial; full trials export required"
+            )
+        raise ValueError(
+            "Jesse session export requires trial_records_complete=true"
+        )
+    total_trials = _nonnegative_int(raw.get("total_trials"), "total_trials")
+    completed_trials = _nonnegative_int(
+        raw.get("completed_trials"), "completed_trials",
+    )
+    raw_trials = raw.get("trials")
+    if not isinstance(raw_trials, list):
+        raise ValueError("Jesse session export requires full trials array")
+    if not raw_trials:
+        raise ValueError("Jesse session export contains no trial records")
+    if total_trials != completed_trials or completed_trials != len(raw_trials):
+        raise ValueError(
+            "Jesse session trial counts must match full trials array: "
+            f"total_trials={total_trials}, completed_trials={completed_trials}, "
+            f"records={len(raw_trials)}"
+        )
+    trials: list[OptunaTrial] = []
+    numbers: set[int] = set()
+    for index, item in enumerate(raw_trials):
+        if not isinstance(item, dict):
+            raise ValueError(f"Jesse trial record {index} must be an object")
+        number = _nonnegative_int(item.get("number"), f"trials[{index}].number")
+        if number in numbers:
+            raise ValueError(f"duplicate Jesse trial number: {number}")
+        numbers.add(number)
+        if str(item.get("state") or "").upper() != "COMPLETE":
+            raise ValueError(
+                f"Jesse trial {number} must have state='COMPLETE'"
+            )
+        objective = _finite(item.get("objective_value"))
+        if objective is None:
+            raise ValueError(
+                f"Jesse trial {number} requires finite objective_value"
+            )
+        params = item.get("params")
+        if not isinstance(params, dict):
+            raise ValueError(f"Jesse trial {number} params must be an object")
+        training_metrics = item.get("training_metrics")
+        testing_metrics = item.get("testing_metrics")
+        if not isinstance(training_metrics, dict) or not training_metrics:
+            raise ValueError(
+                f"Jesse trial {number} requires training_metrics object"
+            )
+        if not isinstance(testing_metrics, dict) or not testing_metrics:
+            raise ValueError(
+                f"Jesse trial {number} requires testing_metrics object"
+            )
+        user_attrs = item.get("user_attrs", {})
+        system_attrs = item.get("system_attrs", {})
+        if not isinstance(user_attrs, dict):
+            raise ValueError(f"Jesse trial {number} user_attrs must be an object")
+        if not isinstance(system_attrs, dict):
+            raise ValueError(f"Jesse trial {number} system_attrs must be an object")
+        trials.append(OptunaTrial(
+            number=number,
+            state="COMPLETE",
+            objective_value=objective,
+            started_at=_timestamp(item.get("started_at")),
+            completed_at=_timestamp(item.get("completed_at")),
+            params=dict(params),
+            distributions={},
+            user_attrs={
+                **user_attrs,
+                "training_metrics": dict(training_metrics),
+                "testing_metrics": dict(testing_metrics),
+            },
+            system_attrs={
+                **system_attrs,
+                "source_provider": "jesse",
+                "source_session_id": session_id,
+            },
+        ))
+    trials.sort(key=lambda trial: trial.number)
+    return JesseSessionExport(
+        session_id=session_id,
+        study=OptunaStudy(
+            source_study_id=0,
+            name=study_name,
+            direction=direction,
+            trials=tuple(trials),
+        ),
+    )
+
+
+def _nonnegative_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"Jesse session {field} must be a non-negative integer")
+    return value
 
 
 def read_optuna_study(
@@ -210,15 +349,81 @@ def import_optuna_study(
     stable = hashlib.sha256(
         f"{source_path}:{snapshot.source_study_id}".encode()
     ).hexdigest()[:12].upper()
-    study_id = target_study_id or f"OPTUNA-{stable}"
-    classifications = dict(
-        classifications
-        if classifications is not None
-        else (
-            EMA_V7_CLASSIFICATIONS
-            if study_name.startswith("EmaConvictionTrendV7_") else {}
-        )
+    return _import_study_snapshot(
+        database,
+        snapshot,
+        source_path=source_path,
+        source_identity_path=str(source_path),
+        source_study_id=snapshot.source_study_id,
+        stable=stable,
+        run_namespace="OPTUNA",
+        provider_label="Optuna",
+        study_id_prefix="OPTUNA",
+        parent_experiment_id=parent_experiment_id,
+        parent_work_item_id=parent_work_item_id,
+        strategy=strategy,
+        objective_name=objective_name,
+        classifications=(
+            classifications
+            if classifications is not None
+            else (
+                EMA_V7_CLASSIFICATIONS
+                if study_name.startswith("EmaConvictionTrendV7_") else {}
+            )
+        ),
+        target_study_id=target_study_id,
     )
+
+
+def import_jesse_session_export(
+    database: WorkflowDatabase,
+    source_path: Path,
+    *,
+    target_study_id: str,
+    classifications: Mapping[int, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Attach a complete Jesse session export to one existing ATS study."""
+    exported = read_jesse_session_export(source_path)
+    source_path = source_path.resolve()
+    stable = hashlib.sha256(exported.session_id.encode()).hexdigest()[:12].upper()
+    result = _import_study_snapshot(
+        database,
+        exported.study,
+        source_path=source_path,
+        source_identity_path=f"jesse-session:{exported.session_id}",
+        source_study_id=0,
+        stable=stable,
+        run_namespace="JESSE",
+        provider_label="Jesse",
+        study_id_prefix="JESSE",
+        classifications=classifications,
+        target_study_id=target_study_id,
+    )
+    result["source_session_id"] = exported.session_id
+    return result
+
+
+def _import_study_snapshot(
+    database: WorkflowDatabase,
+    snapshot: OptunaStudy,
+    *,
+    source_path: Path,
+    source_identity_path: str,
+    source_study_id: int,
+    stable: str,
+    run_namespace: str,
+    provider_label: str,
+    study_id_prefix: str,
+    parent_experiment_id: str | None = None,
+    parent_work_item_id: str | None = None,
+    strategy: str | None = None,
+    objective_name: str | None = None,
+    classifications: Mapping[int, Mapping[str, Any]] | None = None,
+    target_study_id: str | None = None,
+) -> dict[str, Any]:
+    """Persist one validated optimizer snapshot and resume HPO analysis."""
+    study_id = target_study_id or f"{study_id_prefix}-{stable}"
+    classifications = dict(classifications or {})
     now = utc_now()
     started_at = min(
         (trial.started_at for trial in snapshot.trials if trial.started_at),
@@ -247,17 +452,25 @@ def import_optuna_study(
                 )
             if target["study_name"] != snapshot.name:
                 raise ValueError(
-                    "Optuna study name does not match target HPO study: "
+                    f"{provider_label} study name does not match target HPO study: "
                     f"{snapshot.name!r} != {target['study_name']!r}"
+                )
+            if target["source_database_path"] is not None and (
+                target["source_database_path"] != source_identity_path
+                or target["source_study_id"] != source_study_id
+            ):
+                raise ValueError(
+                    f"target HPO study already attached to another "
+                    f"{provider_label} source"
                 )
             existing_source = connection.execute(
                 """SELECT id FROM hpo_studies
                    WHERE source_database_path=? AND source_study_id=? AND id<>?""",
-                (str(source_path), snapshot.source_study_id, study_id),
+                (source_identity_path, source_study_id, study_id),
             ).fetchone()
             if existing_source is not None:
                 raise ValueError(
-                    "Optuna source is already attached to another HPO study: "
+                    f"{provider_label} source is already attached to another HPO study: "
                     f"{existing_source['id']}"
                 )
             parent_experiment_id = target["parent_experiment_id"]
@@ -323,7 +536,7 @@ def import_optuna_study(
                 parent_experiment_id, parent_work_item_id,
                 hpo_experiment_id, hpo_work_item_id,
                 objective_name, snapshot.direction,
-                str(source_path), snapshot.source_study_id,
+                source_identity_path, source_study_id,
                 len(snapshot.trials),
                 sum(trial.state == "COMPLETE" for trial in snapshot.trials),
                 started_at, completed_at, created_at, now,
@@ -333,8 +546,8 @@ def import_optuna_study(
             "DELETE FROM hpo_selected_trials WHERE study_id=?", (study_id,),
         )
         for trial in snapshot.trials:
-            run_id = f"OPTUNA-RUN-{stable}-{trial.number}"
-            session_id = f"optuna-{stable.lower()}-{trial.number}"
+            run_id = f"{run_namespace}-RUN-{stable}-{trial.number}"
+            session_id = f"{run_namespace.lower()}-{stable.lower()}-{trial.number}"
             route_runs = []
             for key, split in (
                 ("training_metrics", "train"),
@@ -501,7 +714,7 @@ def import_optuna_study(
                     )
     return {
         "study_id": study_id,
-        "source_study_id": snapshot.source_study_id,
+        "source_study_id": source_study_id,
         "study_name": snapshot.name,
         "source_path": str(source_path),
         "trials_imported": imported,

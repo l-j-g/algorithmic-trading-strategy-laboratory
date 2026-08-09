@@ -7,7 +7,12 @@ import unittest
 from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
-from ats_lab.hpo import import_optuna_study, read_optuna_study
+from ats_lab.hpo import (
+    import_jesse_session_export,
+    import_optuna_study,
+    read_jesse_session_export,
+    read_optuna_study,
+)
 from ats_lab.models import ExperimentSpec, ExperimentType, WorkItem, WorkState, utc_now
 
 
@@ -95,6 +100,76 @@ class OptunaImportTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def write_jesse_export(self, **updates: object) -> Path:
+        payload = {
+            "schema_version": 1,
+            "source": "jesse_optimization_session",
+            "session_id": "2b1db2fb-801d-4c06-a06c-551a08f6b410",
+            "study_name": "Trend_optuna",
+            "direction": "maximize",
+            "status": "completed",
+            "trial_records_complete": True,
+            "total_trials": 2,
+            "completed_trials": 2,
+            "trials": [{
+                "number": 0,
+                "state": "COMPLETE",
+                "objective_value": 0.65,
+                "started_at": "2026-08-01T00:00:00Z",
+                "completed_at": "2026-08-01T00:00:05Z",
+                "params": {"period": 12},
+                "training_metrics": {
+                    "net_profit_percentage": 12,
+                    "sharpe_ratio": 1.5,
+                    "total_trades": 40,
+                },
+                "testing_metrics": {
+                    "net_profit_percentage": 8,
+                    "sharpe_ratio": 1.1,
+                    "total_trades": 25,
+                },
+            }, {
+                "number": 1,
+                "state": "COMPLETE",
+                "objective_value": 0.55,
+                "params": {"period": 14},
+                "training_metrics": {
+                    "net_profit_percentage": 10,
+                    "sharpe_ratio": 1.3,
+                    "total_trades": 36,
+                },
+                "testing_metrics": {
+                    "net_profit_percentage": 7,
+                    "sharpe_ratio": 1.0,
+                    "total_trades": 22,
+                },
+            }],
+            "best_candidates": [{"number": 0}],
+        }
+        payload.update(updates)
+        path = Path(self.temp.name) / "jesse-session.json"
+        path.write_text(json.dumps(payload))
+        return path
+
+    def park_target_study(self, study_id: str = "HPO-JESSE") -> str:
+        now = utc_now()
+        with self.database.connect() as connection:
+            connection.execute(
+                """INSERT INTO hpo_studies(
+                       id,study_name,strategy,parent_experiment_id,
+                       parent_work_item_id,hpo_experiment_id,hpo_work_item_id,
+                       lifecycle_state,objective_name,direction,created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?,'hpo_scheduled',?,?,?,?)""",
+                (
+                    study_id, "Trend_optuna", "Trend", "EXP-HPO", "JOB-HPO",
+                    "EXP-HPO", "JOB-HPO", "holdout_score", "maximize", now, now,
+                ),
+            )
+        self.database.complete_hpo_study(
+            study_id, require_trial_evidence=True,
+        )
+        return study_id
 
     def test_read_and_import_without_optuna_dependency(self) -> None:
         snapshot = read_optuna_study(self.source, study_name="Trend_optuna")
@@ -323,6 +398,78 @@ class OptunaImportTests(unittest.TestCase):
             )[0]["count"],
             1,
         )
+
+    def test_complete_jesse_session_export_resumes_parked_study(self) -> None:
+        source = self.write_jesse_export()
+        target = self.park_target_study()
+
+        snapshot = read_jesse_session_export(source)
+        result = import_jesse_session_export(
+            self.database, source, target_study_id=target,
+        )
+        repeated = import_jesse_session_export(
+            self.database, source, target_study_id=target,
+        )
+
+        self.assertEqual(snapshot.session_id, result["source_session_id"])
+        self.assertEqual(result["trials_imported"], 2)
+        self.assertEqual(result["normalized_evidence_rows"], 4)
+        self.assertEqual(repeated["trials_imported"], 2)
+        self.assertEqual(
+            self.database.rows(
+                "SELECT COUNT(*) AS count FROM hpo_trials WHERE study_id=?",
+                (target,),
+            )[0]["count"],
+            2,
+        )
+        study = self.database.rows(
+            "SELECT * FROM hpo_studies WHERE id=?", (target,),
+        )[0]
+        self.assertEqual(study["completed_trial_count"], 2)
+        self.assertEqual(
+            study["source_database_path"],
+            "jesse-session:2b1db2fb-801d-4c06-a06c-551a08f6b410",
+        )
+        self.assertEqual(study["lifecycle_state"], "hpo_analysis")
+        self.assertIsNone(self.database.rows(
+            "SELECT blocker_code FROM work_items WHERE id='JOB-HPO'",
+        )[0]["blocker_code"])
+
+    def test_jesse_best_candidates_only_export_is_rejected(self) -> None:
+        source = self.write_jesse_export(
+            trial_records_complete=False,
+            trials=None,
+            best_candidates=[{"number": 0, "fitness": 0.65}],
+        )
+        target = self.park_target_study()
+
+        with self.assertRaisesRegex(
+            ValueError, "best_candidates is partial; full trials export required",
+        ):
+            import_jesse_session_export(
+                self.database, source, target_study_id=target,
+            )
+
+        self.assertEqual(self.database.rows(
+            "SELECT COUNT(*) AS count FROM hpo_trials WHERE study_id=?",
+            (target,),
+        )[0]["count"], 0)
+
+    def test_jesse_incomplete_trial_array_is_rejected_without_writes(self) -> None:
+        full = json.loads(self.write_jesse_export().read_text())
+        source = self.write_jesse_export(trials=full["trials"][:1])
+        target = self.park_target_study()
+
+        with self.assertRaisesRegex(ValueError, "trial counts must match"):
+            import_jesse_session_export(
+                self.database, source, target_study_id=target,
+            )
+
+        study = self.database.rows(
+            "SELECT * FROM hpo_studies WHERE id=?", (target,),
+        )[0]
+        self.assertEqual(study["trial_count"], 0)
+        self.assertIsNone(study["source_database_path"])
 
     def test_read_rejects_partial_optuna_schema(self) -> None:
         partial = Path(self.temp.name) / "partial.sqlite3"
