@@ -10,6 +10,7 @@
     health: "/api/v1/health",
     queue: "/api/v1/queue",
     hpoStudies: "/api/v1/hpo/studies",
+    control: "/api/v1/control",
   });
   const API_BASE = String(window.ATS_LAB_API_BASE || "").replace(/\/$/, "");
   const REFRESH_INTERVAL_MS = 30000;
@@ -32,6 +33,7 @@
       { id: "HPO-018", name: "Kama ADX defaults", strategy: "KamaAdxPullback", state: "hpo_analysis", completed_trials: 42, total_trials: 50, selected: 3, validation: 1, next_action: "Review analyzer evidence" },
       { id: "HPO-017", name: "Range breakout search", strategy: "RangeBreakout", state: "requirements_pending", completed_trials: 0, total_trials: 30, selected: 0, validation: 0, next_action: "Attach completed study" },
     ],
+    control: { available: false, desired_state: "unknown", supervisor_phase: "unknown" },
     demo: true,
   };
 
@@ -113,19 +115,35 @@
     }));
   }
 
+  function normalizeControl(payload) {
+    const source = firstObject(payload, ["control", "data"]);
+    const supervisor = payload?.supervisor || {};
+    return {
+      available: true,
+      desired_state: source.desired_state ?? "unknown",
+      supervisor_phase: supervisor.phase ?? "not_reported",
+      process_id: supervisor.process_id ?? null,
+    };
+  }
+
   async function loadSnapshot(client) {
     const entries = await Promise.allSettled([
       client.getJson(client.routes.summary), client.getJson(client.routes.health),
       client.getJson(client.routes.queue), client.getJson(client.routes.hpoStudies),
+      client.getJson(client.routes.control),
     ]);
-    const [summary, health, queue, hpoStudies] = entries;
-    const failures = entries.filter((entry) => entry.status === "rejected").map((entry) => entry.reason?.message || "request failed");
+    const [summary, health, queue, hpoStudies, control] = entries;
+    const dataEntries = entries.slice(0, 4);
+    const failures = dataEntries.filter((entry) => entry.status === "rejected").map((entry) => entry.reason?.message || "request failed");
     return {
       summary: summary.status === "fulfilled" ? normalizeSummary(summary.value) : DEMO.summary,
       health: health.status === "fulfilled" ? normalizeHealth(health.value) : { status: "degraded", label: "Health unavailable", detail: "Health endpoint failed" },
       queue: queue.status === "fulfilled" ? normalizeQueue(queue.value) : DEMO.queue,
       hpoStudies: hpoStudies.status === "fulfilled" ? normalizeHpo(hpoStudies.value) : DEMO.hpoStudies,
-      failures, demo: failures.length === entries.length,
+      control: control.status === "fulfilled" ? normalizeControl(control.value) : DEMO.control,
+      failures,
+      controlFailure: control.status === "rejected",
+      demo: failures.length === dataEntries.length,
     };
   }
 
@@ -164,6 +182,19 @@
     $("#health-label").textContent = health.label || "Unknown";
     $("#snapshot-source").textContent = snapshot.demo ? "Demo fallback" : (snapshot.failures.length ? "Partial API" : "Live API");
     $("#last-updated").textContent = `Updated ${formatTime(snapshot.summary.updated_at, "just now")}`;
+  }
+
+  function renderControl(snapshot) {
+    const control = snapshot.control;
+    $("#control-state").textContent = control.available
+      ? `Desired ${control.desired_state} · ${control.supervisor_phase}`
+      : "Control API unavailable";
+    document.querySelectorAll("[data-control]").forEach((button) => {
+      button.disabled = !control.available;
+    });
+    if (snapshot.controlFailure) {
+      $("#control-output").textContent = "Controls unavailable. Start same-origin loopback API or use CLI.";
+    }
   }
 
   function renderAttention(snapshot) {
@@ -234,19 +265,43 @@
     });
   }
 
+  function bindControls() {
+    document.querySelectorAll("[data-control]").forEach((button) => button.addEventListener("click", async () => {
+      const action = button.dataset.control;
+      if (["pause", "stop"].includes(action) && !window.confirm(`Confirm research loop ${action}?`)) return;
+      const output = $("#control-output");
+      button.disabled = true;
+      output.textContent = `${action} requested…`;
+      try {
+        const response = await fetch(`${API_BASE}${API_ROUTES.control}/${action}`, {
+          method: "POST",
+          headers: { Accept: "application/json", "X-ATS-Lab-Confirm": action },
+          cache: "no-store",
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload?.error?.detail || `${response.status} control request failed`);
+        output.textContent = `${action} accepted. Refreshing state…`;
+        await refresh();
+      } catch (error) {
+        output.textContent = `Control failed: ${error.message || "request failed"}`;
+        button.disabled = false;
+      }
+    }));
+  }
+
   async function refresh() {
     const button = $("#refresh-button");
     button.disabled = true;
     button.textContent = "Refreshing…";
     try {
       const snapshot = await loadSnapshot(createApiClient());
-      renderSummary(snapshot); renderHealth(snapshot); renderAttention(snapshot); renderQueue(snapshot); renderHpo(snapshot); renderStale(snapshot);
+      renderSummary(snapshot); renderHealth(snapshot); renderControl(snapshot); renderAttention(snapshot); renderQueue(snapshot); renderHpo(snapshot); renderStale(snapshot);
     } finally {
       button.disabled = false;
       button.textContent = "Refresh";
     }
   }
 
-  window.ATS_LAB_CONTROL_ROOM = Object.freeze({ API_ROUTES, createApiClient, normalizeSummary, normalizeHealth, normalizeQueue, normalizeHpo, loadSnapshot, refresh });
-  document.addEventListener("DOMContentLoaded", () => { bindCommands(); bindStartApi(); refresh(); window.setInterval(refresh, REFRESH_INTERVAL_MS); });
+  window.ATS_LAB_CONTROL_ROOM = Object.freeze({ API_ROUTES, createApiClient, normalizeSummary, normalizeHealth, normalizeQueue, normalizeHpo, normalizeControl, loadSnapshot, refresh });
+  document.addEventListener("DOMContentLoaded", () => { bindCommands(); bindStartApi(); bindControls(); refresh(); window.setInterval(refresh, REFRESH_INTERVAL_MS); });
 }());

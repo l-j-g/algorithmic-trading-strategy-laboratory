@@ -4,9 +4,10 @@
 plain HTML, CSS, and browser JavaScript: no package manager, bundler, or
 frontend dependency is required.
 
-The shell is intentionally read-oriented. Command buttons display the command
-placeholder only; they do not pause, resume, stop, claim, requeue, or otherwise
-write ATS Lab state. Canonical state remains the ATS Lab SQLite projection.
+The shell reads canonical SQLite state and exposes a narrow loopback supervisor
+control panel. Controls start/resume, pause, or gracefully stop the existing
+ATS Lab supervisor lifecycle. No claim, requeue, evidence, Jesse, or Memory
+mutation is exposed.
 
 ## Run locally
 
@@ -40,6 +41,12 @@ The browser adapter requests these same-origin JSON endpoints:
 | Header health | `/api/v1/health` |
 | Queue table | `/api/v1/queue` |
 | HPO panel | `/api/v1/hpo/studies` |
+| Supervisor state | `/api/v1/control` |
+
+`POST /api/v1/control/start`, `/pause`, `/resume`, and `/stop` require the
+matching `X-ATS-Lab-Confirm` header. Mutation routes are enabled only when
+`ats-lab web` binds to loopback (`127.0.0.1`, `localhost`, or `::1`). Remote
+bindings remain read-only.
 
 The adapter accepts either a direct payload or common `data`, `summary`,
 `items`, `queue`, `work_items`, `studies`, and `hpo_studies` wrappers. The
@@ -63,15 +70,18 @@ not `/api/v1/...`; this frontend does not alter or alias backend routes.
 
 No frontend test runner exists in this repository, so verification is manual:
 
-1. Run the static server command above.
+1. Run the same-origin server command above.
 2. Confirm the page shows four summary cards, attention list, queue table, HPO
-   cards, command placeholders, and the stale-data banner.
+   cards, supervisor controls, and CLI command placeholders.
 3. Click `Refresh`; confirm the button disables briefly and the stale banner
    remains visible when `/api/v1/*` is unavailable.
-4. Activate each command button; confirm it only updates the status text and
+4. Activate `Pause` or `Stop`; confirm browser confirmation, durable control
+   state change, and audit event. Do not test against live research unless
+   intentional.
+5. Activate each CLI command button; confirm it only updates status text and
    does not execute a shell command.
-5. Resize to a narrow viewport and use keyboard `Tab`; confirm responsive
+6. Resize to a narrow viewport and use keyboard `Tab`; confirm responsive
    layout, visible focus, skip link, table headers, and readable status text.
-6. When API fixtures are available, serve the page from the API origin or set
+7. When API fixtures are available, serve the page from the API origin or set
    `window.ATS_LAB_API_BASE`, then confirm live/partial API labels and stale
    handling for an endpoint failure or old `updated_at` value.

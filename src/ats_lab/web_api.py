@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .dashboard import hpo_detail_snapshot, query_page
 from .database import WorkflowDatabase
+from .loop_control import SupervisorLoopControl
 from .status import operator_status
 
 
@@ -204,6 +205,13 @@ class ReadOnlyApi:
     def hpo_detail(self, study_id: str) -> dict[str, object] | None:
         return hpo_detail_snapshot(self.database, study_id)
 
+    def control_snapshot(self) -> dict[str, object]:
+        """Return durable supervisor intent and last published runtime state."""
+        return {
+            "control": self.database.control_status(),
+            "supervisor": self.database.supervisor_runtime_status(),
+        }
+
     def snapshot(self, event_limit: int = 20) -> ApiSnapshot:
         status = self._status()
         return ApiSnapshot(
@@ -216,6 +224,41 @@ class ReadOnlyApi:
 # Explicit alias keeps service naming discoverable for callers that prefer the
 # longer form while retaining one implementation and one read-only boundary.
 ReadOnlyApiService = ReadOnlyApi
+
+
+class ControlService:
+    """Loopback operator controls backed by the existing lifecycle boundary."""
+
+    ACTIONS = frozenset(("start", "pause", "resume", "stop"))
+
+    def __init__(
+        self,
+        database: WorkflowDatabase,
+        repo: Path,
+        *,
+        lifecycle: SupervisorLoopControl | None = None,
+    ) -> None:
+        self.database = database
+        self.lifecycle = lifecycle or SupervisorLoopControl(database, repo)
+
+    def snapshot(self) -> dict[str, object]:
+        return ReadOnlyApi(self.database).control_snapshot()
+
+    def apply(self, action: str) -> dict[str, object]:
+        if action not in self.ACTIONS:
+            raise ValueError(f"unsupported control action: {action}")
+        method = {
+            "start": self.lifecycle.start,
+            "pause": self.lifecycle.pause,
+            "resume": self.lifecycle.start,
+            "stop": self.lifecycle.stop,
+        }[action]
+        result = method().to_dict()
+        return {
+            "action": action,
+            "result": result,
+            **self.snapshot(),
+        }
 
 
 def health_snapshot(
@@ -252,6 +295,7 @@ def make_handler(
     value: ReadOnlyApi | WorkflowDatabase,
     *,
     static_dir: Path | None = None,
+    control_service: ControlService | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build GET-only API handler, optionally serving the Control Room shell."""
 
@@ -334,6 +378,12 @@ def make_handler(
                     self._send_json(api.page_snapshot(page, params))
                 elif request.path in {"/api/hpo-studies", "/api/v1/hpo/studies"}:
                     self._send_json(api.hpo_snapshot(params))
+                elif request.path in {"/api/control", "/api/v1/control"}:
+                    self._send_json(
+                        control_service.snapshot()
+                        if control_service is not None
+                        else api.control_snapshot()
+                    )
                 elif request.path.startswith("/api/v1/hpo/studies/"):
                     study_id = request.path.removeprefix("/api/v1/hpo/studies/")
                     detail = api.hpo_detail(study_id)
@@ -367,7 +417,28 @@ def make_handler(
             self.wfile.write(body)
 
         def do_POST(self) -> None:  # noqa: N802
-            self._reject_mutation()
+            request = urlsplit(self.path)
+            prefix = "/api/v1/control/"
+            if control_service is None or not request.path.startswith(prefix):
+                self._reject_mutation()
+                return
+            action = request.path.removeprefix(prefix).strip("/")
+            if action not in ControlService.ACTIONS:
+                self._error(404, "not_found", "control action not found")
+                return
+            if self.headers.get("X-ATS-Lab-Confirm") != action:
+                self._error(
+                    428,
+                    "confirmation_required",
+                    f"send X-ATS-Lab-Confirm: {action} to confirm control action",
+                )
+                return
+            try:
+                self._send_json(control_service.apply(action))
+            except (KeyError, OSError, sqlite3.Error) as error:
+                self._error(503, "control_unavailable", str(error))
+            except ValueError as error:
+                self._error(400, "invalid_request", str(error))
 
         def do_PUT(self) -> None:  # noqa: N802
             self._reject_mutation()
@@ -420,8 +491,17 @@ def serve_web(
         raise FileNotFoundError(f"frontend directory missing: {frontend_dir}")
     database.initialize()
     api = ReadOnlyApi(database, claim_timeout_seconds=claim_timeout_seconds)
+    loopback_hosts = {"127.0.0.1", "localhost", "::1"}
+    control_service = (
+        ControlService(database, repo) if host in loopback_hosts else None
+    )
     server = ThreadingHTTPServer(
-        (host, port), make_handler(api, static_dir=frontend_dir),
+        (host, port),
+        make_handler(
+            api,
+            static_dir=frontend_dir,
+            control_service=control_service,
+        ),
     )
     print(f"ATS Lab Control Room: http://{host}:{server.server_port}")
     try:

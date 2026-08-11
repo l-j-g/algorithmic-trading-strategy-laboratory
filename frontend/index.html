@@ -122,6 +122,19 @@
         </div>
         <p class="command-output" id="command-output" role="status" aria-live="polite">Select a command to copy its planned terminal action.</p>
       </section>
+
+      <section class="panel controls-panel" aria-labelledby="controls-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">Supervisor control</p><h2 id="controls-title">Research loop</h2></div>
+          <span class="panel-caption" id="control-state">Control state unknown</span>
+        </div>
+        <div class="control-grid">
+          <button class="control-button" type="button" data-control="start"><span>Start / resume</span><small>Launch supervisor</small></button>
+          <button class="control-button" type="button" data-control="pause"><span>Pause</span><small>Stop new claims</small></button>
+          <button class="control-button control-danger" type="button" data-control="stop"><span>Stop gracefully</span><small>Request supervisor stop</small></button>
+        </div>
+        <p class="command-output" id="control-output" role="status" aria-live="polite">Controls require local loopback API.</p>
+      </section>
     </main>
 
     <footer class="page-footer">

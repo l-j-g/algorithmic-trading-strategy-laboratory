@@ -11,7 +11,7 @@ from http.server import ThreadingHTTPServer
 
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import ExperimentSpec, WorkItem, WorkState
-from ats_lab.web_api import ReadOnlyApi, make_handler
+from ats_lab.web_api import ControlService, ReadOnlyApi, make_handler
 
 
 class WebApiTests(unittest.TestCase):
@@ -98,6 +98,10 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(hpo["page"], "hpo")
                 self.assertIsInstance(hpo["rows"], list)
 
+            with urllib.request.urlopen(f"{base}/api/v1/control") as response:
+                control = json.load(response)
+                self.assertEqual(control["control"]["desired_state"], "running")
+
             with urllib.request.urlopen(f"{base}/api/events?limit=1") as response:
                 events = json.load(response)["events"]
                 self.assertEqual(len(events), 1)
@@ -115,6 +119,43 @@ class WebApiTests(unittest.TestCase):
             context.exception.close()
             self.assertEqual(context.exception.code, 405)
             self.assertEqual(context.exception.headers["Allow"], "GET")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_loopback_control_requires_confirmation_and_records_pause(self) -> None:
+        service = ControlService(self.database, Path(self.temporary.name))
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), make_handler(self.database, control_service=service),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = urllib.request.Request(
+                f"{base}/api/v1/control/pause", method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as context:
+                urllib.request.urlopen(request)
+            context.exception.close()
+            self.assertEqual(context.exception.code, 428)
+            self.assertEqual(
+                self.database.control_status()["desired_state"], "running",
+            )
+
+            request = urllib.request.Request(
+                f"{base}/api/v1/control/pause",
+                headers={"X-ATS-Lab-Confirm": "pause"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                result = json.load(response)
+            self.assertEqual(result["action"], "pause")
+            self.assertEqual(result["control"]["desired_state"], "paused")
+            self.assertEqual(
+                self.database.control_status()["updated_by"], "loop:pause",
+            )
         finally:
             server.shutdown()
             server.server_close()
