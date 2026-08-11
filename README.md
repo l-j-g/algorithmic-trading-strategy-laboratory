@@ -37,6 +37,39 @@ and bounded refactoring order.
 The installed CLI discovers the canonical ATS Lab checkout automatically.
 Use `--repo` and `--database` only when intentionally targeting another lab.
 
+## Repository layout
+
+Three repositories have separate jobs:
+
+| Repository | Owns | Update rule |
+|---|---|---|
+| `jesse-upstream` | clean public Jesse engine checkout | fetch and fast-forward only |
+| `jesse-src` | private strategies, routes, config, candles, research notes | research agents edit through Jesse worktrees |
+| `algorithmic-trading-strategy-laboratory` | ATS code, SQLite queue/evidence, contracts, operators | normal feature worktrees |
+
+Use one control surface from ATS Lab:
+
+```bash
+scripts/jesse-workspace.sh status
+scripts/jesse-workspace.sh upstream update
+scripts/jesse-workspace.sh image build
+scripts/jesse-workspace.sh stack up
+```
+
+`image build` tags the image with the exact upstream commit and `stack up`
+starts Jesse from that immutable tag. The default upstream checkout is
+`<repo-root>/src/repos/jesse-upstream`; override with
+`JESSE_UPSTREAM_REPOSITORY` when needed. Do not use `salehmir/jesse:latest`
+for a research run when commit provenance matters.
+
+For a scheduled refresh, run `scripts/jesse-workspace.sh upstream refresh`.
+It fast-forwards the public mirror and builds only when the corresponding
+commit-tagged image is absent.
+
+`jesse-src` remains the configured Agent repository because it contains the
+research workspace. The Jesse engine inside the container comes from the clean
+public upstream checkout. See [workspace integration](docs/workspace-integration.md).
+
 ## What to use
 
 Use three interfaces:

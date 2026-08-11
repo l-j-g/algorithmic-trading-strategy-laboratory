@@ -1,6 +1,8 @@
 # Parallel worktree protocol
 
-Use Git worktrees for independent code and documentation tasks. The main checkout remains the integration and runtime-operations lane.
+Use Git worktrees for independent code and documentation tasks. The main
+checkout remains the integration and runtime-operations lane. Cross-repository
+tasks use paired ATS and Jesse worktrees with one shared slug.
 
 ## Invariants
 
@@ -12,6 +14,30 @@ Use Git worktrees for independent code and documentation tasks. The main checkou
 6. Each lane commits only a verified logical change. Before integration: focused tests, full relevant suite, `git diff --check`, and a secret/runtime-artifact review.
 7. Integration is performed by commit SHA, normally with `git cherry-pick`. Resolve conflicts and rerun verification in the main lane. Never merge an unreviewed worktree wholesale.
 8. A lane reports its branch, worktree path, commit SHA, changed files, tests, and any shared-state assumptions.
+
+## Paired ATS/Jesse lane
+
+Create both worktrees from ATS Lab:
+
+```bash
+scripts/jesse-workspace.sh worktree create <task-slug>
+```
+
+Output gives two paths and the shared `task/<task-slug>` branch name. Assign
+the ATS path to harness/code work and the Jesse path to strategy/config work.
+Each repository gets its own commit; there is no cross-repository atomic
+commit. Integrate the ATS commit and Jesse commit separately after review.
+
+List or remove paired lanes:
+
+```bash
+scripts/jesse-workspace.sh worktree list
+scripts/jesse-workspace.sh worktree remove <task-slug>
+```
+
+Removal refuses dirty worktrees. Existing uncommitted files in either main
+checkout are not copied into a lane and must be preserved or resolved by the
+owner before treating that checkout as an integration base.
 
 ## Start a lane
 
@@ -82,3 +108,9 @@ Serialize these through the main lane:
 - shared Jesse session creation;
 - changes touching the same state machine or schema migration;
 - final integration and release commits.
+
+Also serialize upstream refresh and image publication. Agents may inspect the
+clean upstream checkout, but only the release/integration lane runs
+`upstream update`, `image build`, or `stack up`. Jesse/PostgreSQL/Redis/MCP and
+the ATS SQLite database are shared runtime state, not parallel-agent scratch
+space.

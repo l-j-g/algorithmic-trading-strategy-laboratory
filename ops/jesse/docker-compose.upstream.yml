@@ -1,0 +1,3 @@
+services:
+  jesse:
+    image: ${JESSE_IMAGE:?run scripts/jesse-workspace.sh image build first}
