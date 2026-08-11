@@ -54,6 +54,9 @@ class SummarySnapshot:
     """Canonical SQLite workflow summary shared by terminal and web callers."""
 
     checked_at: str
+    heartbeat_at: str | None
+    desired_state: str | None
+    supervisor_phase: str | None
     healthy: bool
     progress_state: str
     next_action: str
@@ -62,7 +65,9 @@ class SummarySnapshot:
     blocked: int
     awaiting_batch_evaluation: int
     running_execution_claims: int
+    active_running_claims: int
     unresolved_execution_claims: int
+    stale_execution_claims: int
     latest_event: str | None
     synthesis: Mapping[str, object]
     hpo: Mapping[str, object]
@@ -139,6 +144,18 @@ class ReadOnlyApi:
         }
         return SummarySnapshot(
             checked_at=str(status["checked_at"]),
+            heartbeat_at=(
+                str(status["heartbeat_at"])
+                if status.get("heartbeat_at") is not None else None
+            ),
+            desired_state=(
+                str(status["desired_state"])
+                if status.get("desired_state") is not None else None
+            ),
+            supervisor_phase=(
+                str(status["supervisor_phase"])
+                if status.get("supervisor_phase") is not None else None
+            ),
             healthy=bool(status["healthy"]),
             progress_state=str(status["progress_state"]),
             next_action=str(status["next_action"]),
@@ -149,9 +166,11 @@ class ReadOnlyApi:
                 status["awaiting_batch_evaluation"]
             ),
             running_execution_claims=_as_int(status["running_execution_claims"]),
+            active_running_claims=_as_int(status["active_running_claims"]),
             unresolved_execution_claims=_as_int(
                 status["unresolved_execution_claims"]
             ),
+            stale_execution_claims=_as_int(status["stale_execution_claims"]),
             latest_event=(
                 str(status["latest_event"])
                 if status["latest_event"] is not None else None
@@ -191,6 +210,26 @@ class ReadOnlyApi:
         if page not in {"queue", "candidates", "runs"}:
             raise ValueError("unsupported page")
         rows, filters = query_page(self.database, page, dict(params or {}))
+        if page == "queue":
+            status = self._status()
+            stale_ids = set(status.get("stale_execution_claim_ids", ()))
+            desired_state = str(status.get("desired_state") or "")
+            decorated: list[dict[str, object]] = []
+            for row in rows:
+                item = dict(row)
+                if item.get("state") == "running":
+                    if str(item.get("id")) in stale_ids:
+                        item["canonical_state"] = "running"
+                        item["state"] = "stale_claim"
+                        item["state_detail"] = (
+                            "No recent claim heartbeat; inspect durable Jesse evidence before recovery."
+                        )
+                    elif desired_state == "stop_requested":
+                        item["canonical_state"] = "running"
+                        item["state"] = "stopping"
+                        item["state_detail"] = "Stop requested; worker may still be draining this claim."
+                decorated.append(item)
+            rows = decorated
         return {"page": page, "filters": filters, "rows": rows}
 
     def hpo_snapshot(self, params: Mapping[str, str] | None = None) -> dict[str, object]:
@@ -420,6 +459,19 @@ class ReadOnlyApi:
         )
         if not rows:
             return None
+        item = dict(rows[0])
+        status = self._status()
+        if item.get("state") == "running":
+            if work_item_id in set(status.get("stale_execution_claim_ids", ())):
+                item["canonical_state"] = "running"
+                item["state"] = "stale_claim"
+                item["state_detail"] = (
+                    "No recent claim heartbeat; inspect durable Jesse evidence before recovery."
+                )
+            elif status.get("desired_state") == "stop_requested":
+                item["canonical_state"] = "running"
+                item["state"] = "stopping"
+                item["state_detail"] = "Stop requested; worker may still be draining this claim."
         events = self.database.rows(
             """SELECT id,event_type,occurred_at FROM events
                WHERE aggregate_type='work_item' AND aggregate_id=?
@@ -427,7 +479,7 @@ class ReadOnlyApi:
             (work_item_id,),
         )
         return {
-            "work_item": rows[0],
+            "work_item": item,
             "stage_timings": self.database.work_item_stage_timings(work_item_id),
             "events": events,
             "evidence": [item.to_dict() for item in self.database.normalized_evidence_for_experiment(rows[0]["experiment_id"])],
