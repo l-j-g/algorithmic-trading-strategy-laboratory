@@ -10,8 +10,11 @@ read-only until their evidence is verified in SQLite.
 - `.executor.md`: concise Agent project routing.
 - `src/ats_lab/`: schema, services, CLI and migration adapters.
 - `tests/`: public contract, storage and migration tests.
-- `research/experiments/`: only reports that cannot yet be regenerated.
-- licensed-source provenance manifest.
+- `docs/jesse/`: Jesse evaluation gates and thesis/concept library.
+- `<repo-root>/src/repos/jesse-src/research/experiments/`: only reports that
+  cannot yet be regenerated.
+- `<repo-root>/src/repos/jesse-src/research/jesse_trade_strategy_import_manifest.json`:
+  licensed-source provenance manifest.
 
 ## Replace with generated views
 

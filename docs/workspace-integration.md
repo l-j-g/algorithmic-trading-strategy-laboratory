@@ -15,6 +15,8 @@ never mix engine source into the private research workspace.
 | Evaluations and synthesis cohorts | `.ats-lab/laboratory.sqlite3` |
 | Harness code and JSON contracts | `src/ats_lab/` |
 | Worker/resource configuration | `.ats-lab/config.toml` |
+| Jesse evaluation gates | `docs/jesse/BACKTEST_EVALUATION_PROTOCOL.md` |
+| Jesse strategy concept library | `docs/jesse/STRATEGY_CONCEPT_PLAYBOOK.md` |
 | Jesse engine source | sibling `jesse-upstream/` |
 | Strategy source | configured `jesse-src/` repository |
 | Candles and market data | Jesse, accessed through Jesse MCP |

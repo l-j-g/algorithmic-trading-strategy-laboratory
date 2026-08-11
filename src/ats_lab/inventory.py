@@ -28,7 +28,8 @@ REMOVE_PATTERNS = (
 RETAIN = {
     "AGENTS.md": "Jesse MCP safety boundary; shorten after generated rules are separated",
     ".executor.md": "Agent project entrypoint; shorten after CLI cutover",
-    "research/BACKTEST_EVALUATION_PROTOCOL.md": "evaluation policy until represented as versioned gates",
+    "research/BACKTEST_EVALUATION_PROTOCOL.md": "compatibility pointer to ATS-owned evaluation gates",
+    "research/STRATEGY_CONCEPT_PLAYBOOK.md": "compatibility pointer to ATS-owned concept library",
     "research/jesse_trade_strategy_import_manifest.json": "licensed-source provenance",
 }
 

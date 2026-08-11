@@ -47,6 +47,11 @@ Three repositories have separate jobs:
 | `jesse-src` | private strategies, routes, config, candles, research notes | research agents edit through Jesse worktrees |
 | `algorithmic-trading-strategy-laboratory` | ATS code, SQLite queue/evidence, contracts, operators | normal feature worktrees |
 
+ATS-owned Jesse research policy lives in:
+
+- `docs/jesse/BACKTEST_EVALUATION_PROTOCOL.md`
+- `docs/jesse/STRATEGY_CONCEPT_PLAYBOOK.md`
+
 Use one control surface from ATS Lab:
 
 ```bash
