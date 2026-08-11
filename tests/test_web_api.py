@@ -88,6 +88,16 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(summary["work_states"]["ready"], 1)
                 self.assertEqual(response.headers.get_content_type(), "application/json")
 
+            with urllib.request.urlopen(f"{base}/api/v1/queue?state=ready") as response:
+                queue = json.load(response)
+                self.assertEqual(queue["page"], "queue")
+                self.assertEqual(len(queue["rows"]), 1)
+
+            with urllib.request.urlopen(f"{base}/api/v1/hpo/studies") as response:
+                hpo = json.load(response)
+                self.assertEqual(hpo["page"], "hpo")
+                self.assertIsInstance(hpo["rows"], list)
+
             with urllib.request.urlopen(f"{base}/api/events?limit=1") as response:
                 events = json.load(response)["events"]
                 self.assertEqual(len(events), 1)

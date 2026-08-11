@@ -20,6 +20,7 @@ from .direct_mcp_executor import (
     load_direct_execution_config,
 )
 from .dashboard import serve as serve_dashboard
+from .web_api import serve as serve_backend
 from .inventory import build_inventory, render_markdown as render_inventory
 from .legacy_import import LegacyImporter
 from .loop_control import SupervisorLoopControl
@@ -555,6 +556,12 @@ def main() -> int:
     dashboard = sub.add_parser("dashboard", help="Serve the local read-only operator dashboard.")
     dashboard.add_argument("--host", default="127.0.0.1")
     dashboard.add_argument("--port", type=int, default=8765)
+    backend = sub.add_parser(
+        "backend", help="Serve the local read-only backend API for CLI/web clients."
+    )
+    backend.add_argument("--host", default="127.0.0.1")
+    backend.add_argument("--port", type=int, default=8766)
+    backend.add_argument("--claim-timeout-seconds", type=int, default=7200)
     args = parser.parse_args()
     if args.command is None:
         args.command = "home"
@@ -563,7 +570,7 @@ def main() -> int:
         return 0
     repo = args.repo.resolve()
     if args.command in {
-        "worker", "supervisor", "dashboard", "status", "monitor", "control",
+        "worker", "supervisor", "dashboard", "backend", "status", "monitor", "control",
         "console", "recover-claims", "resolve-blocker", "requeue-evaluation",
         "queue", "candidates", "evidence", "diagnostic-export",
         "diagnostic-hpo-trial",
@@ -616,6 +623,17 @@ def main() -> int:
         result = build_stack_preflight(repo).check()
         emit(result)
         return 0 if result["healthy"] else 2
+    elif args.command == "backend":
+        if not 0 <= args.port <= 65535:
+            parser.error("--port must be between 0 and 65535")
+        if args.claim_timeout_seconds <= 0:
+            parser.error("--claim-timeout-seconds must be positive")
+        serve_backend(
+            database,
+            host=args.host,
+            port=args.port,
+            claim_timeout_seconds=args.claim_timeout_seconds,
+        )
     elif args.command == "memory-status":
         database.initialize()
         emit(memory_status(database))

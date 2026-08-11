@@ -4,10 +4,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Mapping
 from urllib.parse import parse_qs, urlsplit
 
+from .dashboard import hpo_detail_snapshot, query_page
 from .database import WorkflowDatabase
 from .status import operator_status
 
@@ -178,6 +179,29 @@ class ReadOnlyApi:
             for row in rows
         )
 
+    def page_snapshot(
+        self, page: str, params: Mapping[str, str] | None = None,
+    ) -> dict[str, object]:
+        """Return an existing bounded dashboard projection as JSON data."""
+        if page not in {"queue", "candidates", "runs"}:
+            raise ValueError("unsupported page")
+        rows, filters = query_page(self.database, page, dict(params or {}))
+        return {"page": page, "filters": filters, "rows": rows}
+
+    def hpo_snapshot(self, params: Mapping[str, str] | None = None) -> dict[str, object]:
+        params = dict(params or {})
+        filters = {
+            key: params[key]
+            for key in ("lifecycle_state", "strategy")
+            if params.get(key)
+        }
+        query = getattr(self.database, "hpo_studies", None)
+        rows = query(filters=filters, limit=500) if query is not None else []
+        return {"page": "hpo", "filters": filters, "rows": rows}
+
+    def hpo_detail(self, study_id: str) -> dict[str, object] | None:
+        return hpo_detail_snapshot(self.database, study_id)
+
     def snapshot(self, event_limit: int = 20) -> ApiSnapshot:
         status = self._status()
         return ApiSnapshot(
@@ -255,11 +279,11 @@ def make_handler(value: ReadOnlyApi | WorkflowDatabase) -> type[BaseHTTPRequestH
                 ).items()
             }
             try:
-                if request.path in {"/health", "/api/health"}:
+                if request.path in {"/health", "/api/health", "/api/v1/health"}:
                     self._send_json(api.health_snapshot().to_dict())
-                elif request.path == "/api/summary":
+                elif request.path in {"/api/summary", "/api/v1/summary"}:
                     self._send_json(api.summary_snapshot().to_dict())
-                elif request.path == "/api/events":
+                elif request.path in {"/api/events", "/api/v1/events"}:
                     limit = int(params.get("limit", "20"))
                     self._send_json({
                         "events": [
@@ -267,9 +291,24 @@ def make_handler(value: ReadOnlyApi | WorkflowDatabase) -> type[BaseHTTPRequestH
                             for event in api.event_snapshots(limit)
                         ],
                     })
-                elif request.path == "/api/snapshot":
+                elif request.path in {"/api/snapshot", "/api/v1/snapshot"}:
                     limit = int(params.get("limit", "20"))
                     self._send_json(api.snapshot(limit).to_dict())
+                elif request.path in {
+                    "/api/queue", "/api/candidates", "/api/runs",
+                    "/api/v1/queue", "/api/v1/candidates", "/api/v1/runs",
+                }:
+                    page = request.path.rsplit("/", 1)[-1]
+                    self._send_json(api.page_snapshot(page, params))
+                elif request.path in {"/api/hpo-studies", "/api/v1/hpo/studies"}:
+                    self._send_json(api.hpo_snapshot(params))
+                elif request.path.startswith("/api/v1/hpo/studies/"):
+                    study_id = request.path.removeprefix("/api/v1/hpo/studies/")
+                    detail = api.hpo_detail(study_id)
+                    if detail is None or "/" in study_id:
+                        self._error(404, "not_found", "HPO study not found")
+                    else:
+                        self._send_json(detail)
                 else:
                     self._error(404, "not_found", "endpoint not found")
             except ValueError as error:
@@ -306,3 +345,28 @@ def make_handler(value: ReadOnlyApi | WorkflowDatabase) -> type[BaseHTTPRequestH
             self._reject_mutation()
 
     return WebApiHandler
+
+
+def serve(
+    database: WorkflowDatabase,
+    host: str = "127.0.0.1",
+    port: int = 8766,
+    *,
+    claim_timeout_seconds: int = 7200,
+) -> None:
+    """Serve the read-only backend API for CLI and web clients.
+
+    The backend deliberately owns no lifecycle mutations yet. It exposes a
+    loopback-first JSON surface over the canonical SQLite projections; the
+    existing dashboard remains a separate presentation frontend.
+    """
+    database.initialize()
+    api = ReadOnlyApi(database, claim_timeout_seconds=claim_timeout_seconds)
+    server = ThreadingHTTPServer((host, port), make_handler(api))
+    print(f"ATS Lab backend API: http://{host}:{server.server_port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
