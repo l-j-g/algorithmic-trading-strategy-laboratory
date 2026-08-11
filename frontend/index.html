@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="ATS Lab operator Control Room">
+    <title>ATS Lab | Control Room</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to Control Room</a>
+
+    <header class="site-header">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <div>
+          <p class="eyebrow">ATS Lab</p>
+          <h1>Control Room</h1>
+        </div>
+      </div>
+      <div class="header-meta">
+        <span class="environment-badge">Research only</span>
+        <span class="status-badge" id="health-status" data-status="unknown">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="health-label">Checking health</span>
+        </span>
+        <span class="last-updated" id="last-updated">No snapshot yet</span>
+        <button class="button button-secondary" id="refresh-button" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <div class="stale-banner" id="stale-banner" role="status" aria-live="polite" hidden>
+      <span class="banner-icon" aria-hidden="true">!</span>
+      <div>
+        <strong>Data may be stale.</strong>
+        <span id="stale-message">Live API snapshot unavailable. Showing safe demo values.</span>
+      </div>
+    </div>
+
+    <main id="main-content" class="page-shell">
+      <section class="page-intro" aria-labelledby="room-title">
+        <div>
+          <p class="eyebrow">Operator view</p>
+          <h2 id="room-title">Workflow at a glance</h2>
+          <p class="muted">Canonical queue state, HPO readiness, and candidate evidence in one bounded view.</p>
+        </div>
+        <span class="snapshot-chip" id="snapshot-source">Waiting for API</span>
+      </section>
+
+      <section class="summary-grid" aria-label="Workflow summary">
+        <article class="summary-card card-accent-cyan">
+          <div class="card-heading"><span class="card-icon" aria-hidden="true">Q</span><h3>Queue</h3></div>
+          <p class="metric" id="queue-count">—</p>
+          <p class="metric-label">unresolved work items</p>
+          <p class="card-footnote" id="queue-footnote">Ready — · Running —</p>
+        </article>
+        <article class="summary-card card-accent-green">
+          <div class="card-heading"><span class="card-icon" aria-hidden="true">R</span><h3>Running</h3></div>
+          <p class="metric" id="running-count">—</p>
+          <p class="metric-label">active executions</p>
+          <p class="card-footnote" id="running-footnote">Heartbeat —</p>
+        </article>
+        <article class="summary-card card-accent-magenta">
+          <div class="card-heading"><span class="card-icon" aria-hidden="true">H</span><h3>HPO</h3></div>
+          <p class="metric" id="hpo-count">—</p>
+          <p class="metric-label">active studies</p>
+          <p class="card-footnote" id="hpo-footnote">Waiting — · Validation —</p>
+        </article>
+        <article class="summary-card card-accent-yellow">
+          <div class="card-heading"><span class="card-icon" aria-hidden="true">C</span><h3>Candidates</h3></div>
+          <p class="metric" id="candidate-count">—</p>
+          <p class="metric-label">awaiting operator review</p>
+          <p class="card-footnote" id="candidate-footnote">Evidence gate —</p>
+        </article>
+      </section>
+
+      <section class="panel attention-panel" aria-labelledby="attention-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">Needs attention</p><h2 id="attention-title">Operator attention</h2></div>
+          <span class="count-chip" id="attention-count">0 items</span>
+        </div>
+        <ul class="attention-list" id="attention-list"></ul>
+      </section>
+
+      <div class="content-grid">
+        <section class="panel queue-panel" aria-labelledby="queue-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Execution lane</p><h2 id="queue-title">Queue</h2></div>
+            <span class="panel-caption">bounded work view</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <caption class="sr-only">Current unresolved ATS Lab queue items</caption>
+              <thead>
+                <tr><th scope="col">Work item</th><th scope="col">Stage</th><th scope="col">Strategy / route</th><th scope="col">Priority</th><th scope="col">Next action</th></tr>
+              </thead>
+              <tbody id="queue-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel hpo-panel" aria-labelledby="hpo-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Optimizer lane</p><h2 id="hpo-title">HPO studies</h2></div>
+            <span class="panel-caption">route readiness</span>
+          </div>
+          <div class="hpo-list" id="hpo-list"></div>
+        </section>
+      </div>
+
+      <section class="panel commands-panel" aria-labelledby="commands-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">Operator bridge</p><h2 id="commands-title">Commands</h2></div>
+          <span class="panel-caption">placeholders — no writes from this shell</span>
+        </div>
+        <div class="command-grid">
+          <button class="command-button" type="button" data-command="ats-lab status"><span>Inspect status</span><code>ats-lab status</code></button>
+          <button class="command-button" type="button" data-command="ats-lab monitor --watch"><span>Open monitor</span><code>ats-lab monitor --watch</code></button>
+          <button class="command-button" type="button" data-command="ats-lab hpo --doctor"><span>Check HPO routes</span><code>ats-lab hpo --doctor</code></button>
+          <button class="command-button" type="button" data-command="ats-lab supervisor --plan"><span>Preview supervisor</span><code>ats-lab supervisor --plan</code></button>
+        </div>
+        <p class="command-output" id="command-output" role="status" aria-live="polite">Select a command to copy its planned terminal action.</p>
+      </section>
+    </main>
+
+    <footer class="page-footer">
+      <span>ATS Lab · canonical SQLite state</span>
+      <span>Static Control Room shell · API adapter ready</span>
+    </footer>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
