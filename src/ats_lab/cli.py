@@ -20,7 +20,7 @@ from .direct_mcp_executor import (
     load_direct_execution_config,
 )
 from .dashboard import serve as serve_dashboard
-from .web_api import serve as serve_backend
+from .web_api import serve as serve_backend, serve_web
 from .inventory import build_inventory, render_markdown as render_inventory
 from .legacy_import import LegacyImporter
 from .loop_control import SupervisorLoopControl
@@ -562,6 +562,12 @@ def main() -> int:
     backend.add_argument("--host", default="127.0.0.1")
     backend.add_argument("--port", type=int, default=8766)
     backend.add_argument("--claim-timeout-seconds", type=int, default=7200)
+    web = sub.add_parser(
+        "web", help="Serve the static Control Room and read-only backend API."
+    )
+    web.add_argument("--host", default="127.0.0.1")
+    web.add_argument("--port", type=int, default=8765)
+    web.add_argument("--claim-timeout-seconds", type=int, default=7200)
     args = parser.parse_args()
     if args.command is None:
         args.command = "home"
@@ -570,7 +576,7 @@ def main() -> int:
         return 0
     repo = args.repo.resolve()
     if args.command in {
-        "worker", "supervisor", "dashboard", "backend", "status", "monitor", "control",
+        "worker", "supervisor", "dashboard", "backend", "web", "status", "monitor", "control",
         "console", "recover-claims", "resolve-blocker", "requeue-evaluation",
         "queue", "candidates", "evidence", "diagnostic-export",
         "diagnostic-hpo-trial",
@@ -630,6 +636,18 @@ def main() -> int:
             parser.error("--claim-timeout-seconds must be positive")
         serve_backend(
             database,
+            host=args.host,
+            port=args.port,
+            claim_timeout_seconds=args.claim_timeout_seconds,
+        )
+    elif args.command == "web":
+        if not 0 <= args.port <= 65535:
+            parser.error("--port must be between 0 and 65535")
+        if args.claim_timeout_seconds <= 0:
+            parser.error("--claim-timeout-seconds must be positive")
+        serve_web(
+            database,
+            repo,
             host=args.host,
             port=args.port,
             claim_timeout_seconds=args.claim_timeout_seconds,

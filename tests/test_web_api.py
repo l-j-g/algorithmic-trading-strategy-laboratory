@@ -120,6 +120,29 @@ class WebApiTests(unittest.TestCase):
             server.server_close()
             thread.join()
 
+    def test_optional_static_control_room_is_same_origin_and_blocks_traversal(self) -> None:
+        frontend = Path(self.temporary.name) / "frontend"
+        frontend.mkdir()
+        (frontend / "index.html").write_text("<h1>Control Room</h1>")
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), make_handler(self.database, static_dir=frontend),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urllib.request.urlopen(f"{base}/") as response:
+                self.assertEqual(response.read(), b"<h1>Control Room</h1>")
+                self.assertEqual(response.headers.get_content_type(), "text/html")
+            with self.assertRaises(urllib.error.HTTPError) as context:
+                urllib.request.urlopen(f"{base}/../lab.sqlite3")
+            context.exception.close()
+            self.assertEqual(context.exception.code, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
 
 if __name__ == "__main__":
     unittest.main()

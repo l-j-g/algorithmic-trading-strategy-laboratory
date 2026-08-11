@@ -10,14 +10,21 @@ write ATS Lab state. Canonical state remains the ATS Lab SQLite projection.
 
 ## Run locally
 
-From the repository root, serve the directory with any static HTTP server:
+Recommended: serve frontend and read-only API from one same-origin process:
+
+```bash
+ats-lab web --host 127.0.0.1 --port 8765
+```
+
+Open <http://127.0.0.1:8765>. API requests and static assets share one origin.
+
+Frontend-only fallback:
 
 ```bash
 python3 -m http.server 4173 --directory frontend
 ```
 
-Open <http://127.0.0.1:4173>. Opening `index.html` directly also renders the
-shell, but browsers may restrict `fetch()` requests from a `file:` URL.
+Set `window.ATS_LAB_API_BASE` before `app.js` loads when using that fallback.
 
 With no API available, the page renders clearly labelled demo values and a
 stale-data banner. This makes the layout inspectable without implying that
@@ -43,7 +50,7 @@ For a separately hosted API, set the base URL before `app.js` loads:
 
 ```html
 <script>
-  window.ATS_LAB_API_BASE = "http://127.0.0.1:8765";
+  window.ATS_LAB_API_BASE = "http://127.0.0.1:8766";
 </script>
 <script src="app.js" defer></script>
 ```

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import sqlite3
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .dashboard import hpo_detail_snapshot, query_page
 from .database import WorkflowDatabase
@@ -246,10 +248,15 @@ def _service(value: ReadOnlyApi | WorkflowDatabase) -> ReadOnlyApi:
     return value if isinstance(value, ReadOnlyApi) else ReadOnlyApi(value)
 
 
-def make_handler(value: ReadOnlyApi | WorkflowDatabase) -> type[BaseHTTPRequestHandler]:
-    """Build GET-only JSON handler for local loopback hosting."""
+def make_handler(
+    value: ReadOnlyApi | WorkflowDatabase,
+    *,
+    static_dir: Path | None = None,
+) -> type[BaseHTTPRequestHandler]:
+    """Build GET-only API handler, optionally serving the Control Room shell."""
 
     api = _service(value)
+    static_root = static_dir.resolve() if static_dir is not None else None
 
     class WebApiHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -266,6 +273,31 @@ def make_handler(value: ReadOnlyApi | WorkflowDatabase) -> type[BaseHTTPRequestH
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(body)
+
+        def _send_static(self, request_path: str) -> bool:
+            if static_root is None:
+                return False
+            relative = unquote(request_path).lstrip("/") or "index.html"
+            candidate = (static_root / relative).resolve()
+            try:
+                candidate.relative_to(static_root)
+            except ValueError:
+                self._error(404, "not_found", "static asset not found")
+                return True
+            if not candidate.is_file():
+                self._error(404, "not_found", "static asset not found")
+                return True
+            body = candidate.read_bytes()
+            content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+            return True
 
         def _error(self, status: int, code: str, detail: str) -> None:
             self._send_json({"error": {"code": code, "detail": detail}}, status)
@@ -309,6 +341,8 @@ def make_handler(value: ReadOnlyApi | WorkflowDatabase) -> type[BaseHTTPRequestH
                         self._error(404, "not_found", "HPO study not found")
                     else:
                         self._send_json(detail)
+                elif self._send_static(request.path):
+                    return
                 else:
                     self._error(404, "not_found", "endpoint not found")
             except ValueError as error:
@@ -364,6 +398,32 @@ def serve(
     api = ReadOnlyApi(database, claim_timeout_seconds=claim_timeout_seconds)
     server = ThreadingHTTPServer((host, port), make_handler(api))
     print(f"ATS Lab backend API: http://{host}:{server.server_port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+def serve_web(
+    database: WorkflowDatabase,
+    repo: Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    claim_timeout_seconds: int = 7200,
+) -> None:
+    """Serve the static Control Room and read-only API from one origin."""
+    frontend_dir = repo.resolve() / "frontend"
+    if not frontend_dir.is_dir():
+        raise FileNotFoundError(f"frontend directory missing: {frontend_dir}")
+    database.initialize()
+    api = ReadOnlyApi(database, claim_timeout_seconds=claim_timeout_seconds)
+    server = ThreadingHTTPServer(
+        (host, port), make_handler(api, static_dir=frontend_dir),
+    )
+    print(f"ATS Lab Control Room: http://{host}:{server.server_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
