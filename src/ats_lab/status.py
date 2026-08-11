@@ -222,6 +222,16 @@ def operator_status(
         (cutoff,),
     )[0]
     stale_claims = int(stale["count"])
+    stale_claim_ids = [
+        str(row["id"])
+        for row in database.rows(
+            """SELECT id FROM work_items
+               WHERE state='running'
+                 AND COALESCE(blocker_code,'')!='awaiting_batch_evaluation'
+                 AND (claimed_at IS NULL OR claimed_at<?)""",
+            (cutoff,),
+        )
+    ]
     retry_rows = database.rows(
         """SELECT retry_after FROM work_items
            WHERE state='waiting_retry' AND retry_after IS NOT NULL"""
@@ -233,6 +243,8 @@ def operator_status(
     latest_event = database.rows("SELECT MAX(occurred_at) AS at FROM events")[0]["at"]
     synthesis = database.synthesis_status()
     hpo = hpo_lifecycle_snapshot(database)
+    runtime = database.supervisor_runtime_status() or {}
+    control = database.control_status()
     ready = int(states.get("ready", 0))
     running = int(states.get("running", 0))
     scheduled = int(states.get("scheduled", 0))
@@ -264,13 +276,19 @@ def operator_status(
         "progress_state": progress_state,
         "invalid_retry_schedules": invalid_retry_schedules,
         "checked_at": now.isoformat().replace("+00:00", "Z"),
+        "heartbeat_at": runtime.get("heartbeat_at"),
+        "desired_state": control.get("desired_state"),
+        "supervisor_phase": runtime.get("phase"),
+        "stale_execution_claim_ids": stale_claim_ids,
         "database": str(database.path),
         "work_states": states,
         "awaiting_batch_evaluation": int(awaiting),
         "oldest_running_claim": claims["claimed_at"],
         "oldest_unresolved_claim": stale["claimed_at"],
         "running_execution_claims": running_claims,
+        "active_running_claims": max(0, running_claims - stale_claims),
         "unresolved_execution_claims": stale_claims,
+        "stale_execution_claims": stale_claims,
         "latest_event": latest_event,
         "synthesis": synthesis,
         "hpo": hpo,

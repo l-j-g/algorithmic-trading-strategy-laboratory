@@ -85,7 +85,7 @@
     return {
       queue: number(source.queue ?? source.unresolved ?? source.active_queue ?? source.active),
       ready: number(source.ready ?? workStates.ready),
-      running: number(source.running ?? source.running_execution_claims ?? workStates.running),
+      running: number(source.running ?? source.active_running_claims ?? source.running_execution_claims ?? workStates.running),
       retry: number(source.retry ?? source.waiting_retry ?? workStates.waiting_retry),
       blocked: number(source.blocked ?? workStates.blocked),
       hpo_active: number(source.hpo_active ?? source.active_hpo ?? hpo.active),
@@ -93,7 +93,8 @@
       validation: number(source.validation ?? validationJobs.total),
       candidates: number(source.candidates ?? source.candidate_count ?? hpoCounts.paper_trade_candidate),
       unresolved_execution_claims: number(source.unresolved_execution_claims),
-      heartbeat_at: source.heartbeat_at ?? source.last_heartbeat ?? source.checked_at,
+      stale_execution_claims: number(source.stale_execution_claims ?? source.unresolved_execution_claims),
+      heartbeat_at: source.heartbeat_at ?? source.last_heartbeat ?? null,
       updated_at: source.updated_at ?? source.as_of ?? source.checked_at ?? null,
       attention: Array.isArray(source.attention) ? source.attention : [],
     };
@@ -115,6 +116,8 @@
       route: item.route ?? ([item.symbol, item.timeframe].filter(Boolean).join(" · ") || item.claimed_by || "—"),
       priority: item.priority ?? item.priority_score,
       next_action: item.next_action ?? item.blocker_detail ?? item.blocker_code ?? item.blocker ?? item.finding ?? "—",
+      state_detail: item.state_detail ?? "",
+      canonical_state: item.canonical_state ?? "",
       raw: item,
     }));
   }
@@ -156,8 +159,8 @@
   function statusClass(value) {
     const stateValue = String(value || "unknown").toLowerCase();
     if (["healthy", "running", "completed", "finished", "delivered", "ready"].includes(stateValue)) return stateValue === "ready" ? "ready" : "healthy";
-    if (["waiting_retry", "retry", "requirements_pending", "waiting"].includes(stateValue)) return "waiting";
-    if (["blocked", "failed", "error", "degraded", "stalled"].includes(stateValue)) return "blocked";
+    if (["waiting_retry", "retry", "requirements_pending", "waiting", "stopping"].includes(stateValue)) return "waiting";
+    if (["blocked", "failed", "error", "degraded", "stalled", "stale_claim"].includes(stateValue)) return "blocked";
     if (["hpo_candidate", "paper_trade_candidate", "candidate", "hpo_analysis", "validation"].includes(stateValue)) return "candidate";
     return "unknown";
   }
@@ -176,10 +179,21 @@
     return value === null || value === undefined ? "—" : `${number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}${suffix}`;
   }
 
+  function formatDuration(seconds) {
+    if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "duration not recorded";
+    const total = Math.max(0, Math.round(Number(seconds)));
+    if (total < 60) return `${total}s`;
+    const minutes = Math.floor(total / 60);
+    const remaining = total % 60;
+    if (minutes < 60) return `${minutes}m ${remaining}s`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
+  }
+
   function renderSummary(snapshot) {
     const summary = snapshot.summary;
     $("#queue-count").textContent = text(summary.queue);
-    $("#queue-footnote").textContent = `Ready ${text(summary.ready)} · Running ${text(summary.running)}`;
+    $("#queue-footnote").textContent = `Ready ${text(summary.ready)} · Active ${text(summary.running)} · Stale ${text(summary.stale_execution_claims)}`;
     $("#running-count").textContent = text(summary.running);
     $("#running-footnote").textContent = `Heartbeat ${formatTime(summary.heartbeat_at)}`;
     $("#hpo-count").textContent = text(summary.hpo_active);
@@ -193,7 +207,7 @@
     badge.dataset.status = statusClass(snapshot.health.status);
     $("#health-label").textContent = snapshot.health.label || "Unknown";
     $("#snapshot-source").textContent = snapshot.demo ? "Demo fallback" : (snapshot.failures.length ? "Partial API" : "Live API");
-    $("#last-updated").textContent = `Updated ${formatTime(snapshot.summary.updated_at, "just now")}`;
+    $("#last-updated").textContent = `Last heartbeat ${formatTime(snapshot.summary.heartbeat_at, "not reported")}`;
   }
 
   function renderControl(snapshot) {
@@ -224,7 +238,7 @@
   }
 
   function queueRows(rows, empty = "No queue items returned.") {
-    return rows.length ? rows.map((item) => `<tr data-detail-work-item="${escapeHtml(item.id)}"><td><strong>${escapeHtml(item.id)}</strong><small>${escapeHtml(item.stage)}</small></td><td>${statusPill(item.state)}</td><td><strong>${escapeHtml(item.strategy)}</strong><small>${escapeHtml(item.route)}</small></td><td>${escapeHtml(item.priority ?? "—")}</td><td>${escapeHtml(item.next_action)}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="5">${escapeHtml(empty)}</td></tr>`;
+    return rows.length ? rows.map((item) => `<tr data-detail-work-item="${escapeHtml(item.id)}"><td><strong>${escapeHtml(item.id)}</strong><small>${escapeHtml(item.stage)}</small></td><td>${statusPill(item.state)}${item.canonical_state ? `<small title="Canonical SQLite state">DB: ${escapeHtml(item.canonical_state)}</small>` : ""}</td><td><strong>${escapeHtml(item.strategy)}</strong><small>${escapeHtml(item.route)}</small></td><td>${escapeHtml(item.priority ?? "—")}</td><td>${escapeHtml(item.state_detail || item.next_action)}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="5">${escapeHtml(empty)}</td></tr>`;
   }
 
   function renderQueue(snapshot) {
@@ -274,7 +288,7 @@
 
   function renderQueueView(rows, view) {
     const running = view === "running";
-    const filtered = rows.filter((row) => running ? row.state === "running" : row.state !== "running");
+    const filtered = rows.filter((row) => running ? ["running", "stopping"].includes(row.state) : !["running", "stopping"].includes(row.state));
     const title = running ? "Running" : "Queue";
     const caption = running ? "Active execution claims and worker-owned items." : "Every unresolved item, with next action and blocker state.";
     $("#detail-view").innerHTML = `${detailHeader("Execution lane", title, caption)}<div class="filter-bar"><label>Search <input id="queue-filter" type="search" placeholder="work item or strategy"></label><button type="button" data-filter-queue>Apply</button><span class="panel-caption">${filtered.length} shown</span></div><div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Work item</th><th>State</th><th>Strategy / route</th><th>Priority</th><th>Next action</th></tr></thead><tbody id="detail-queue-body">${queueRows(filtered)}</tbody></table></div></div>`;
@@ -356,7 +370,8 @@
       const type = row.experiment_type || row.lifecycle_stage || "unknown";
       const testType = row.test_type || type;
       const hypothesis = hypothesisLabel(row);
-      return `<tr data-detail-experiment="${escapeHtml(row.experiment_id || "")}" tabindex="0"><td><strong class="hypothesis-hover" title="${escapeHtml(hypothesis)}">${escapeHtml(row.strategy || "—")}</strong><small>${escapeHtml(row.experiment_id || "—")}</small></td><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td><strong title="${escapeHtml(testTypeHelp[testType] || "Persisted Jesse test type.")}">${escapeHtml(experimentTypeLabel(testType))}</strong><small title="${escapeHtml(experimentTypeHelp[type] || "Experiment lifecycle role.")}">Role: ${escapeHtml(experimentTypeLabel(type))}</small></td><td>${formatMetric(row.trade_count)}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${formatMetric(row.sharpe_ratio)}</td><td>${formatMetric(row.max_drawdown_percentage, "%")}</td><td>${statusPill(row.verdict || "reported")}</td></tr>`;
+      const strategy = row.dashboard_url ? `<a class="jesse-link hypothesis-hover" href="${escapeHtml(row.dashboard_url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(hypothesis)}">${escapeHtml(row.strategy || "—")} ↗</a>` : `<strong class="hypothesis-hover" title="${escapeHtml(hypothesis)}">${escapeHtml(row.strategy || "—")}</strong>`;
+      return `<tr data-detail-experiment="${escapeHtml(row.experiment_id || "")}" tabindex="0"><td>${strategy}<small>${escapeHtml(row.experiment_id || "—")}</small></td><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td><strong title="${escapeHtml(testTypeHelp[testType] || "Persisted Jesse test type.")}">${escapeHtml(experimentTypeLabel(testType))}</strong><small title="${escapeHtml(experimentTypeHelp[type] || "Experiment lifecycle role.")}">Role: ${escapeHtml(experimentTypeLabel(type))}</small></td><td>${formatMetric(row.trade_count)}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${formatMetric(row.sharpe_ratio)}</td><td>${formatMetric(row.max_drawdown_percentage, "%")}</td><td>${statusPill(row.verdict || "reported")}</td></tr>`;
     }).join("") : `<tr><td class="empty-state" colspan="8">No backtest evidence matches these filters.</td></tr>`;
     $("#detail-view").innerHTML = `${detailHeader("Research database", "Backtests / DB", "Click strategy or experiment for hypothesis, all evidence, and Jesse links.")}<form class="filter-bar" id="backtest-filters"><label>Search <input name="q" type="search" value="${escapeHtml(payload.filters?.q || "")}" placeholder="strategy, run, finding"></label>${select("test_type", "Test type", options.test_types)}${select("strategy", "Strategy", options.strategies)}${select("verdict", "Verdict", options.verdicts)}${select("symbol", "Symbol", options.symbols)}${select("timeframe", "Timeframe", options.timeframes)}${select("evidence_split", "Split", options.splits)}<label>Min trades <input name="minimum_trades" type="number" min="0" step="1" value="${escapeHtml(payload.filters?.minimum_trades || "0")}"></label><label>Sort <select name="sort"><option value="newest">Newest</option><option value="profit">Profit</option><option value="sharpe">Sharpe</option><option value="trades">Trades</option><option value="drawdown">Drawdown</option></select></label><button type="submit">Apply filters</button></form><div class="stat-grid">${statCard("Reported runs", formatMetric(stats.reported_runs))}${statCard("Metric runs", formatMetric(stats.metric_runs))}${statCard("Total trades", formatMetric(stats.total_trades))}${statCard("Best profit", formatMetric(stats.best_profit_percentage, "%"))}${statCard("Worst drawdown", formatMetric(stats.worst_drawdown_percentage, "%"))}${statCard("Average Sharpe", formatMetric(stats.average_sharpe_ratio))}</div><div class="notice backtest-legend"><strong>How to read rows:</strong> &mdash; means no metric was produced. A terminal failure can still have verdict revise or reject; that is a disposition, not proof strategy completed successfully. <span title="${escapeHtml(experimentTypeHelp.baseline)}">Baseline</span> = experiment role. <span title="${escapeHtml(testTypeHelp.significance)}">Significance</span> = Jesse test type. Lanes are evidence types, not guaranteed order.</div>${testLaneCards(payload.test_type_summary)}<div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Strategy / experiment</th><th>Route</th><th>Test type / role</th><th>Trades</th><th>Profit</th><th>Sharpe</th><th>Drawdown</th><th>Verdict</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
     const form = $("#backtest-filters");
@@ -382,10 +397,15 @@
     const timings = payload.stage_timings || [];
     const events = payload.events || [];
     const rows = evidence.length ? evidence.map((row) => `<tr data-detail-evidence="${escapeHtml(row.run_id || "")}"><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td>${escapeHtml(row.evidence_split || "—")}</td><td>${formatMetric(row.trade_count)}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${statusPill(row.verdict || "reported")}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="5">No normalized evidence attached.</td></tr>`;
-    const timingList = timings.length ? timings.map((row) => `<li><strong>${escapeHtml(row.stage || row.kind || "stage")}</strong><span>${statusPill(row.state || row.outcome || "unknown")} · ${escapeHtml(row.completed_at || row.started_at || "—")}</span></li>`).join("") : "<li class='empty-state'>No stage timings.</li>";
-    const eventList = events.length ? events.map((row) => `<li><strong>${escapeHtml(row.event_type)}</strong><span>${escapeHtml(row.occurred_at)}</span></li>`).join("") : "<li class='empty-state'>No events.</li>";
+    const eventMeaning = (type) => ({
+      infrastructure_retry_deferred: "Infrastructure problem deferred retry; no strategy result was produced.",
+      state_changed: "Work-item state changed in the canonical workflow.",
+      claim_recovered: "Orphaned claim was returned to the runnable queue.",
+    }[type] || "Point-in-time workflow or infrastructure event.");
+    const timingList = timings.length ? timings.map((row) => `<li><strong>${escapeHtml(row.stage || row.kind || "stage")}</strong><span>${statusPill(row.state || row.outcome || "unknown")} · ${formatDuration(row.duration_seconds)} · finished ${formatTime(row.completed_at || row.started_at, "not finished")}</span></li>`).join("") : "<li class='empty-state'>No stage timings.</li>";
+    const eventList = events.length ? events.map((row) => `<li><strong>${escapeHtml(row.event_type)}</strong><span>${escapeHtml(eventMeaning(row.event_type))} · ${formatTime(row.occurred_at)}</span></li>`).join("") : "<li class='empty-state'>No events.</li>";
     const form = item.state === "blocked" ? `<form class="resolution-form" id="resolution-form"><h3>Resolve blocker</h3><p class="muted">This reopens the item as ready and records an auditable resolution event.</p><label>Resolution code <input name="resolution_code" required maxlength="200" placeholder="verified_route"></label><label>Detail <textarea name="detail" required maxlength="4000" placeholder="What was checked or changed?"></textarea></label><button type="submit">Confirm resolution</button><p class="command-output" id="resolution-output" role="status"></p></form>` : `<div class="notice">Item is ${escapeHtml(item.state || "not blocked")}. Resolution form appears only for blocked items.</div>`;
-    $("#detail-view").innerHTML = `${detailHeader("Work item", item.id || "Unknown item", `${item.strategy || "—"} · ${item.experiment_name || item.experiment_id || "—"}`)}<div class="stat-grid">${statCard("State", item.state || "—")}${statCard("Stage", item.stage || "—")}${statCard("Priority", formatMetric(item.priority))}${statCard("Attempts", formatMetric(item.attempt_count))}</div><div class="panel"><h3>Evidence</h3><div class="table-wrap"><table class="detail-table"><thead><tr><th>Route</th><th>Split</th><th>Trades</th><th>Profit</th><th>Verdict</th></tr></thead><tbody>${rows}</tbody></table></div></div><div class="content-grid"><div class="panel"><h3>Stage timings</h3><ul class="timeline-list">${timingList}</ul></div><div class="panel"><h3>Recent events</h3><ul class="timeline-list">${eventList}</ul></div></div>${form}`;
+    $("#detail-view").innerHTML = `${detailHeader("Work item", item.id || "Unknown item", `${item.strategy || "—"} · ${item.experiment_name || item.experiment_id || "—"}`)}<div class="stat-grid">${statCard("State", item.state || "—")}${statCard("Stage", item.stage || "—")}${statCard("Priority", formatMetric(item.priority))}${statCard("Attempts", formatMetric(item.attempt_count))}</div>${item.state_detail ? `<div class="notice"><strong>${escapeHtml(item.state || "State")}:</strong> ${escapeHtml(item.state_detail)}${item.canonical_state ? ` Canonical SQLite state: ${escapeHtml(item.canonical_state)}.` : ""}</div>` : ""}<div class="panel"><h3>Evidence</h3><div class="table-wrap"><table class="detail-table"><thead><tr><th>Route</th><th>Split</th><th>Trades</th><th>Profit</th><th>Verdict</th></tr></thead><tbody>${rows}</tbody></table></div></div><div class="content-grid"><div class="panel"><h3>Stage timings</h3><p class="muted">Measured pipeline stages: time spent waiting or executing.</p><ul class="timeline-list">${timingList}</ul></div><div class="panel"><h3>Recent events</h3><p class="muted">Audit ledger: point-in-time decisions and state changes.</p><ul class="timeline-list">${eventList}</ul></div></div>${form}`;
     if (item.state === "blocked") $("#resolution-form").addEventListener("submit", (event) => resolveWorkItem(event, item.id));
   }
 
@@ -505,7 +525,6 @@
       if ((event.key === "Enter" || event.key === " ") && event.target.matches(".nav-card")) { event.preventDefault(); setView(event.target.dataset.view); }
       if ((event.key === "Enter" || event.key === " ") && event.target.matches("tr[data-detail-experiment], tr[data-detail-evidence]")) { event.preventDefault(); event.target.click(); }
     });
-    $("#refresh-button").addEventListener("click", refresh);
     $("#start-api-button").addEventListener("click", async () => {
       const command = $("#start-api-command").textContent;
       $("#command-output").textContent = `Run in the ATS Lab repository: ${command}`;
@@ -516,12 +535,9 @@
   }
 
   async function refresh() {
-    const button = $("#refresh-button"); button.disabled = true; button.textContent = "Refreshing…";
-    try {
-      state.snapshot = await loadSnapshot(createApiClient());
-      renderSummary(state.snapshot); renderHealth(state.snapshot); renderControl(state.snapshot); renderAttention(state.snapshot); renderQueue(state.snapshot); renderHpo(state.snapshot); renderStale(state.snapshot);
-      if (state.view !== "dashboard" && !["item", "evidence", "experiment", "hpo-detail"].includes(state.view)) loadView(state.view);
-    } finally { button.disabled = false; button.textContent = "Refresh"; }
+    state.snapshot = await loadSnapshot(createApiClient());
+    renderSummary(state.snapshot); renderHealth(state.snapshot); renderControl(state.snapshot); renderAttention(state.snapshot); renderQueue(state.snapshot); renderHpo(state.snapshot); renderStale(state.snapshot);
+    if (state.view !== "dashboard" && !["item", "evidence", "experiment", "hpo-detail"].includes(state.view)) loadView(state.view);
   }
 
   window.ATS_LAB_CONTROL_ROOM = Object.freeze({ API_ROUTES, createApiClient, normalizeSummary, normalizeHealth, normalizeQueue, normalizeHpo, normalizeControl, loadSnapshot, refresh });

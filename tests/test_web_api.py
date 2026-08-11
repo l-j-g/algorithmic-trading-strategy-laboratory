@@ -90,6 +90,26 @@ class WebApiTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             api.event_snapshots(101)
 
+    def test_summary_and_queue_distinguish_stale_claim_from_active_running(self) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                """UPDATE work_items SET state='running',claimed_by='dead-worker',
+                   claimed_at='2026-01-01T00:00:00Z' WHERE id='JOB-1'"""
+            )
+
+        api = ReadOnlyApi(self.database)
+        summary = api.summary_snapshot().to_dict()
+        queue = api.page_snapshot("queue")["rows"]
+
+        self.assertEqual(summary["active_running_claims"], 0)
+        self.assertEqual(summary["stale_execution_claims"], 1)
+        self.assertEqual(queue[0]["state"], "stale_claim")
+        self.assertEqual(queue[0]["canonical_state"], "running")
+
+        detail = api.work_item_detail("JOB-1")
+        self.assertEqual(detail["work_item"]["state"], "stale_claim")
+        self.assertNotIn("payload_json", json.dumps(detail))
+
     def test_backtest_and_experiment_details_expose_lineage_without_raw_payload(self) -> None:
         api = ReadOnlyApi(self.database)
 
