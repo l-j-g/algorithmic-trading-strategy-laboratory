@@ -52,6 +52,7 @@ The browser adapter requests these same-origin JSON endpoints:
 | Supervisor state | `/api/v1/control` |
 | Needs attention | `/api/v1/attention` |
 | Backtests / DB query | `/api/v1/backtests` |
+| Strategy experiment detail | `/api/v1/experiments/{id}` |
 | Work-item detail | `/api/v1/work-items/{id}` |
 | Evidence detail | `/api/v1/evidence/{run_id}` |
 
@@ -85,6 +86,26 @@ For a separately hosted API, set the base URL before `app.js` loads:
 The API host must permit the browser request through its normal CORS or
 reverse-proxy policy. The existing Python dashboard routes are `/api/...`,
 not `/api/v1/...`; this frontend does not alter or alias backend routes.
+
+## Evidence lanes
+
+Backtests / DB separates Jesse test type from experiment role:
+
+- `backtest` — historical strategy execution; normally has trades, profit,
+  drawdown and Sharpe when Jesse completes normally.
+- `hpo` — parameter search; winner remains provisional until unseen validation.
+- `monte_carlo` — path/order robustness; does not replace route/window tests.
+- `significance` — rule-significance test; statistical signal evidence, not
+  ordinary profit metrics by itself.
+
+`baseline` is a role, not a Jesse engine type. It means first controlled test
+of unchanged strategy/config. The UI shows it as `Role: baseline` beside
+`Test: backtest`.
+
+Rows expose experiment hypothesis on strategy hover. Clicking strategy or
+experiment opens hypothesis, target/failure regimes, all normalized evidence,
+run status, and stored Jesse dashboard links. Missing `—` metrics mean no
+performance payload was produced; verdict remains a separate disposition.
 
 ## Manual verification
 

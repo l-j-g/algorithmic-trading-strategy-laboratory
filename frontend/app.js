@@ -306,16 +306,74 @@
 
   function statCard(label, value) { return `<div class="stat-card"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`; }
 
+  const experimentTypeHelp = Object.freeze({
+    baseline: "First controlled test of strategy thesis, using unchanged parameters.",
+    significance: "Statistical test of signal behavior against a null/randomized comparison; not a profit result by itself.",
+    hpo: "Parameter-search run. Treat winner as provisional until out-of-sample evidence passes.",
+    out_of_sample: "Unseen-period validation after development or tuning.",
+    multi_window: "Same thesis checked across more than one time window.",
+    cost_sensitivity: "Fee/slippage stress test.",
+    monte_carlo: "Path or trade-order robustness test.",
+    harness_check: "Framework/data plumbing check, not strategy performance evidence.",
+  });
+  const testTypeHelp = Object.freeze({
+    backtest: "Jesse backtest: executes strategy against historical candles and reports performance metrics.",
+    significance: "Jesse rule-significance test: tests whether entry behavior is distinguishable from its null/randomized comparison.",
+    hpo: "Jesse HPO: searches parameter combinations. Winner stays provisional until validation.",
+    monte_carlo: "Jesse Monte Carlo: perturbs trade paths or ordering to test robustness.",
+  });
+
+  function experimentTypeLabel(value) {
+    return String(value || "unknown").replaceAll("_", " ");
+  }
+
+  function hypothesisLabel(row) {
+    return row.hypothesis || "No hypothesis recorded for this experiment.";
+  }
+
+  function jesseLink(url) {
+    if (!url || !/^https?:\/\//i.test(String(url))) return "—";
+    return `<a class="jesse-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open Jesse ↗</a>`;
+  }
+
+  function testLaneCards(summary) {
+    const lanes = Object.entries(summary || {});
+    if (!lanes.length) return "";
+    return `<div class="lane-grid">${lanes.map(([type, lane]) => {
+      const reported = number(lane.reported);
+      const withMetrics = number(lane.with_metrics);
+      const coverage = reported ? Math.round((withMetrics / reported) * 100) : 0;
+      return `<article class="lane-card"><div><strong>${escapeHtml(experimentTypeLabel(type))}</strong><span>${withMetrics}/${reported} with metrics</span></div><div class="progress-track" role="progressbar" aria-label="${escapeHtml(type)} metric coverage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${coverage}"><div class="progress-bar" style="width: ${coverage}%"></div></div><small title="${escapeHtml(testTypeHelp[type] || "Persisted Jesse test type.")}">${escapeHtml(testTypeHelp[type] || "Persisted Jesse test type.")}</small></article>`;
+    }).join("")}</div>`;
+  }
+
   function renderBacktestsView(payload) {
     const stats = payload.statistics || {};
     const options = payload.options || {};
     const rows = payload.rows || [];
     const select = (name, label, values) => `<label>${label}<select name="${name}"><option value="">Any</option>${(values || []).map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}</select></label>`;
-    const body = rows.length ? rows.map((row) => `<tr data-detail-evidence="${escapeHtml(row.run_id || "")}"><td><strong>${escapeHtml(row.strategy || "—")}</strong><small>${escapeHtml(row.experiment_id || "—")}</small></td><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td>${escapeHtml(row.evidence_split || row.lifecycle_stage || "—")}</td><td>${formatMetric(row.trade_count)}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${formatMetric(row.sharpe_ratio)}</td><td>${formatMetric(row.max_drawdown_percentage, "%")}</td><td>${statusPill(row.verdict || "reported")}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="8">No backtest evidence matches these filters.</td></tr>`;
-    $("#detail-view").innerHTML = `${detailHeader("Research database", "Backtests / DB", "Query canonical normalized evidence. Reported metrics stay separate from promotion decisions.")}<form class="filter-bar" id="backtest-filters"><label>Search <input name="q" type="search" value="${escapeHtml(payload.filters?.q || "")}" placeholder="strategy, run, finding"></label>${select("strategy", "Strategy", options.strategies)}${select("verdict", "Verdict", options.verdicts)}${select("symbol", "Symbol", options.symbols)}${select("timeframe", "Timeframe", options.timeframes)}${select("evidence_split", "Split", options.splits)}<label>Min trades <input name="minimum_trades" type="number" min="0" step="1" value="${escapeHtml(payload.filters?.minimum_trades || "0")}"></label><label>Sort <select name="sort"><option value="newest">Newest</option><option value="profit">Profit</option><option value="sharpe">Sharpe</option><option value="trades">Trades</option><option value="drawdown">Drawdown</option></select></label><button type="submit">Apply filters</button></form><div class="stat-grid">${statCard("Reported runs", formatMetric(stats.reported_runs))}${statCard("Metric runs", formatMetric(stats.metric_runs))}${statCard("Total trades", formatMetric(stats.total_trades))}${statCard("Best profit", formatMetric(stats.best_profit_percentage, "%"))}${statCard("Worst drawdown", formatMetric(stats.worst_drawdown_percentage, "%"))}${statCard("Average Sharpe", formatMetric(stats.average_sharpe_ratio))}</div><div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Strategy / experiment</th><th>Route</th><th>Split</th><th>Trades</th><th>Profit</th><th>Sharpe</th><th>Drawdown</th><th>Verdict</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
+    const body = rows.length ? rows.map((row) => {
+      const type = row.experiment_type || row.lifecycle_stage || "unknown";
+      const testType = row.test_type || type;
+      const hypothesis = hypothesisLabel(row);
+      return `<tr data-detail-experiment="${escapeHtml(row.experiment_id || "")}" tabindex="0"><td><strong class="hypothesis-hover" title="${escapeHtml(hypothesis)}">${escapeHtml(row.strategy || "—")}</strong><small>${escapeHtml(row.experiment_id || "—")}</small></td><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td><strong title="${escapeHtml(testTypeHelp[testType] || "Persisted Jesse test type.")}">${escapeHtml(experimentTypeLabel(testType))}</strong><small title="${escapeHtml(experimentTypeHelp[type] || "Experiment lifecycle role.")}">Role: ${escapeHtml(experimentTypeLabel(type))}</small></td><td>${formatMetric(row.trade_count)}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${formatMetric(row.sharpe_ratio)}</td><td>${formatMetric(row.max_drawdown_percentage, "%")}</td><td>${statusPill(row.verdict || "reported")}</td></tr>`;
+    }).join("") : `<tr><td class="empty-state" colspan="8">No backtest evidence matches these filters.</td></tr>`;
+    $("#detail-view").innerHTML = `${detailHeader("Research database", "Backtests / DB", "Click strategy or experiment for hypothesis, all evidence, and Jesse links.")}<form class="filter-bar" id="backtest-filters"><label>Search <input name="q" type="search" value="${escapeHtml(payload.filters?.q || "")}" placeholder="strategy, run, finding"></label>${select("test_type", "Test type", options.test_types)}${select("strategy", "Strategy", options.strategies)}${select("verdict", "Verdict", options.verdicts)}${select("symbol", "Symbol", options.symbols)}${select("timeframe", "Timeframe", options.timeframes)}${select("evidence_split", "Split", options.splits)}<label>Min trades <input name="minimum_trades" type="number" min="0" step="1" value="${escapeHtml(payload.filters?.minimum_trades || "0")}"></label><label>Sort <select name="sort"><option value="newest">Newest</option><option value="profit">Profit</option><option value="sharpe">Sharpe</option><option value="trades">Trades</option><option value="drawdown">Drawdown</option></select></label><button type="submit">Apply filters</button></form><div class="stat-grid">${statCard("Reported runs", formatMetric(stats.reported_runs))}${statCard("Metric runs", formatMetric(stats.metric_runs))}${statCard("Total trades", formatMetric(stats.total_trades))}${statCard("Best profit", formatMetric(stats.best_profit_percentage, "%"))}${statCard("Worst drawdown", formatMetric(stats.worst_drawdown_percentage, "%"))}${statCard("Average Sharpe", formatMetric(stats.average_sharpe_ratio))}</div><div class="notice backtest-legend"><strong>How to read rows:</strong> &mdash; means no metric was produced. A terminal failure can still have verdict revise or reject; that is a disposition, not proof strategy completed successfully. <span title="${escapeHtml(experimentTypeHelp.baseline)}">Baseline</span> = experiment role. <span title="${escapeHtml(testTypeHelp.significance)}">Significance</span> = Jesse test type. Lanes are evidence types, not guaranteed order.</div>${testLaneCards(payload.test_type_summary)}<div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Strategy / experiment</th><th>Route</th><th>Test type / role</th><th>Trades</th><th>Profit</th><th>Sharpe</th><th>Drawdown</th><th>Verdict</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
     const form = $("#backtest-filters");
     for (const [name, value] of Object.entries(payload.filters || {})) if (form.elements[name]) form.elements[name].value = value;
     form.addEventListener("submit", (event) => { event.preventDefault(); loadBacktests(new URLSearchParams(new FormData(form))); });
+  }
+
+  function renderExperimentDetail(payload) {
+    const experiment = payload.experiment || {};
+    const evidence = payload.evidence || [];
+    const runs = payload.runs || [];
+    const type = experiment.test_type || experiment.experiment_type || "unknown";
+    const evidenceRows = evidence.length ? evidence.map((row) => `<tr data-detail-evidence="${escapeHtml(row.run_id || "")}" tabindex="0"><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td>${escapeHtml(row.evidence_split || "—")}</td><td>${formatMetric(row.trade_count)}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${statusPill(row.verdict || "reported")}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="5">No normalized evidence attached.</td></tr>`;
+    const runRows = runs.length ? runs.map((run) => `<tr><td>${escapeHtml(run.id || "—")}</td><td>${statusPill(run.status || "unknown")}</td><td>${escapeHtml(run.session_id || "—")}</td><td>${jesseLink(run.dashboard_url)}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="4">No Jesse run records attached.</td></tr>`;
+    const regime = `<div class="content-grid"><div class="panel"><h3>Target regime</h3><p class="muted">${escapeHtml(experiment.target_regime || "Not recorded.")}</p></div><div class="panel"><h3>Failure regime</h3><p class="muted">${escapeHtml(experiment.failure_regime || "Not recorded.")}</p></div></div>`;
+    const role = experiment.experiment_type || "unknown";
+    $("#detail-view").innerHTML = `${detailHeader("Strategy experiment", experiment.strategy || experiment.id || "Unknown experiment", `${experiment.id || "—"} · Test: ${experimentTypeLabel(type)} · Role: ${experimentTypeLabel(role)}`)}<div class="panel hypothesis-panel"><p class="eyebrow">Hypothesis</p><p>${escapeHtml(experiment.hypothesis || "No hypothesis recorded.")}</p><p class="card-footnote" title="${escapeHtml(testTypeHelp[type] || "Persisted Jesse test type.")}">Test meaning: ${escapeHtml(testTypeHelp[type] || "Persisted Jesse test type.")} Role meaning: ${escapeHtml(experimentTypeHelp[role] || "Experiment lifecycle role.")}</p></div>${regime}<div class="stat-grid">${statCard("Evidence rows", formatMetric(evidence.length))}${statCard("Metric rows", formatMetric(evidence.filter((row) => row.trade_count !== null || row.net_profit_percentage !== null).length))}${statCard("Jesse runs", formatMetric(runs.length))}</div><div class="panel"><h3>Evidence</h3><div class="table-wrap"><table class="detail-table"><thead><tr><th>Route</th><th>Split</th><th>Trades</th><th>Profit</th><th>Verdict</th></tr></thead><tbody>${evidenceRows}</tbody></table></div></div><div class="panel"><h3>Jesse sessions</h3><div class="table-wrap"><table class="detail-table"><thead><tr><th>Run</th><th>Status</th><th>Session</th><th>Dashboard</th></tr></thead><tbody>${runRows}</tbody></table></div></div>`;
   }
 
   function renderWorkItemDetail(payload) {
@@ -333,9 +391,11 @@
 
   function renderEvidenceDetail(payload) {
     const run = payload.run || {};
+    const experiment = payload.experiment || {};
     const evidence = payload.evidence || [];
     const body = evidence.length ? evidence.map((row) => `<tr><td>${escapeHtml(row.strategy || "—")}</td><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td>${escapeHtml(row.evidence_split || row.lifecycle_stage || "—")}</td><td>${formatMetric(row.trade_count)}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${formatMetric(row.sharpe_ratio)}</td><td>${statusPill(row.verdict || "reported")}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="7">No normalized evidence for this run.</td></tr>`;
-    $("#detail-view").innerHTML = `${detailHeader("Backtest evidence", run.id || "Evidence detail", `${run.status || "reported"} · ${run.started_at || ""}`)}<div class="notice">Experiment ${escapeHtml(run.experiment_id || "—")} · Work item ${escapeHtml(run.work_item_id || "—")} · Session ${escapeHtml(run.session_id || "—")}</div><div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Strategy</th><th>Route</th><th>Split</th><th>Trades</th><th>Profit</th><th>Sharpe</th><th>Verdict</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
+    const jesse = run.dashboard_url ? `<p><a class="button button-secondary" href="${escapeHtml(run.dashboard_url)}" target="_blank" rel="noopener noreferrer">Open Jesse dashboard ↗</a></p>` : `<p class="muted">No Jesse dashboard URL stored for this run.</p>`;
+    $("#detail-view").innerHTML = `${detailHeader("Backtest evidence", run.id || "Evidence detail", `${run.status || "reported"} · ${run.started_at || ""}`)}<div class="panel hypothesis-panel"><p class="eyebrow">Hypothesis</p><p>${escapeHtml(experiment.hypothesis || evidence[0]?.hypothesis || "No hypothesis recorded.")}</p></div><div class="notice">Experiment ${escapeHtml(run.experiment_id || evidence[0]?.experiment_id || "—")} · Work item ${escapeHtml(run.work_item_id || "—")} · Session ${escapeHtml(run.session_id || "—")}</div>${jesse}<div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Strategy</th><th>Route</th><th>Split</th><th>Trades</th><th>Profit</th><th>Sharpe</th><th>Verdict</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
   }
 
   async function loadBacktests(params = new URLSearchParams()) {
@@ -377,6 +437,14 @@
     $("#detail-view").innerHTML = detailNotice("Loading evidence…");
     try { renderEvidenceDetail(await createApiClient().getJson(`/api/v1/evidence/${encodeURIComponent(id)}`)); }
     catch (error) { $("#detail-view").innerHTML = `${detailHeader("Evidence", id)}${detailNotice(error.message || "Evidence unavailable")}`; }
+  }
+
+  async function openExperiment(id) {
+    if (!id) return;
+    $("#dashboard-view").hidden = true; $("#detail-view").hidden = false; state.view = "experiment";
+    $("#detail-view").innerHTML = detailNotice("Loading experiment lineage…");
+    try { renderExperimentDetail(await createApiClient().getJson(`/api/v1/experiments/${encodeURIComponent(id)}`)); }
+    catch (error) { $("#detail-view").innerHTML = `${detailHeader("Strategy experiment", id)}${detailNotice(error.message || "Experiment unavailable")}`; }
   }
 
   async function openHpo(id) {
@@ -427,12 +495,15 @@
       const viewTarget = event.target.closest("[data-view]");
       if (viewTarget && !event.target.closest(".detail-table")) { setView(viewTarget.dataset.view); return; }
       const workItem = event.target.closest("[data-detail-work-item]"); if (workItem) { openWorkItem(workItem.dataset.detailWorkItem); return; }
+      if (event.target.closest("a")) return;
+      const experiment = event.target.closest("[data-detail-experiment]"); if (experiment) { openExperiment(experiment.dataset.detailExperiment); return; }
       const evidence = event.target.closest("[data-detail-evidence]"); if (evidence) { openEvidence(evidence.dataset.detailEvidence); return; }
       const hpo = event.target.closest("[data-detail-hpo]"); if (hpo) { openHpo(hpo.dataset.detailHpo); return; }
       const command = event.target.closest("[data-command-action]"); if (command) { runCommand(command.dataset.commandAction, command); }
     });
     document.addEventListener("keydown", (event) => {
       if ((event.key === "Enter" || event.key === " ") && event.target.matches(".nav-card")) { event.preventDefault(); setView(event.target.dataset.view); }
+      if ((event.key === "Enter" || event.key === " ") && event.target.matches("tr[data-detail-experiment], tr[data-detail-evidence]")) { event.preventDefault(); event.target.click(); }
     });
     $("#refresh-button").addEventListener("click", refresh);
     $("#start-api-button").addEventListener("click", async () => {
@@ -449,7 +520,7 @@
     try {
       state.snapshot = await loadSnapshot(createApiClient());
       renderSummary(state.snapshot); renderHealth(state.snapshot); renderControl(state.snapshot); renderAttention(state.snapshot); renderQueue(state.snapshot); renderHpo(state.snapshot); renderStale(state.snapshot);
-      if (state.view !== "dashboard" && !["item", "evidence", "hpo-detail"].includes(state.view)) loadView(state.view);
+      if (state.view !== "dashboard" && !["item", "evidence", "experiment", "hpo-detail"].includes(state.view)) loadView(state.view);
     } finally { button.disabled = false; button.textContent = "Refresh"; }
   }
 

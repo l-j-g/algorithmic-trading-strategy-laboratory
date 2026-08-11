@@ -125,7 +125,20 @@ td strong { display: block; font-size: .82rem; } td small { color: var(--muted);
 .stat-card { padding: .8rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--surface-soft); }
 .stat-card strong { display: block; font-size: 1.2rem; }
 .stat-card span { color: var(--muted); font-size: .7rem; }
+.lane-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .7rem; margin-bottom: 1rem; }
+.lane-card { padding: .8rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--surface-soft); }
+.lane-card > div:first-child { display: flex; justify-content: space-between; gap: .5rem; }
+.lane-card strong { text-transform: capitalize; }
+.lane-card span, .lane-card small { color: var(--muted); font-size: .7rem; }
+.lane-card small { display: block; line-height: 1.35; }
+.lane-card .progress-track { margin: .6rem 0 .45rem; }
 .detail-table { width: 100%; }
+.detail-table tbody tr[data-detail-experiment], .detail-table tbody tr[data-detail-evidence] { cursor: pointer; }
+.detail-table tbody tr[data-detail-experiment]:hover, .detail-table tbody tr[data-detail-experiment]:focus-visible, .detail-table tbody tr[data-detail-evidence]:hover, .detail-table tbody tr[data-detail-evidence]:focus-visible { background: rgba(89, 216, 232, .06); outline: none; }
+.hypothesis-hover { cursor: help; border-bottom: 1px dotted var(--cyan); }
+.jesse-link { color: var(--cyan); font-weight: 800; white-space: nowrap; }
+.hypothesis-panel { border-left: 2px solid var(--magenta); }
+.hypothesis-panel p:last-child { margin-bottom: 0; }
 .detail-table tbody tr[data-view], .attention-item[data-view], .hpo-item[data-view] { cursor: pointer; }
 .detail-table tbody tr[data-view]:hover { background: rgba(89, 216, 232, .06); }
 .detail-table td { max-width: 18rem; overflow-wrap: anywhere; }
@@ -143,8 +156,8 @@ td strong { display: block; font-size: .82rem; } td small { color: var(--muted);
 .empty-state { padding: 1.25rem .7rem; color: var(--muted); font-size: .8rem; text-align: center; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
-@media (max-width: 980px) { .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .content-grid { grid-template-columns: 1fr; } .command-grid, .control-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-@media (max-width: 680px) { .site-header, .page-intro, .page-footer { align-items: flex-start; flex-direction: column; } .header-meta { justify-content: flex-start; } .page-intro { align-items: flex-start; } .attention-list, .summary-grid { grid-template-columns: 1fr; } .command-grid, .control-grid, .stat-grid { grid-template-columns: 1fr; } .stale-banner, .stale-actions { align-items: stretch; flex-direction: column; } .stale-actions .button { text-align: center; } .panel { padding: .9rem; } }
+@media (max-width: 980px) { .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .content-grid { grid-template-columns: 1fr; } .command-grid, .control-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .stat-grid, .lane-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 680px) { .site-header, .page-intro, .page-footer { align-items: flex-start; flex-direction: column; } .header-meta { justify-content: flex-start; } .page-intro { align-items: flex-start; } .attention-list, .summary-grid { grid-template-columns: 1fr; } .command-grid, .control-grid, .stat-grid, .lane-grid { grid-template-columns: 1fr; } .stale-banner, .stale-actions { align-items: stretch; flex-direction: column; } .stale-actions .button { text-align: center; } .panel { padding: .9rem; } }
 @media (prefers-reduced-motion: no-preference) { .status-dot { animation: pulse 2.4s ease-in-out infinite; } }
 @keyframes pulse { 50% { opacity: .45; } }
 @media (forced-colors: active) { .status-dot, .attention-item::before, .status-pill::before { forced-color-adjust: none; } .button:focus-visible, .command-button:focus-visible { outline: 2px solid ButtonText; } }

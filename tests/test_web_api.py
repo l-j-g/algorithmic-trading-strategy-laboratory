@@ -10,7 +10,10 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer
 
 from ats_lab.database import WorkflowDatabase
-from ats_lab.models import ExperimentSpec, WorkItem, WorkState
+from ats_lab.models import (
+    ExperimentSpec, ExperimentType, RouteSpec, RunResult, RunStatus,
+    WorkItem, WorkState,
+)
 from ats_lab.local_commands import LocalCommandError
 from ats_lab.web_api import ControlService, ReadOnlyApi, make_handler
 
@@ -22,10 +25,25 @@ class WebApiTests(unittest.TestCase):
         self.database.initialize()
         self.database.upsert_experiment(ExperimentSpec(
             id="EXP-1", strategy_name="SafeStrategy",
+            experiment_type=ExperimentType.BASELINE,
+            hypothesis="Pullbacks continue after a controlled trend reclaim.",
+            target_regime="Directional trend",
+            failure_regime="Range-bound chop",
         ))
         self.database.upsert_work_item(WorkItem(
             id="JOB-1", experiment_id="EXP-1", priority=1,
             state=WorkState.READY,
+        ))
+        self.database.add_run(RunResult(
+            id="RUN-1", experiment_id="EXP-1", work_item_id="JOB-1",
+            session_id="SESSION-1", status=RunStatus.FINISHED,
+            dashboard_url="http://127.0.0.1/session",
+            route=RouteSpec(
+                exchange="Binance Perpetual Futures", symbol="BTC-USDT",
+                timeframe="1h", start_date="2026-01-01", finish_date="2026-01-31",
+            ),
+            metrics={"trade_count": 12, "net_profit_percentage": 3.5},
+            finished_at="2026-08-11T00:00:00Z",
         ))
         with self.database.connect() as connection:
             connection.execute(
@@ -72,6 +90,25 @@ class WebApiTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             api.event_snapshots(101)
 
+    def test_backtest_and_experiment_details_expose_lineage_without_raw_payload(self) -> None:
+        api = ReadOnlyApi(self.database)
+
+        snapshot = api.backtest_snapshot()
+        self.assertEqual(snapshot["rows"][0]["hypothesis"], "Pullbacks continue after a controlled trend reclaim.")
+        self.assertEqual(snapshot["rows"][0]["experiment_type"], "baseline")
+        self.assertEqual(snapshot["rows"][0]["test_type"], "backtest")
+        self.assertEqual(snapshot["rows"][0]["dashboard_url"], "http://127.0.0.1/session")
+        self.assertNotIn("metrics_json", snapshot["rows"][0])
+
+        detail = api.experiment_detail("EXP-1")
+        self.assertEqual(detail["experiment"]["hypothesis"], "Pullbacks continue after a controlled trend reclaim.")
+        self.assertEqual(detail["evidence"][0]["target_regime"], "Directional trend")
+        self.assertNotIn("source_path", detail["experiment"])
+
+        evidence = api.evidence_detail("RUN-1")
+        self.assertEqual(evidence["experiment"]["id"], "EXP-1")
+        self.assertEqual(evidence["evidence"][0]["hypothesis"], "Pullbacks continue after a controlled trend reclaim.")
+
     def test_http_surface_is_get_only_and_returns_json_snapshots(self) -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.database))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -113,6 +150,11 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(backtests["page"], "backtests")
                 self.assertIn("statistics", backtests)
                 self.assertIsInstance(backtests["rows"], list)
+
+            with urllib.request.urlopen(f"{base}/api/v1/experiments/EXP-1") as response:
+                experiment = json.load(response)
+                self.assertEqual(experiment["experiment"]["id"], "EXP-1")
+                self.assertIn("hypothesis", experiment["experiment"])
 
             with urllib.request.urlopen(f"{base}/api/v1/work-items/JOB-1") as response:
                 detail = json.load(response)

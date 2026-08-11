@@ -247,12 +247,17 @@ class ReadOnlyApi:
 
     def backtest_snapshot(self, params: Mapping[str, str] | None = None) -> dict[str, object]:
         params = dict(params or {})
-        rows = [item.to_dict() for item in self.database.query_normalized_evidence(limit=5000)]
+        rows = self._enrich_evidence_rows(
+            [item.to_dict() for item in self.database.query_normalized_evidence(limit=5000)]
+        )
         query = params.get("q", "").strip()[:200].casefold()
         strategy = params.get("strategy", "").strip().casefold()
         exact_filters = {
             key: params.get(key, "").strip()
-            for key in ("verdict", "symbol", "timeframe", "evidence_split", "lifecycle_stage")
+            for key in (
+                "verdict", "symbol", "timeframe", "evidence_split",
+                "lifecycle_stage", "test_type",
+            )
             if params.get(key, "").strip()
         }
         try:
@@ -261,6 +266,7 @@ class ReadOnlyApi:
             minimum_trades = 0
         searchable = (
             "strategy", "experiment_id", "run_id", "session_id", "finding", "next_action",
+            "hypothesis", "test_type",
         )
         filtered = []
         for row in rows:
@@ -315,17 +321,95 @@ class ReadOnlyApi:
             },
             "statistics": statistics,
             "options": self._backtest_options(rows),
+            "test_type_summary": self._test_type_summary(filtered),
             "rows": filtered[:limit],
         }
 
+    def _enrich_evidence_rows(self, rows: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Attach safe lineage metadata without exposing raw Jesse payloads."""
+        if not rows:
+            return []
+        experiment_ids = sorted({str(row["experiment_id"]) for row in rows if row.get("experiment_id")})
+        run_ids = sorted({str(row["run_id"]) for row in rows if row.get("run_id")})
+        experiments: list[dict[str, object]] = []
+        runs: list[dict[str, object]] = []
+        for start in range(0, len(experiment_ids), 500):
+            chunk = experiment_ids[start:start + 500]
+            experiments.extend(self.database.rows(
+                """SELECT e.id,e.experiment_type,e.hypothesis,e.archetype,
+                          e.target_regime,e.failure_regime,e.specification_json,
+                          s.name AS strategy
+                   FROM experiments e LEFT JOIN strategies s ON s.id=e.strategy_id
+                   WHERE e.id IN ({})""".format(",".join("?" for _ in chunk)),
+                tuple(chunk),
+            ))
+        for start in range(0, len(run_ids), 500):
+            chunk = run_ids[start:start + 500]
+            runs.extend(self.database.rows(
+                """SELECT id,status,dashboard_url,started_at,finished_at
+                   FROM runs WHERE id IN ({})""".format(",".join("?" for _ in chunk)),
+                tuple(chunk),
+            ))
+        experiment_by_id = {str(row["id"]): row for row in experiments}
+        run_by_id = {str(row["id"]): row for row in runs}
+        enriched = []
+        for row in rows:
+            result = dict(row)
+            experiment = experiment_by_id.get(str(row.get("experiment_id")), {})
+            run = run_by_id.get(str(row.get("run_id")), {})
+            for key in ("hypothesis", "archetype", "target_regime", "failure_regime"):
+                result[key] = experiment.get(key)
+            result["experiment_type"] = experiment.get("experiment_type") or row.get("lifecycle_stage")
+            try:
+                specification = json.loads(experiment.get("specification_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                specification = {}
+            result["test_type"] = self._test_type(result["experiment_type"], specification)
+            result["dashboard_url"] = run.get("dashboard_url")
+            result["run_status"] = run.get("status")
+            result["run_started_at"] = run.get("started_at")
+            result["run_finished_at"] = run.get("finished_at")
+            enriched.append(result)
+        return enriched
+
     @staticmethod
     def _backtest_options(rows: list[dict[str, object]]) -> dict[str, list[str]]:
-        options: dict[str, set[str]] = {key: set() for key in ("strategies", "verdicts", "symbols", "timeframes", "splits")}
+        options: dict[str, set[str]] = {key: set() for key in ("strategies", "verdicts", "symbols", "timeframes", "splits", "test_types")}
         for row in rows:
-            for key, field in (("strategies", "strategy"), ("verdicts", "verdict"), ("symbols", "symbol"), ("timeframes", "timeframe"), ("splits", "evidence_split")):
+            for key, field in (("strategies", "strategy"), ("verdicts", "verdict"), ("symbols", "symbol"), ("timeframes", "timeframe"), ("splits", "evidence_split"), ("test_types", "test_type")):
                 if row.get(field):
                     options[key].add(str(row[field]))
         return {key: sorted(values) for key, values in options.items()}
+
+    @staticmethod
+    def _test_type(experiment_type: object, specification: Mapping[str, object]) -> str:
+        operation = specification.get("operation")
+        if operation:
+            return str(operation)
+        fallback = {
+            "baseline": "backtest",
+            "hpo": "hpo",
+            "monte_carlo": "monte_carlo",
+            "significance": "significance",
+        }
+        return fallback.get(str(experiment_type or ""), str(experiment_type or "unknown"))
+
+    @staticmethod
+    def _test_type_summary(rows: list[dict[str, object]]) -> dict[str, dict[str, int | str | None]]:
+        summary: dict[str, dict[str, int | str | None]] = {}
+        for row in rows:
+            test_type = str(row.get("test_type") or "unknown")
+            lane = summary.setdefault(test_type, {
+                "reported": 0, "with_metrics": 0, "without_metrics": 0,
+                "latest_completed_at": None,
+            })
+            lane["reported"] = int(lane["reported"]) + 1
+            has_metrics = row.get("trade_count") is not None or row.get("net_profit_percentage") is not None
+            lane["with_metrics" if has_metrics else "without_metrics"] = int(lane["with_metrics" if has_metrics else "without_metrics"]) + 1
+            completed_at = row.get("completed_at")
+            if completed_at and (lane["latest_completed_at"] is None or str(completed_at) > str(lane["latest_completed_at"])):
+                lane["latest_completed_at"] = str(completed_at)
+        return summary
 
     def work_item_detail(self, work_item_id: str) -> dict[str, object] | None:
         rows = self.database.rows(
@@ -358,7 +442,49 @@ class ReadOnlyApi:
         )
         if not rows and not evidence:
             return None
-        return {"run": rows[0] if rows else None, "evidence": evidence}
+        evidence = self._enrich_evidence_rows(evidence)
+        experiment_id = (rows[0]["experiment_id"] if rows else evidence[0].get("experiment_id"))
+        experiment_payload = self.experiment_detail(
+            str(experiment_id), include_evidence=False,
+        ) if experiment_id else None
+        experiment = (
+            experiment_payload["experiment"]
+            if experiment_payload is not None else None
+        )
+        return {"run": rows[0] if rows else None, "experiment": experiment, "evidence": evidence}
+
+    def experiment_detail(
+        self, experiment_id: str, *, include_evidence: bool = True,
+    ) -> dict[str, object] | None:
+        rows = self.database.rows(
+            """SELECT e.id,e.experiment_type,e.hypothesis,e.archetype,
+                      e.target_regime,e.failure_regime,e.parent_experiment_id,
+                      e.specification_json,
+                      s.name AS strategy
+               FROM experiments e LEFT JOIN strategies s ON s.id=e.strategy_id
+               WHERE e.id=?""",
+            (experiment_id,),
+        )
+        if not rows:
+            return None
+        runs = self.database.rows(
+            """SELECT id,session_id,status,dashboard_url,started_at,finished_at
+               FROM runs WHERE experiment_id=? ORDER BY COALESCE(finished_at,started_at) DESC,id""",
+            (experiment_id,),
+        )
+        evidence = (
+            self._enrich_evidence_rows(
+                [item.to_dict() for item in self.database.normalized_evidence_for_experiment(experiment_id)]
+            )
+            if include_evidence else []
+        )
+        experiment = dict(rows[0])
+        try:
+            specification = json.loads(experiment.pop("specification_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            specification = {}
+        experiment["test_type"] = self._test_type(experiment.get("experiment_type"), specification)
+        return {"experiment": experiment, "runs": runs, "evidence": evidence}
 
     def snapshot(self, event_limit: int = 20) -> ApiSnapshot:
         status = self._status()
@@ -558,6 +684,13 @@ def make_handler(
                     detail = api.evidence_detail(run_id)
                     if detail is None or "/" in run_id:
                         self._error(404, "not_found", "backtest not found")
+                    else:
+                        self._send_json(detail)
+                elif request.path.startswith("/api/v1/experiments/"):
+                    experiment_id = unquote(request.path.removeprefix("/api/v1/experiments/"))
+                    detail = api.experiment_detail(experiment_id)
+                    if detail is None or "/" in experiment_id:
+                        self._error(404, "not_found", "experiment not found")
                     else:
                         self._send_json(detail)
                 elif request.path.startswith("/api/v1/work-items/"):
