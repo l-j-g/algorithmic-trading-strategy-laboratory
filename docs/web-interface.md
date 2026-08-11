@@ -6,8 +6,16 @@ frontend dependency is required.
 
 The shell reads canonical SQLite state and exposes a narrow loopback supervisor
 control panel. Controls start/resume, pause, or gracefully stop the existing
-ATS Lab supervisor lifecycle. No claim, requeue, evidence, Jesse, or Memory
-mutation is exposed.
+ATS Lab supervisor lifecycle. Queue, running, HPO, candidates, needs-attention,
+and backtests/database views are navigable from the summary cards and top
+navigation. No claim, requeue, evidence, Jesse, or Memory mutation is exposed.
+
+The frontend deliberately uses browser-native `fetch`, `URLSearchParams`, and
+event delegation. This repository has no frontend package/build manifest, so a
+remote CDN dependency would add drift and make the local-only shell less
+reliable. The reusable seam is `window.ATS_LAB_CONTROL_ROOM`; a TypeScript or
+HTMX frontend can consume the same JSON routes later without changing the
+canonical backend boundary.
 
 ## Run locally
 
@@ -42,11 +50,23 @@ The browser adapter requests these same-origin JSON endpoints:
 | Queue table | `/api/v1/queue` |
 | HPO panel | `/api/v1/hpo/studies` |
 | Supervisor state | `/api/v1/control` |
+| Needs attention | `/api/v1/attention` |
+| Backtests / DB query | `/api/v1/backtests` |
+| Work-item detail | `/api/v1/work-items/{id}` |
+| Evidence detail | `/api/v1/evidence/{run_id}` |
 
 `POST /api/v1/control/start`, `/pause`, `/resume`, and `/stop` require the
 matching `X-ATS-Lab-Confirm` header. Mutation routes are enabled only when
 `ats-lab web` binds to loopback (`127.0.0.1`, `localhost`, or `::1`). Remote
 bindings remain read-only.
+
+Fixed local inspection actions are available at
+`POST /api/v1/commands/{action}` with `X-ATS-Lab-Confirm: command`. The action
+name is the only browser input; the server maps it to explicit argv and runs
+with `shell=False`, a bounded timeout/output capture, sanitized environment,
+and the repository as cwd. Supported actions: `status`, `preflight`,
+`hpo_doctor`, `supervisor_plan`, and `recover_claims_preview`. Arbitrary shell
+commands are rejected.
 
 The adapter accepts either a direct payload or common `data`, `summary`,
 `items`, `queue`, `work_items`, `studies`, and `hpo_studies` wrappers. The
@@ -72,14 +92,16 @@ No frontend test runner exists in this repository, so verification is manual:
 
 1. Run the same-origin server command above.
 2. Confirm the page shows four summary cards, attention list, queue table, HPO
-   cards, supervisor controls, and CLI command placeholders.
+   cards, supervisor controls, and fixed local command actions.
 3. Click `Refresh`; confirm the button disables briefly and the stale banner
    remains visible when `/api/v1/*` is unavailable.
 4. Activate `Pause` or `Stop`; confirm browser confirmation, durable control
    state change, and audit event. Do not test against live research unless
    intentional.
-5. Activate each CLI command button; confirm it only updates status text and
-   does not execute a shell command.
+5. From the live same-origin page, activate each fixed command action; confirm
+   structured output appears and no arbitrary command field exists. From the
+   `file://` fallback, confirm `Copy start command` explains that the file
+   page cannot launch the API and offers the live Control Room link.
 6. Resize to a narrow viewport and use keyboard `Tab`; confirm responsive
    layout, visible focus, skip link, table headers, and readable status text.
 7. When API fixtures are available, serve the page from the API origin or set

@@ -11,6 +11,7 @@ from http.server import ThreadingHTTPServer
 
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import ExperimentSpec, WorkItem, WorkState
+from ats_lab.local_commands import LocalCommandError
 from ats_lab.web_api import ControlService, ReadOnlyApi, make_handler
 
 
@@ -102,6 +103,22 @@ class WebApiTests(unittest.TestCase):
                 control = json.load(response)
                 self.assertEqual(control["control"]["desired_state"], "running")
 
+            with urllib.request.urlopen(f"{base}/api/v1/attention") as response:
+                attention = json.load(response)
+                self.assertIn("items", attention)
+                self.assertIsInstance(attention["items"], list)
+
+            with urllib.request.urlopen(f"{base}/api/v1/backtests") as response:
+                backtests = json.load(response)
+                self.assertEqual(backtests["page"], "backtests")
+                self.assertIn("statistics", backtests)
+                self.assertIsInstance(backtests["rows"], list)
+
+            with urllib.request.urlopen(f"{base}/api/v1/work-items/JOB-1") as response:
+                detail = json.load(response)
+                self.assertEqual(detail["work_item"]["id"], "JOB-1")
+                self.assertNotIn("payload_json", json.dumps(detail["events"]))
+
             with urllib.request.urlopen(f"{base}/api/events?limit=1") as response:
                 events = json.load(response)["events"]
                 self.assertEqual(len(events), 1)
@@ -179,6 +196,55 @@ class WebApiTests(unittest.TestCase):
                 urllib.request.urlopen(f"{base}/../lab.sqlite3")
             context.exception.close()
             self.assertEqual(context.exception.code, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_local_command_endpoint_is_allowlisted_and_confirmed(self) -> None:
+        class FakeRunner:
+            def run(self, action: str) -> dict[str, object]:
+                if action != "status":
+                    raise LocalCommandError("unexpected action")
+                return {
+                    "action": action, "argv": ["python", "-m", "ats_lab.cli", "status"],
+                    "exit_code": 0, "timed_out": False, "output": "{\"healthy\":true}",
+                    "truncated": False,
+                }
+
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(self.database, command_runner=FakeRunner()),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = urllib.request.Request(
+                f"{base}/api/v1/commands/status", method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as context:
+                urllib.request.urlopen(request)
+            context.exception.close()
+            self.assertEqual(context.exception.code, 428)
+
+            request = urllib.request.Request(
+                f"{base}/api/v1/commands/status",
+                headers={"X-ATS-Lab-Confirm": "command"}, method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                result = json.load(response)
+            self.assertEqual(result["action"], "status")
+            self.assertEqual(result["exit_code"], 0)
+
+            request = urllib.request.Request(
+                f"{base}/api/v1/commands/status;env",
+                headers={"X-ATS-Lab-Confirm": "command"}, method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as context:
+                urllib.request.urlopen(request)
+            context.exception.close()
+            self.assertEqual(context.exception.code, 400)
         finally:
             server.shutdown()
             server.server_close()

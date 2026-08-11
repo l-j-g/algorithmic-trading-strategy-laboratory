@@ -32,13 +32,28 @@
     <div class="stale-banner" id="stale-banner" role="status" aria-live="polite" hidden>
       <span class="banner-icon" aria-hidden="true">!</span>
       <div>
-        <strong id="stale-title">Data may be stale.</strong>
-        <span id="stale-message">Checking live API…</span>
+        <strong id="stale-title">Control API offline.</strong>
+        <span id="stale-message">This local file cannot start ATS Lab by itself.</span>
+        <code id="start-api-command">PYTHONPATH=src python3 -m ats_lab.cli web --host 127.0.0.1 --port 8765</code>
       </div>
-      <button class="button button-secondary stale-action" id="start-api-button" type="button" hidden>Start API</button>
+      <div class="stale-actions">
+        <button class="button button-secondary stale-action" id="start-api-button" type="button" hidden>Copy start command</button>
+        <a class="button button-secondary stale-action" href="http://127.0.0.1:8765/">Open live Control Room</a>
+      </div>
     </div>
 
+    <nav class="view-nav" aria-label="Control Room views">
+      <button class="view-nav-button active" type="button" data-view="dashboard">Overview</button>
+      <button class="view-nav-button" type="button" data-view="queue">Queue</button>
+      <button class="view-nav-button" type="button" data-view="running">Running</button>
+      <button class="view-nav-button" type="button" data-view="hpo">HPO</button>
+      <button class="view-nav-button" type="button" data-view="candidates">Candidates</button>
+      <button class="view-nav-button" type="button" data-view="attention">Needs attention</button>
+      <button class="view-nav-button" type="button" data-view="backtests">Backtests / DB</button>
+    </nav>
+
     <main id="main-content" class="page-shell">
+      <div id="dashboard-view" class="view-panel">
       <section class="page-intro" aria-labelledby="room-title">
         <div>
           <p class="eyebrow">Operator view</p>
@@ -49,25 +64,25 @@
       </section>
 
       <section class="summary-grid" aria-label="Workflow summary">
-        <article class="summary-card card-accent-cyan">
+        <article class="summary-card card-accent-cyan nav-card" data-view="queue" role="link" tabindex="0" aria-label="Open queue view">
           <div class="card-heading"><span class="card-icon" aria-hidden="true">Q</span><h3>Queue</h3></div>
           <p class="metric" id="queue-count">—</p>
           <p class="metric-label">unresolved work items</p>
           <p class="card-footnote" id="queue-footnote">Ready — · Running —</p>
         </article>
-        <article class="summary-card card-accent-green">
+        <article class="summary-card card-accent-green nav-card" data-view="running" role="link" tabindex="0" aria-label="Open running view">
           <div class="card-heading"><span class="card-icon" aria-hidden="true">R</span><h3>Running</h3></div>
           <p class="metric" id="running-count">—</p>
           <p class="metric-label">active executions</p>
           <p class="card-footnote" id="running-footnote">Heartbeat —</p>
         </article>
-        <article class="summary-card card-accent-magenta">
+        <article class="summary-card card-accent-magenta nav-card" data-view="hpo" role="link" tabindex="0" aria-label="Open HPO view">
           <div class="card-heading"><span class="card-icon" aria-hidden="true">H</span><h3>HPO</h3></div>
           <p class="metric" id="hpo-count">—</p>
           <p class="metric-label">active studies</p>
           <p class="card-footnote" id="hpo-footnote">Waiting — · Validation —</p>
         </article>
-        <article class="summary-card card-accent-yellow">
+        <article class="summary-card card-accent-yellow nav-card" data-view="candidates" role="link" tabindex="0" aria-label="Open candidates view">
           <div class="card-heading"><span class="card-icon" aria-hidden="true">C</span><h3>Candidates</h3></div>
           <p class="metric" id="candidate-count">—</p>
           <p class="metric-label">awaiting operator review</p>
@@ -112,15 +127,15 @@
       <section class="panel commands-panel" aria-labelledby="commands-title">
         <div class="section-heading">
           <div><p class="eyebrow">Operator bridge</p><h2 id="commands-title">Commands</h2></div>
-          <span class="panel-caption">placeholders — no writes from this shell</span>
+          <span class="panel-caption">fixed local actions · confirmation required for writes</span>
         </div>
         <div class="command-grid">
-          <button class="command-button" type="button" data-command="ats-lab status"><span>Inspect status</span><code>ats-lab status</code></button>
-          <button class="command-button" type="button" data-command="ats-lab monitor --watch"><span>Open monitor</span><code>ats-lab monitor --watch</code></button>
-          <button class="command-button" type="button" data-command="ats-lab hpo --doctor"><span>Check HPO routes</span><code>ats-lab hpo --doctor</code></button>
-          <button class="command-button" type="button" data-command="ats-lab supervisor --plan"><span>Preview supervisor</span><code>ats-lab supervisor --plan</code></button>
+          <button class="command-button" type="button" data-command-action="status"><span>Run status</span><code>ats-lab status</code></button>
+          <button class="command-button" type="button" data-command-action="recover_claims_preview"><span>Preview claim recovery</span><code>ats-lab recover-claims</code></button>
+          <button class="command-button" type="button" data-command-action="hpo_doctor"><span>Check HPO routes</span><code>ats-lab hpo --doctor</code></button>
+          <button class="command-button" type="button" data-command-action="supervisor_plan"><span>Preview supervisor</span><code>ats-lab supervisor --plan</code></button>
         </div>
-        <p class="command-output" id="command-output" role="status" aria-live="polite">Select a command to copy its planned terminal action.</p>
+        <p class="command-output" id="command-output" role="status" aria-live="polite">Select a fixed local action. Output stays on this page.</p>
       </section>
 
       <section class="panel controls-panel" aria-labelledby="controls-title">
@@ -135,6 +150,9 @@
         </div>
         <p class="command-output" id="control-output" role="status" aria-live="polite">Controls require local loopback API.</p>
       </section>
+      </div>
+
+      <section id="detail-view" class="view-panel detail-view" aria-live="polite" hidden></section>
     </main>
 
     <footer class="page-footer">

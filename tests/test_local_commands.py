@@ -68,7 +68,11 @@ class LocalCommandPolicyTests(unittest.TestCase):
         self.assertNotIn("HOME", environment)
 
     def test_status_action_returns_structured_result(self) -> None:
-        result = LocalCommandRunner(self.repo, timeout_seconds=10).run("status")
+        # Execute against the checked-out project: the runner intentionally
+        # supplies only ``repo/src`` as PYTHONPATH and does not inherit the
+        # test process import path.
+        repo = Path(__file__).resolve().parents[1]
+        result = LocalCommandRunner(repo, timeout_seconds=10).run("status")
 
         self.assertEqual(result["action"], "status")
         self.assertEqual(result["exit_code"], 0)

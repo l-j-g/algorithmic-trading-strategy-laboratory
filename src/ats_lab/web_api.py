@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import sqlite3
+from math import inf
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,6 +13,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .dashboard import hpo_detail_snapshot, query_page
 from .database import WorkflowDatabase
+from .local_commands import LocalCommandError, LocalCommandRunner
 from .loop_control import SupervisorLoopControl
 from .status import operator_status
 
@@ -212,6 +214,152 @@ class ReadOnlyApi:
             "supervisor": self.database.supervisor_runtime_status(),
         }
 
+    def attention_snapshot(self) -> dict[str, object]:
+        status = self._status()
+        items: list[dict[str, object]] = []
+        unresolved = _as_int(status["unresolved_execution_claims"])
+        if unresolved:
+            items.append({
+                "id": "execution-claims",
+                "kind": "execution_claims",
+                "severity": "critical",
+                "title": f"{unresolved} unresolved execution claims",
+                "detail": str(status["next_action"]),
+                "next_action": "recover_or_inspect_running_claim",
+                "resolution": "Inspect stale claims and durable run evidence before recovery.",
+            })
+        queue_rows, _ = query_page(self.database, "queue", {})
+        for row in queue_rows:
+            state = str(row.get("state") or "")
+            if state not in {"blocked", "waiting_retry"}:
+                continue
+            items.append({
+                "id": f"work-item:{row['id']}",
+                "kind": "work_item",
+                "work_item_id": row["id"],
+                "severity": "critical" if state == "blocked" else "warning",
+                "title": f"{state}: {row['id']}",
+                "detail": row.get("blocker_detail") or row.get("blocker_code") or "Review queue item",
+                "next_action": row.get("blocker_code") or "inspect_work_item",
+                "resolution": "Open item detail for evidence and next-step resolution.",
+            })
+        return {"items": items[:100], "count": len(items)}
+
+    def backtest_snapshot(self, params: Mapping[str, str] | None = None) -> dict[str, object]:
+        params = dict(params or {})
+        rows = [item.to_dict() for item in self.database.query_normalized_evidence(limit=5000)]
+        query = params.get("q", "").strip()[:200].casefold()
+        strategy = params.get("strategy", "").strip().casefold()
+        exact_filters = {
+            key: params.get(key, "").strip()
+            for key in ("verdict", "symbol", "timeframe", "evidence_split", "lifecycle_stage")
+            if params.get(key, "").strip()
+        }
+        try:
+            minimum_trades = max(0, min(int(params.get("minimum_trades", "0")), 1_000_000))
+        except ValueError:
+            minimum_trades = 0
+        searchable = (
+            "strategy", "experiment_id", "run_id", "session_id", "finding", "next_action",
+        )
+        filtered = []
+        for row in rows:
+            if query and not any(query in str(row.get(key) or "").casefold() for key in searchable):
+                continue
+            if strategy and strategy not in str(row.get("strategy") or "").casefold():
+                continue
+            if any(str(row.get(key) or "") != value for key, value in exact_filters.items()):
+                continue
+            if minimum_trades and _as_int(row.get("trade_count")) < minimum_trades:
+                continue
+            filtered.append(row)
+        sort = params.get("sort", "newest")
+        if sort not in {"newest", "profit", "sharpe", "trades", "drawdown"}:
+            sort = "newest"
+        if sort == "profit":
+            filtered.sort(key=lambda row: row.get("net_profit_percentage") if row.get("net_profit_percentage") is not None else -inf, reverse=True)
+        elif sort == "sharpe":
+            filtered.sort(key=lambda row: row.get("sharpe_ratio") if row.get("sharpe_ratio") is not None else -inf, reverse=True)
+        elif sort == "trades":
+            filtered.sort(key=lambda row: _as_int(row.get("trade_count")), reverse=True)
+        elif sort == "drawdown":
+            filtered.sort(key=lambda row: abs(float(row["max_drawdown_percentage"])) if row.get("max_drawdown_percentage") is not None else inf)
+        else:
+            filtered.sort(key=lambda row: row.get("completed_at") or "", reverse=True)
+        try:
+            limit = max(1, min(int(params.get("limit", "100")), 500))
+        except ValueError:
+            limit = 100
+        metric_rows = [row for row in filtered if row.get("trade_count") is not None or row.get("net_profit_percentage") is not None]
+        profits = [float(row["net_profit_percentage"]) for row in metric_rows if row.get("net_profit_percentage") is not None]
+        trades = [int(row["trade_count"]) for row in metric_rows if row.get("trade_count") is not None]
+        sharpes = [float(row["sharpe_ratio"]) for row in metric_rows if row.get("sharpe_ratio") is not None]
+        drawdowns = [abs(float(row["max_drawdown_percentage"])) for row in metric_rows if row.get("max_drawdown_percentage") is not None]
+        statistics = {
+            "reported_runs": len(filtered),
+            "metric_runs": len(metric_rows),
+            "profitable_runs": sum(1 for value in profits if value > 0),
+            "total_trades": sum(trades) if trades else 0,
+            "total_profit_percentage": round(sum(profits), 4) if profits else None,
+            "average_profit_percentage": round(sum(profits) / len(profits), 4) if profits else None,
+            "best_profit_percentage": max(profits) if profits else None,
+            "worst_drawdown_percentage": max(drawdowns) if drawdowns else None,
+            "average_sharpe_ratio": round(sum(sharpes) / len(sharpes), 4) if sharpes else None,
+        }
+        return {
+            "page": "backtests",
+            "filters": {
+                **exact_filters, "q": params.get("q", "").strip()[:200],
+                "strategy": params.get("strategy", "").strip(),
+                "minimum_trades": str(minimum_trades), "sort": sort,
+            },
+            "statistics": statistics,
+            "options": self._backtest_options(rows),
+            "rows": filtered[:limit],
+        }
+
+    @staticmethod
+    def _backtest_options(rows: list[dict[str, object]]) -> dict[str, list[str]]:
+        options: dict[str, set[str]] = {key: set() for key in ("strategies", "verdicts", "symbols", "timeframes", "splits")}
+        for row in rows:
+            for key, field in (("strategies", "strategy"), ("verdicts", "verdict"), ("symbols", "symbol"), ("timeframes", "timeframe"), ("splits", "evidence_split")):
+                if row.get(field):
+                    options[key].add(str(row[field]))
+        return {key: sorted(values) for key, values in options.items()}
+
+    def work_item_detail(self, work_item_id: str) -> dict[str, object] | None:
+        rows = self.database.rows(
+            """SELECT w.*,e.experiment_type AS experiment_name,s.name AS strategy
+               FROM work_items w JOIN experiments e ON e.id=w.experiment_id
+               LEFT JOIN strategies s ON s.id=e.strategy_id WHERE w.id=?""",
+            (work_item_id,),
+        )
+        if not rows:
+            return None
+        events = self.database.rows(
+            """SELECT id,event_type,occurred_at FROM events
+               WHERE aggregate_type='work_item' AND aggregate_id=?
+               ORDER BY id DESC LIMIT 50""",
+            (work_item_id,),
+        )
+        return {
+            "work_item": rows[0],
+            "stage_timings": self.database.work_item_stage_timings(work_item_id),
+            "events": events,
+            "evidence": [item.to_dict() for item in self.database.normalized_evidence_for_experiment(rows[0]["experiment_id"])],
+        }
+
+    def evidence_detail(self, run_id: str) -> dict[str, object] | None:
+        evidence = [item.to_dict() for item in self.database.normalized_evidence_for_run(run_id)]
+        rows = self.database.rows(
+            """SELECT id,experiment_id,work_item_id,session_id,status,started_at,
+                      finished_at,dashboard_url FROM runs WHERE id=?""",
+            (run_id,),
+        )
+        if not rows and not evidence:
+            return None
+        return {"run": rows[0] if rows else None, "evidence": evidence}
+
     def snapshot(self, event_limit: int = 20) -> ApiSnapshot:
         status = self._status()
         return ApiSnapshot(
@@ -260,6 +408,22 @@ class ControlService:
             **self.snapshot(),
         }
 
+    def resolve_work_item(
+        self,
+        work_item_id: str,
+        *,
+        resolution_code: str,
+        detail: str,
+        evidence_ids: list[str] | None = None,
+    ) -> dict[str, object]:
+        result = self.database.resolve_blocked_work_item(
+            work_item_id,
+            resolution_code=resolution_code,
+            detail=detail,
+            evidence_ids=evidence_ids or [],
+        )
+        return {"action": "resolve", "work_item": result, **self.snapshot()}
+
 
 def health_snapshot(
     database: WorkflowDatabase, *, claim_timeout_seconds: int = 7200,
@@ -296,6 +460,7 @@ def make_handler(
     *,
     static_dir: Path | None = None,
     control_service: ControlService | None = None,
+    command_runner: LocalCommandRunner | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build GET-only API handler, optionally serving the Control Room shell."""
 
@@ -384,6 +549,31 @@ def make_handler(
                         if control_service is not None
                         else api.control_snapshot()
                     )
+                elif request.path in {"/api/attention", "/api/v1/attention"}:
+                    self._send_json(api.attention_snapshot())
+                elif request.path in {"/api/backtests", "/api/v1/backtests"}:
+                    self._send_json(api.backtest_snapshot(params))
+                elif request.path.startswith("/api/v1/backtests/"):
+                    run_id = unquote(request.path.removeprefix("/api/v1/backtests/"))
+                    detail = api.evidence_detail(run_id)
+                    if detail is None or "/" in run_id:
+                        self._error(404, "not_found", "backtest not found")
+                    else:
+                        self._send_json(detail)
+                elif request.path.startswith("/api/v1/work-items/"):
+                    work_item_id = unquote(request.path.removeprefix("/api/v1/work-items/"))
+                    detail = api.work_item_detail(work_item_id)
+                    if detail is None or "/" in work_item_id:
+                        self._error(404, "not_found", "work item not found")
+                    else:
+                        self._send_json(detail)
+                elif request.path.startswith("/api/v1/evidence/"):
+                    run_id = unquote(request.path.removeprefix("/api/v1/evidence/"))
+                    detail = api.evidence_detail(run_id)
+                    if detail is None or "/" in run_id:
+                        self._error(404, "not_found", "evidence not found")
+                    else:
+                        self._send_json(detail)
                 elif request.path.startswith("/api/v1/hpo/studies/"):
                     study_id = request.path.removeprefix("/api/v1/hpo/studies/")
                     detail = api.hpo_detail(study_id)
@@ -416,8 +606,77 @@ def make_handler(
             self.end_headers()
             self.wfile.write(body)
 
+        def _request_json(self) -> dict[str, object]:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError as error:
+                raise ValueError("invalid Content-Length") from error
+            if length < 0 or length > 32_768:
+                raise ValueError("request body too large")
+            raw = self.rfile.read(length)
+            if not raw:
+                return {}
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be a JSON object")
+            return payload
+
         def do_POST(self) -> None:  # noqa: N802
             request = urlsplit(self.path)
+            command_prefix = "/api/v1/commands/"
+            if command_runner is not None and request.path.startswith(command_prefix):
+                action = unquote(request.path.removeprefix(command_prefix)).strip("/")
+                if not action or "/" in action:
+                    self._error(404, "not_found", "local command action not found")
+                    return
+                if self.headers.get("X-ATS-Lab-Confirm") != "command":
+                    self._error(
+                        428,
+                        "confirmation_required",
+                        "send X-ATS-Lab-Confirm: command to confirm local action",
+                    )
+                    return
+                try:
+                    self._send_json(command_runner.run(action))
+                except LocalCommandError as error:
+                    self._error(400, "invalid_request", str(error))
+                return
+            item_prefix = "/api/v1/work-items/"
+            if (
+                control_service is not None
+                and request.path.startswith(item_prefix)
+                and request.path.endswith("/resolve")
+            ):
+                encoded_id = request.path.removeprefix(item_prefix)[:-len("/resolve")]
+                work_item_id = unquote(encoded_id).strip("/")
+                if not work_item_id or "/" in work_item_id:
+                    self._error(404, "not_found", "work item not found")
+                    return
+                if self.headers.get("X-ATS-Lab-Confirm") != "resolve":
+                    self._error(
+                        428,
+                        "confirmation_required",
+                        "send X-ATS-Lab-Confirm: resolve to confirm item resolution",
+                    )
+                    return
+                try:
+                    payload = self._request_json()
+                    code = str(payload.get("resolution_code") or "")[:200]
+                    detail = str(payload.get("detail") or "")[:4_000]
+                    evidence_ids = payload.get("evidence_ids") or []
+                    if not isinstance(evidence_ids, list):
+                        raise ValueError("evidence_ids must be a list")
+                    self._send_json(control_service.resolve_work_item(
+                        work_item_id,
+                        resolution_code=code,
+                        detail=detail,
+                        evidence_ids=[str(item)[:200] for item in evidence_ids[:50]],
+                    ))
+                except (KeyError, OSError, sqlite3.Error) as error:
+                    self._error(503, "resolution_unavailable", str(error))
+                except (TypeError, ValueError, json.JSONDecodeError) as error:
+                    self._error(400, "invalid_request", str(error))
+                return
             prefix = "/api/v1/control/"
             if control_service is None or not request.path.startswith(prefix):
                 self._reject_mutation()
@@ -495,12 +754,16 @@ def serve_web(
     control_service = (
         ControlService(database, repo) if host in loopback_hosts else None
     )
+    command_runner = (
+        LocalCommandRunner(repo) if host in loopback_hosts else None
+    )
     server = ThreadingHTTPServer(
         (host, port),
         make_handler(
             api,
             static_dir=frontend_dir,
             control_service=control_service,
+            command_runner=command_runner,
         ),
     )
     print(f"ATS Lab Control Room: http://{host}:{server.server_port}")
