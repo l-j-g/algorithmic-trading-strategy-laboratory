@@ -76,13 +76,13 @@ Use three interfaces:
 
 | Interface | Purpose | Address or command |
 |---|---|---|
-| ATS supervisor | Run batch research loop | `research/automation/ats_lab.sh supervisor` |
-| ATS terminal | Monitor and control loop | `research/automation/ats_lab.sh console` |
+| ATS supervisor | Run batch research loop | `ats-lab supervisor` |
+| ATS terminal | Monitor and control loop | `ats-lab console` |
 | ATS dashboard | Monitor queue, evidence, candidates, cohorts | <http://127.0.0.1:8765> |
 | Jesse dashboard | Inspect individual backtest sessions | <http://127.0.0.1:9000> |
 
-The `research/automation/ats_lab.sh` bridge remains supported for Jesse-side
-compatibility, but normal operation should use the shorter `ats-lab` commands.
+The old Jesse-side shell bridge is retired. Use the installed `ats-lab` CLI
+from either repository; it discovers the canonical ATS checkout and database.
 
 ## How workflow works
 
@@ -141,8 +141,8 @@ available only through explicit diagnostic export.
 Normal evidence view:
 
 ```bash
-research/automation/ats_lab.sh evidence
-research/automation/ats_lab.sh evidence \
+ats-lab evidence
+ats-lab evidence \
   --symbol BTC-USDT \
   --timeframe 1h \
   --split oos \
@@ -152,19 +152,19 @@ research/automation/ats_lab.sh evidence \
 Machine-readable normalized evidence:
 
 ```bash
-research/automation/ats_lab.sh evidence --format json
+ats-lab evidence --format json
 ```
 
 Raw diagnostic evidence for one known run:
 
 ```bash
-research/automation/ats_lab.sh diagnostic-export RUN-ID
+ats-lab diagnostic-export RUN-ID
 ```
 
 Raw optimizer parameters for one known HPO trial:
 
 ```bash
-research/automation/ats_lab.sh diagnostic-hpo-trial HPO-STUDY-ID TRIAL-NUMBER
+ats-lab diagnostic-hpo-trial HPO-STUDY-ID TRIAL-NUMBER
 ```
 
 Do not use diagnostic output for ranking, gating, HPO analysis or normal
@@ -213,7 +213,7 @@ credentials in process environment, never tracked config or command output.
 
 ```bash
 cd <repo-root>/src/repos/jesse-src
-research/automation/ats_lab.sh supervisor --plan
+ats-lab supervisor --plan
 ```
 
 This command is read-only. Check:
@@ -233,7 +233,7 @@ Use separate terminal:
 
 ```bash
 cd <repo-root>/src/repos/jesse-src
-research/automation/ats_lab.sh dashboard --host 127.0.0.1 --port 8765
+ats-lab dashboard --host 127.0.0.1 --port 8765
 ```
 
 Open <http://127.0.0.1:8765>.
@@ -245,13 +245,13 @@ Keep dashboard loopback-only. It has no authentication.
 Use separate terminal:
 
 ```bash
-research/automation/ats_lab.sh monitor --watch
+ats-lab monitor --watch
 ```
 
 Or open interactive control console:
 
 ```bash
-research/automation/ats_lab.sh console
+ats-lab console
 ```
 
 Console commands:
@@ -279,7 +279,7 @@ quit
 One supervisor round:
 
 ```bash
-research/automation/ats_lab.sh supervisor
+ats-lab supervisor
 ```
 
 Continuous operation:
@@ -299,7 +299,7 @@ ats-lab loop stop
 Bounded continuous run:
 
 ```bash
-research/automation/ats_lab.sh supervisor \
+ats-lab supervisor \
   --continuous \
   --max-rounds 3
 ```
@@ -350,19 +350,19 @@ Avoid:
 One snapshot:
 
 ```bash
-research/automation/ats_lab.sh monitor
+ats-lab monitor
 ```
 
 Refresh every five seconds:
 
 ```bash
-research/automation/ats_lab.sh monitor --watch
+ats-lab monitor --watch
 ```
 
 Custom refresh:
 
 ```bash
-research/automation/ats_lab.sh monitor --watch --interval 2
+ats-lab monitor --watch --interval 2
 ```
 
 View includes durable control intent, supervisor phase/PID/heartbeat, queue
@@ -373,10 +373,10 @@ recent stage duration.
 ### Supervisor control
 
 ```bash
-research/automation/ats_lab.sh control status
-research/automation/ats_lab.sh control pause
-research/automation/ats_lab.sh control resume
-research/automation/ats_lab.sh control stop
+ats-lab control status
+ats-lab control pause
+ats-lab control resume
+ats-lab control stop
 ```
 
 Semantics:
@@ -395,7 +395,7 @@ supervisor.
 Optional short alias for current shell:
 
 ```bash
-alias lab='<repo-root>/src/repos/jesse-src/research/automation/ats_lab.sh'
+alias lab='ats-lab'
 lab monitor --watch
 lab control pause
 lab control resume
@@ -405,8 +405,8 @@ lab console
 ### Compact health
 
 ```bash
-research/automation/ats_lab.sh status
-research/automation/ats_lab.sh status --format json
+ats-lab status
+ats-lab status --format json
 ```
 
 Important fields:
@@ -424,19 +424,19 @@ Important fields:
 ### Active queue
 
 ```bash
-research/automation/ats_lab.sh queue
-research/automation/ats_lab.sh queue --state ready
-research/automation/ats_lab.sh queue --state blocked
-research/automation/ats_lab.sh queue --format json
+ats-lab queue
+ats-lab queue --state ready
+ats-lab queue --state blocked
+ats-lab queue --format json
 ```
 
 ### Candidates
 
 ```bash
-research/automation/ats_lab.sh candidates
-research/automation/ats_lab.sh candidates --verdict hpo-candidate
-research/automation/ats_lab.sh candidates --verdict paper-trade-candidate
-research/automation/ats_lab.sh candidates --format json
+ats-lab candidates
+ats-lab candidates --verdict hpo-candidate
+ats-lab candidates --verdict paper-trade-candidate
+ats-lab candidates --format json
 ```
 
 Candidate views show one representative row per experiment. Use `evidence` to
@@ -448,13 +448,13 @@ Use one lifecycle surface for HPO scheduling, execution, analysis, validation
 and final disposition:
 
 ```bash
-research/automation/ats_lab.sh hpo
-research/automation/ats_lab.sh hpo --state hpo_running
-research/automation/ats_lab.sh hpo-detail HPO-STUDY-ID
-research/automation/ats_lab.sh analyzer
-research/automation/ats_lab.sh timings
-research/automation/ats_lab.sh timings --job HPO-WORK-ITEM-ID
-research/automation/ats_lab.sh requeue-hpo-analysis HPO-ANALYSIS-JOB-ID \
+ats-lab hpo
+ats-lab hpo --state hpo_running
+ats-lab hpo-detail HPO-STUDY-ID
+ats-lab analyzer
+ats-lab timings
+ats-lab timings --job HPO-WORK-ITEM-ID
+ats-lab requeue-hpo-analysis HPO-ANALYSIS-JOB-ID \
   --reason "provider or transport blocker repaired"
 ```
 
@@ -496,7 +496,7 @@ not claim them until symbol/timeframe/OOS or rolling periods are supplied.
 Supply fresh split-specific routes without editing SQLite:
 
 ```bash
-research/automation/ats_lab.sh configure-hpo-validation-routes \
+ats-lab configure-hpo-validation-routes \
   OPTUNA-9BD60A3E3546 --file validation-routes.json
 ```
 
@@ -550,8 +550,8 @@ clears only matching `requirements_pending`, then normal promotion resumes.
 ### Audit
 
 ```bash
-research/automation/ats_lab.sh audit
-research/automation/ats_lab.sh synthesis-status
+ats-lab audit
+ats-lab synthesis-status
 ```
 
 Healthy audit expectations:
@@ -602,13 +602,13 @@ Verdicts:
 Always preview:
 
 ```bash
-research/automation/ats_lab.sh recover-claims --stale-after-hours 2
+ats-lab recover-claims --stale-after-hours 2
 ```
 
 Apply only when preview shows abandoned claims with no durable runs:
 
 ```bash
-research/automation/ats_lab.sh recover-claims \
+ats-lab recover-claims \
   --stale-after-hours 2 \
   --apply
 ```
@@ -620,7 +620,7 @@ Completed executions awaiting analysis are excluded from stale-claim recovery.
 Do not rerun backtests manually. Restart same supervisor:
 
 ```bash
-research/automation/ats_lab.sh supervisor
+ats-lab supervisor
 ```
 
 Supervisor finds durable runs marked `awaiting_batch_evaluation` and resumes
@@ -631,7 +631,7 @@ analysis.
 Inspect:
 
 ```bash
-research/automation/ats_lab.sh queue
+ats-lab queue
 ```
 
 Transient infrastructure failures use bounded backoff without changing research
@@ -649,7 +649,7 @@ identical execution.
 Inspect exact blocker:
 
 ```bash
-research/automation/ats_lab.sh queue --state blocked
+ats-lab queue --state blocked
 ```
 
 Do not blindly return blocked work to ready. Resolve requirement, accept explicit
@@ -658,7 +658,7 @@ research assumption, or archive with terminal evidence.
 After fixing and validating root cause, reopen with durable evidence:
 
 ```bash
-research/automation/ats_lab.sh resolve-blocker JOB-ID \
+ats-lab resolve-blocker JOB-ID \
   --code sizing_fix_validated \
   --detail "Exact validated resolution." \
   --evidence JESSE-SESSION-ID
@@ -670,7 +670,7 @@ records previous blocker, resolution, detail and evidence IDs in SQLite events.
 If durable run metrics exist but analyzer evidence was incomplete:
 
 ```bash
-research/automation/ats_lab.sh requeue-evaluation JOB-ID \
+ats-lab requeue-evaluation JOB-ID \
   --batch RECOVERY-ID \
   --reason "Recover existing durable metrics."
 ```
@@ -682,8 +682,8 @@ This schedules analysis only. It does not rerun Jesse execution.
 Preview only:
 
 ```bash
-research/automation/ats_lab.sh reconcile
-research/automation/ats_lab.sh sanitize
+ats-lab reconcile
+ats-lab sanitize
 ```
 
 Before applying sanitation, back up:
@@ -696,7 +696,7 @@ cp <repo-root>/src/repos/algorithmic-trading-strategy-laboratory/.ats-lab/labora
 Then, only after reviewing preview:
 
 ```bash
-research/automation/ats_lab.sh sanitize --apply
+ats-lab sanitize --apply
 ```
 
 ## Configuration
@@ -784,7 +784,7 @@ create `experiment.json`:
 Enqueue:
 
 ```bash
-research/automation/ats_lab.sh enqueue --file experiment.json
+ats-lab enqueue --file experiment.json
 ```
 
 ## Installation
@@ -819,8 +819,8 @@ git diff --check
 From Jesse repository:
 
 ```bash
-research/automation/ats_lab.sh supervisor --plan
-research/automation/ats_lab.sh audit
+ats-lab supervisor --plan
+ats-lab audit
 git diff --check
 ```
 

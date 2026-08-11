@@ -5,7 +5,8 @@ read-only until their evidence is verified in SQLite.
 
 ## Retain as canonical
 
-- `AGENTS.md`: Jesse MCP and trading-safety contract, shortened later.
+- `AGENTS.md`: Jesse MCP and trading-safety contract; generated Jesse rules
+  remain owner-managed in `jesse-src`.
 - `.executor.md`: concise Agent project routing.
 - `src/ats_lab/`: schema, services, CLI and migration adapters.
 - `tests/`: public contract, storage and migration tests.
@@ -28,9 +29,10 @@ read-only until their evidence is verified in SQLite.
 - redundant experiment logging/review skills.
 - obsolete orchestration-framework references and artifacts.
 
-Jesse legacy loop and Markdown/JSON sidecars now live only under
-`research/archive/legacy_workflow/`. New queue, run, evaluation and synthesis
-writes must go through `ats-lab supervisor`.
+Jesse legacy loop code and operational sidecars are retired from the active
+`jesse-src` tree. Historical queue/journal files and raw headless evidence
+remain read-only because experiment records link them. New queue, run,
+evaluation and synthesis writes must go through `ats-lab supervisor`.
 
 ## Keep outside database
 

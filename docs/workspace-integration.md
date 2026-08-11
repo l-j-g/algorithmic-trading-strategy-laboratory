@@ -87,12 +87,12 @@ On the current workstation, `jesse-src/.ats-lab` points to this repository's
 `.ats-lab` directory for read-compatible local access. This pointer is machine
 configuration, not portable committed state.
 
-From `jesse-src`, use:
+From either repository, use the installed ATS CLI:
 
 ```bash
-research/automation/ats_lab.sh queue
-research/automation/ats_lab.sh candidates
-research/automation/ats_lab.sh audit
+ats-lab queue
+ats-lab candidates
+ats-lab audit
 ```
 
 `ATS_LAB_REPOSITORY` and `ATS_LAB_DATABASE` override the defaults.
