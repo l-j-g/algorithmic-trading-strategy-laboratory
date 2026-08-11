@@ -15,7 +15,7 @@ Usage:
   scripts/jesse-workspace.sh status
   scripts/jesse-workspace.sh upstream init|update|refresh
   scripts/jesse-workspace.sh image build [--no-update]
-  scripts/jesse-workspace.sh stack up|down
+  scripts/jesse-workspace.sh stack up [--no-update]|down
   scripts/jesse-workspace.sh worktree create <slug> [base-ref]
   scripts/jesse-workspace.sh worktree list
   scripts/jesse-workspace.sh worktree remove <slug>
@@ -154,7 +154,20 @@ stack_compose() {
 }
 
 stack_up() {
-  ensure_upstream_repo
+  local mode="${1:-}"
+  case "$mode" in
+    "")
+      # Starting the stack is the normal polling point. Refresh first so a
+      # stale local commit-tagged image cannot silently become the runtime.
+      upstream_refresh
+      ;;
+    --no-update)
+      ensure_upstream_repo
+      ;;
+    *)
+      die "stack up accepts only --no-update"
+      ;;
+  esac
   local tag
   tag="$(image_tag)"
   docker image inspect "$tag" >/dev/null 2>&1 || image_build --no-update >/dev/null
@@ -249,7 +262,7 @@ case "$command_name" in
     ;;
   stack)
     case "${2:-}" in
-      up) stack_up ;;
+      up) stack_up "${3:-}" ;;
       down) stack_down ;;
       *) usage >&2; exit 2 ;;
     esac

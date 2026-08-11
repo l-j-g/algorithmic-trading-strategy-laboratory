@@ -49,9 +49,13 @@ provenance-labelled Jesse image with:
 ```bash
 scripts/jesse-workspace.sh image build
 scripts/jesse-workspace.sh stack up
+scripts/jesse-workspace.sh stack up --no-update  # deliberate pinned/offline start
 ```
 
-For periodic polling, schedule this idempotent command in the host scheduler:
+`stack up` polls upstream before starting by default. Use `--no-update` only
+when an intentionally pinned/offline start is required. For periodic polling
+while the stack remains running, schedule this idempotent command in the host
+scheduler:
 
 ```bash
 scripts/jesse-workspace.sh upstream refresh

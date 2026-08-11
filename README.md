@@ -54,17 +54,20 @@ scripts/jesse-workspace.sh status
 scripts/jesse-workspace.sh upstream update
 scripts/jesse-workspace.sh image build
 scripts/jesse-workspace.sh stack up
+scripts/jesse-workspace.sh stack up --no-update  # deliberate pinned/offline start
 ```
 
-`image build` tags the image with the exact upstream commit and `stack up`
-starts Jesse from that immutable tag. The default upstream checkout is
+`stack up` polls the public upstream first, then starts Jesse from the
+commit-tagged immutable image. `image build` can still be run separately. Use
+`stack up --no-update` only for a deliberate pinned/offline start. The default
+upstream checkout is
 `<repo-root>/src/repos/jesse-upstream`; override with
 `JESSE_UPSTREAM_REPOSITORY` when needed. Do not use `salehmir/jesse:latest`
 for a research run when commit provenance matters.
 
-For a scheduled refresh, run `scripts/jesse-workspace.sh upstream refresh`.
-It fast-forwards the public mirror and builds only when the corresponding
-commit-tagged image is absent.
+For recurring polling while the stack is not being restarted, schedule
+`scripts/jesse-workspace.sh upstream refresh`. It fast-forwards the public
+mirror and builds only when the corresponding commit-tagged image is absent.
 
 `jesse-src` remains the configured Agent repository because it contains the
 research workspace. The Jesse engine inside the container comes from the clean
