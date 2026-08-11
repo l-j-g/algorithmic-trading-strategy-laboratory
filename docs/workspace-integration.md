@@ -67,6 +67,11 @@ volume, PostgreSQL, Redis, dashboard, and MCP services. The upstream image
 contains Jesse engine code only; it does not contain private strategy source,
 ATS SQLite state, credentials, or generated results.
 
+The canonical full runtime stack therefore remains
+`<repo-root>/src/repos/jesse-src/docker/docker-compose.yml`. ATS owns only the
+control script and image-selection override; it does not duplicate Jesse's
+service definitions.
+
 The ignored `.ats-lab/config.toml` contains:
 
 ```toml
