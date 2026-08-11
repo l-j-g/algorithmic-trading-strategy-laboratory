@@ -48,8 +48,11 @@ h3 { margin: 0; font-size: .92rem; }
 .button:hover, .button:focus-visible, .command-button:hover, .command-button:focus-visible { border-color: var(--cyan); }
 .button:focus-visible, .command-button:focus-visible { outline: 3px solid rgba(89, 216, 232, .35); outline-offset: 2px; }
 .stale-banner { display: flex; align-items: flex-start; gap: .75rem; margin: 1rem clamp(1rem, 4vw, 4rem) 0; padding: .85rem 1rem; border: 1px solid rgba(245, 200, 106, .55); border-radius: .65rem; background: rgba(101, 75, 20, .24); color: var(--yellow); }
+#stale-banner[hidden] { display: none; }
 .stale-banner strong { display: block; }
 .stale-banner span:not(.banner-icon) { color: #e5d8b4; font-size: .86rem; }
+.stale-banner > div { flex: 1; }
+.stale-action { flex: 0 0 auto; white-space: nowrap; }
 .banner-icon { display: grid; flex: 0 0 1.35rem; place-items: center; width: 1.35rem; height: 1.35rem; border: 1px solid currentColor; border-radius: 50%; font-weight: 900; }
 .page-shell { width: min(1440px, calc(100% - 2rem)); margin: 0 auto; padding: 2rem 0 3rem; }
 .page-intro { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 1.5rem; }

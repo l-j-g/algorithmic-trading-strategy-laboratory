@@ -32,9 +32,10 @@
     <div class="stale-banner" id="stale-banner" role="status" aria-live="polite" hidden>
       <span class="banner-icon" aria-hidden="true">!</span>
       <div>
-        <strong>Data may be stale.</strong>
-        <span id="stale-message">Live API snapshot unavailable. Showing safe demo values.</span>
+        <strong id="stale-title">Data may be stale.</strong>
+        <span id="stale-message">Checking live API…</span>
       </div>
+      <button class="button button-secondary stale-action" id="start-api-button" type="button" hidden>Start API</button>
     </div>
 
     <main id="main-content" class="page-shell">

@@ -63,42 +63,53 @@
 
   function normalizeSummary(payload) {
     const source = firstObject(payload, ["summary", "data"]);
+    const workStates = source.work_states || {};
+    const hpo = source.hpo || {};
+    const hpoCounts = hpo.counts || {};
+    const validationJobs = hpo.route_readiness?.validation_jobs || {};
     return {
-      queue: number(source.queue ?? source.unresolved ?? source.active_queue),
-      ready: number(source.ready), running: number(source.running ?? source.active),
-      retry: number(source.retry ?? source.waiting_retry), blocked: number(source.blocked),
-      hpo_active: number(source.hpo_active ?? source.active_hpo), hpo_waiting: number(source.hpo_waiting ?? source.requirements_pending),
-      validation: number(source.validation), candidates: number(source.candidates ?? source.candidate_count),
-      heartbeat_at: source.heartbeat_at ?? source.last_heartbeat, updated_at: source.updated_at ?? source.as_of ?? null,
+      queue: number(source.queue ?? source.unresolved ?? source.active_queue ?? source.active),
+      ready: number(source.ready ?? workStates.ready),
+      running: number(source.running ?? source.running_execution_claims ?? workStates.running),
+      retry: number(source.retry ?? source.waiting_retry ?? workStates.waiting_retry),
+      blocked: number(source.blocked ?? workStates.blocked),
+      hpo_active: number(source.hpo_active ?? source.active_hpo ?? hpo.active),
+      hpo_waiting: number(source.hpo_waiting ?? source.requirements_pending ?? hpo.waiting),
+      validation: number(source.validation ?? validationJobs.total),
+      candidates: number(source.candidates ?? source.candidate_count ?? hpoCounts.paper_trade_candidate),
+      unresolved_execution_claims: number(source.unresolved_execution_claims),
+      heartbeat_at: source.heartbeat_at ?? source.last_heartbeat ?? source.checked_at,
+      updated_at: source.updated_at ?? source.as_of ?? source.checked_at ?? null,
       attention: Array.isArray(source.attention) ? source.attention : [],
     };
   }
 
   function normalizeHealth(payload) {
     const source = firstObject(payload, ["health", "data"]);
-    const status = String(source.status ?? source.state ?? (source.ok === true ? "healthy" : "unknown")).toLowerCase();
-    return { status, label: source.label ?? status, detail: source.detail ?? source.message ?? "" };
+    const status = String(source.status ?? source.state ?? source.progress_state ?? (source.healthy === true ? "healthy" : "degraded")).toLowerCase();
+    const labels = { healthy: "Healthy", stalled: "Stalled", degraded: "Degraded", unknown: "Unknown" };
+    return { status, label: source.label ?? labels[status] ?? status, detail: source.detail ?? source.message ?? source.next_action ?? "" };
   }
 
   function normalizeQueue(payload) {
-    return arrayPayload(payload, ["items", "queue", "work_items"]).map((item) => ({
+    return arrayPayload(payload, ["items", "rows", "queue", "work_items"]).map((item) => ({
       id: item.id ?? item.work_item_id ?? item.job_id,
       state: item.state ?? item.lifecycle_state ?? "unknown",
-      stage: item.stage ?? item.kind ?? "—",
+      stage: item.stage ?? item.kind ?? item.experiment_id ?? "—",
       strategy: item.strategy ?? item.strategy_name ?? "—",
-      route: item.route ?? [item.symbol, item.timeframe].filter(Boolean).join(" · "),
+      route: item.route ?? ([item.symbol, item.timeframe].filter(Boolean).join(" · ") || item.claimed_by || "—"),
       priority: item.priority ?? item.priority_score,
-      next_action: item.next_action ?? item.blocker ?? item.finding ?? "—",
+      next_action: item.next_action ?? item.blocker_detail ?? item.blocker_code ?? item.blocker ?? item.finding ?? "—",
     }));
   }
 
   function normalizeHpo(payload) {
-    return arrayPayload(payload, ["studies", "items", "hpo_studies"]).map((item) => ({
+    return arrayPayload(payload, ["studies", "rows", "items", "hpo_studies"]).map((item) => ({
       id: item.id ?? item.study_id ?? "—", name: item.name ?? item.study_name ?? "HPO study",
       strategy: item.strategy ?? "—", state: item.state ?? item.lifecycle_state ?? "unknown",
       completed_trials: number(item.completed_trials ?? item.completed_trial_count),
       total_trials: number(item.total_trials ?? item.trial_count), selected: number(item.selected ?? item.selected_trial_count),
-      validation: number(item.validation ?? item.validation_count), next_action: item.next_action ?? item.finding ?? "—",
+      validation: number(item.validation ?? item.validation_count), next_action: item.next_action ?? item.finding ?? "Review study evidence",
     }));
   }
 
@@ -123,7 +134,7 @@
     if (["healthy", "running", "completed", "finished", "delivered"].includes(value)) return "healthy";
     if (["ready", "pending", "scheduled"].includes(value)) return "ready";
     if (["waiting_retry", "retry", "requirements_pending", "waiting"].includes(value)) return "waiting";
-    if (["blocked", "failed", "error", "degraded"].includes(value)) return "blocked";
+    if (["blocked", "failed", "error", "degraded", "stalled"].includes(value)) return "blocked";
     if (["hpo_candidate", "paper_trade_candidate", "candidate", "hpo_analysis", "validation"].includes(value)) return "candidate";
     return "unknown";
   }
@@ -160,6 +171,7 @@
     if (snapshot.failures.length) items.unshift({ severity: "critical", title: "API snapshot incomplete", detail: `${snapshot.failures.length} endpoint${snapshot.failures.length === 1 ? "" : "s"} unavailable` });
     if (snapshot.summary.blocked) items.push({ severity: "critical", title: `${snapshot.summary.blocked} blocked queue item${snapshot.summary.blocked === 1 ? "" : "s"}`, detail: "Review requirements or blocker detail" });
     if (snapshot.summary.hpo_waiting) items.push({ severity: "info", title: `${snapshot.summary.hpo_waiting} HPO study waiting`, detail: "Check route or trial readiness" });
+    if (snapshot.summary.unresolved_execution_claims) items.push({ severity: "critical", title: `${snapshot.summary.unresolved_execution_claims} unresolved execution claim${snapshot.summary.unresolved_execution_claims === 1 ? "" : "s"}`, detail: "Recover or inspect running claims before restarting work" });
     if (snapshot.summary.candidates) items.push({ severity: "candidate", title: `${snapshot.summary.candidates} candidate${snapshot.summary.candidates === 1 ? "" : "s"} need review`, detail: "Promotion remains gated" });
     const list = $("#attention-list");
     $("#attention-count").textContent = `${items.length} item${items.length === 1 ? "" : "s"}`;
@@ -186,7 +198,12 @@
     const old = Number.isFinite(updated) && Date.now() - updated > STALE_AFTER_MS;
     const stale = snapshot.demo || snapshot.failures.length > 0 || old;
     $("#stale-banner").hidden = !stale;
-    if (stale) $("#stale-message").textContent = snapshot.demo ? "Live API unavailable. Showing safe demo values; no operator action is connected." : snapshot.failures.length ? "Some API endpoints failed. Values may be mixed with the last safe fallback." : "Last API snapshot is older than 90 seconds. Refresh before acting.";
+    const startButton = $("#start-api-button");
+    startButton.hidden = !snapshot.demo;
+    if (stale) {
+      $("#stale-title").textContent = snapshot.demo ? "Control API offline." : snapshot.failures.length ? "API snapshot incomplete." : "Data may be stale.";
+      $("#stale-message").textContent = snapshot.demo ? "Start the local API, then press Refresh. Safe demo values shown; no actions enabled." : snapshot.failures.length ? "Some API endpoints failed. Values may be mixed with the last safe fallback." : "Last API snapshot is older than 90 seconds. Refresh before acting.";
+    }
   }
 
   function formatTime(value, fallback = "—") {
@@ -200,6 +217,21 @@
       const command = button.dataset.command;
       $("#command-output").textContent = `Placeholder only: copy and run “${command}” in the operator terminal. No command was executed.`;
     }));
+  }
+
+  function bindStartApi() {
+    const button = $("#start-api-button");
+    const command = "PYTHONPATH=src python3 -m ats_lab.cli web --host 127.0.0.1 --port 8765";
+    button.addEventListener("click", async () => {
+      $("#command-output").textContent = `Run this in the ATS Lab repository, then press Refresh: ${command}`;
+      try {
+        await navigator.clipboard.writeText(command);
+        $("#command-output").textContent += " (copied to clipboard)";
+      } catch (_) {
+        // Clipboard permission is optional; visible command remains available.
+      }
+      $("#commands-title").scrollIntoView({ behavior: "smooth", block: "center" });
+    });
   }
 
   async function refresh() {
@@ -216,5 +248,5 @@
   }
 
   window.ATS_LAB_CONTROL_ROOM = Object.freeze({ API_ROUTES, createApiClient, normalizeSummary, normalizeHealth, normalizeQueue, normalizeHpo, loadSnapshot, refresh });
-  document.addEventListener("DOMContentLoaded", () => { bindCommands(); refresh(); window.setInterval(refresh, REFRESH_INTERVAL_MS); });
+  document.addEventListener("DOMContentLoaded", () => { bindCommands(); bindStartApi(); refresh(); window.setInterval(refresh, REFRESH_INTERVAL_MS); });
 }());
