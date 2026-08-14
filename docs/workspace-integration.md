@@ -67,6 +67,18 @@ It fetches the public branch, fast-forwards only, and builds the commit-tagged
 image only when that tag is not already local. Keep scheduling serialized: one
 refresh/image build at a time.
 
+`scripts/jesse-workspace.sh status` performs a read-only inspection of the
+`jesse` container (override its name with `JESSE_CONTAINER_NAME`). It prints the
+canonical future image/revision from `jesse-upstream` alongside the running
+image and its `org.opencontainers.image.revision` label. It reports
+`provenance_status=canonical` only when both values match exactly; missing or
+mismatched provenance is never presented as a match. If Docker is unavailable,
+the status is `unavailable` and no provenance or restart decision is inferred.
+A running non-canonical image is reported as
+`provenance_status=transitional_exception`: preserve the active batch and do
+not rebuild, replace, restart, or relabel it. After that batch completes, use
+`scripts/jesse-workspace.sh stack up` as the controlled restart/rebuild path.
+
 The compose override selects `ats-lab/jesse:<upstream-commit>` while the
 existing `jesse-src/docker/docker-compose.yml` supplies the private workspace
 volume, PostgreSQL, Redis, dashboard, and MCP services. The upstream image

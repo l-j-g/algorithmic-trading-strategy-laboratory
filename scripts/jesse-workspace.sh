@@ -39,6 +39,7 @@ research_repo="${JESSE_RESEARCH_REPOSITORY:-$workspace_root/jesse-src}"
 image_repository="${JESSE_IMAGE_REPOSITORY:-ats-lab/jesse}"
 compose_file="${JESSE_COMPOSE_FILE:-$research_repo/docker/docker-compose.yml}"
 compose_override="$script_root/ops/jesse/docker-compose.upstream.yml"
+runtime_container="${JESSE_CONTAINER_NAME:-jesse}"
 
 die() {
   echo "error: $*" >&2
@@ -225,6 +226,68 @@ worktree_remove() {
   echo "removed task/$slug worktrees"
 }
 
+runtime_provenance() {
+  local canonical_image canonical_revision runtime_info
+  local runtime_state runtime_image runtime_revision
+  canonical_image="$(image_tag)"
+  canonical_revision="$(git -C "$upstream_repo" rev-parse HEAD)"
+  echo "canonical_image=$canonical_image"
+  echo "canonical_revision=$canonical_revision"
+  echo "runtime_container=$runtime_container"
+
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "runtime_state=unknown"
+    echo "provenance_status=unavailable"
+    echo "provenance_detail=Docker CLI unavailable; canonical target was not compared"
+    echo "provenance_action=inspect Docker before claiming a provenance match"
+    return
+  fi
+
+  if ! docker info >/dev/null 2>&1; then
+    echo "runtime_state=unknown"
+    echo "provenance_status=unavailable"
+    echo "provenance_detail=Docker daemon unavailable; canonical target was not compared"
+    echo "provenance_action=inspect Docker before claiming a provenance match"
+    return
+  fi
+
+  if ! runtime_info="$(
+    docker inspect "$runtime_container" \
+      --format '{{.State.Status}}|{{.Config.Image}}|{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+      2>/dev/null
+  )"; then
+    echo "runtime_state=not_found"
+    echo "runtime_image=none"
+    echo "runtime_image_revision=unknown"
+    echo "provenance_status=not_running"
+    echo "provenance_detail=Jesse container was not found"
+    echo "provenance_action=scripts/jesse-workspace.sh stack up"
+    return
+  fi
+
+  IFS='|' read -r runtime_state runtime_image runtime_revision <<< "$runtime_info"
+  runtime_state="${runtime_state:-unknown}"
+  runtime_image="${runtime_image:-unknown}"
+  runtime_revision="${runtime_revision:-unknown}"
+  echo "runtime_state=$runtime_state"
+  echo "runtime_image=$runtime_image"
+  echo "runtime_image_revision=$runtime_revision"
+
+  if [[ "$runtime_image" == "$canonical_image" && "$runtime_revision" == "$canonical_revision" ]]; then
+    echo "provenance_status=canonical"
+    echo "provenance_detail=running image matches canonical future target"
+    echo "provenance_action=none"
+  elif [[ "$runtime_state" == "running" ]]; then
+    echo "provenance_status=transitional_exception"
+    echo "provenance_detail=running image is historical/non-canonical; preserve active batch and do not relabel or restart it"
+    echo "provenance_action=after active batch completes: scripts/jesse-workspace.sh stack up"
+  else
+    echo "provenance_status=drifted"
+    echo "provenance_detail=runtime image does not match canonical future target"
+    echo "provenance_action=controlled restart/rebuild: scripts/jesse-workspace.sh stack up"
+  fi
+}
+
 status() {
   printf 'role       state   branch       commit           path\n'
   repo_summary ats "$script_root"
@@ -234,6 +297,7 @@ status() {
   echo "image_repository=$image_repository"
   if [[ -d "$upstream_repo/.git" || -f "$upstream_repo/.git" ]]; then
     echo "expected_image=$(image_tag)"
+    runtime_provenance
   fi
   echo "ATS worktrees:"
   git -C "$script_root" worktree list --porcelain | awk '/^worktree / {print "  " $2}'

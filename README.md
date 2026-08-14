@@ -237,6 +237,11 @@ For recurring polling while the stack is not being restarted, schedule
 `scripts/jesse-workspace.sh upstream refresh`. It fast-forwards the public
 mirror and builds only when the corresponding commit-tagged image is absent.
 
+`scripts/jesse-workspace.sh status` also compares the running `jesse` container's
+image and OCI revision label with the clean upstream target. A running mismatch
+is an explicit `transitional_exception`, not a provenance match; preserve the
+active batch and run the controlled `stack up` restart/rebuild only afterward.
+
 ### Environment variables
 
 | Variable | Default | Purpose |
