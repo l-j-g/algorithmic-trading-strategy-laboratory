@@ -32,7 +32,7 @@ normalized evidence produced from it.
 Default sibling layout:
 
 ```text
-<repo-root>/src/repos/
+<workspace-root>/
 ├── algorithmic-trading-strategy-laboratory/  # harness + canonical SQLite
 ├── jesse-src/                                # private research workspace
 └── jesse-upstream/                           # clean public Jesse engine
@@ -74,7 +74,7 @@ contains Jesse engine code only; it does not contain private strategy source,
 ATS SQLite state, credentials, or generated results.
 
 The canonical full runtime stack therefore remains
-`<repo-root>/src/repos/jesse-src/docker/docker-compose.yml`. ATS owns only the
+`<workspace-root>/jesse-src/docker/docker-compose.yml`. ATS owns only the
 control script and image-selection override; it does not duplicate Jesse's
 service definitions.
 
@@ -82,12 +82,12 @@ The ignored `.ats-lab/config.toml` contains:
 
 ```toml
 [repositories]
-jesse = "<repo-root>/src/repos/jesse-src"
+jesse = "<workspace-root>/jesse-src"
 ```
 
-Agent uses that workspace and performs all strategy, candle, configuration,
-and backtest operations through Jesse MCP. The ATS Lab worker owns claims and
-persists the returned run plus evaluation in one transaction.
+The agent executor uses that workspace and performs all strategy, candle,
+configuration, and backtest operations through Jesse MCP. The ATS Lab worker
+owns claims and persists the returned run plus evaluation in one transaction.
 
 On the current workstation, `jesse-src/.ats-lab` points to this repository's
 `.ats-lab` directory for read-compatible local access. This pointer is machine

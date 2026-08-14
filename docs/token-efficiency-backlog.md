@@ -28,14 +28,14 @@ privacy-safe telemetry. `.ats-lab/config.toml` enables it; disabling
 
 Fake-server parity fixture, one two-route run with three polls:
 
-- before: one Agent model turn, 3,153-byte model request prompt, with polling
+- before: one agent model turn, 3,153-byte model request prompt, with polling
   performed inside that turn;
 - after: zero model turns, seven HTTP JSON-RPC calls, 1,455 request bytes and
   2,677 response bytes total;
 - terminal polling telemetry: `model_call_count=0`, `poll_count=3`;
 - terminal `metrics` and compact `raw_result.metrics` remain exactly equal.
 
-## 2. Purpose-built minimal ats-lab worker profile
+## 2. Purpose-built minimal worker profile
 
 Expected impact: remove most remaining 11,277-byte skill index and unrelated
 35,327-byte system/context prompt from every ATS worker call.
@@ -46,7 +46,7 @@ Acceptance criteria:
   task.
 - Execution profile exposes Jesse MCP only; analysis and synthesis expose zero
   tools.
-- `executor prompt-size --json` snapshot test enforces fixed byte ceilings.
+- `agent prompt-size --json` snapshot test enforces fixed byte ceilings.
 - Profile lifecycle/config ownership documented outside this repository before
   launcher makes it mandatory.
 

@@ -140,14 +140,14 @@ Only after:
 8. If stopped, log exception and blocker.
 9. Persist the result and evaluation through ATS Lab.
 10. Update the relevant optional narrative file under
-    `<repo-root>/src/repos/jesse-src/research/experiments/` only when a
+    `<jesse-src>/research/experiments/` only when a
     human-readable record is useful.
 11. Assign verdict.
 12. If the finding is durable and non-transient, save a compact memory.
 
 ## Journal Entry Schema
 
-Historical `<repo-root>/src/repos/jesse-src/research/RESEARCH_JOURNAL.md`
+Historical `<jesse-src>/research/RESEARCH_JOURNAL.md`
 entries use **YAML list blocks** (not markdown tables). New canonical evidence
 belongs in ATS Lab. Minimum fields for an optional narrative entry:
 
@@ -163,12 +163,12 @@ belongs in ATS Lab. Minimum fields for an optional narrative entry:
   results: {...}
   verdict: hpo-candidate
   next_step: ...
-  log: <repo-root>/src/repos/jesse-src/research/experiments/...
+  log: <jesse-src>/research/experiments/...
 ```
 
 ## Job Queue Schema
 
-Historical `<repo-root>/src/repos/jesse-src/research/TEST_JOB_QUEUE.md` uses
+Historical `<jesse-src>/research/TEST_JOB_QUEUE.md` uses
 **YAML list blocks** under section headings. It is not an active submission
 interface. Minimum fields in a legacy entry:
 

@@ -472,7 +472,7 @@ def main() -> int:
         "--format", choices=("table", "json"), default="table",
     )
     claim = sub.add_parser("claim")
-    claim.add_argument("--worker", default=os.environ.get("ATS_LAB_WORKER_ID", "ats-lab"))
+    claim.add_argument("--worker", default=os.environ.get("ATS_LAB_WORKER_ID", "ats-lab-worker"))
     inventory_parser = sub.add_parser("inventory")
     inventory_parser.add_argument("--markdown", type=Path)
     enqueue = sub.add_parser("enqueue")

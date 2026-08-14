@@ -690,13 +690,16 @@ class MemoryProviderConfig:
 
 
 class MemoryResearchAdapter:
-    """Supported Memory v3 workspace/session message and hybrid-search adapter."""
+    """Supported memory provider v3 workspace/session message and hybrid-search adapter."""
 
     def __init__(
         self, config: MemoryProviderConfig | None = None, *, api_key: str | None = None,
     ) -> None:
         self.config = config or MemoryProviderConfig(
-            base_url=os.environ.get("ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000")
+            base_url=os.environ.get("ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000"),
+            workspace_id=os.environ.get("ATS_LAB_MEMORY_WORKSPACE", "ats-lab-memory"),
+            peer_id=os.environ.get("ATS_LAB_MEMORY_PEER", "ats-lab-memory-peer"),
+            session_id=os.environ.get("ATS_LAB_MEMORY_SESSION", "strategy-learnings-v1"),
         )
         self.api_key = api_key if api_key is not None else os.environ.get("ATS_LAB_MEMORY_API_KEY")
         self._ensured = False

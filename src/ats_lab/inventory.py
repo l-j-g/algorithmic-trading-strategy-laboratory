@@ -22,22 +22,19 @@ REMOVE_PATTERNS = (
     "research/automation/promotion_scheduler.py",
     "research/automation/research_review.py",
     "research/automation/candidate_dashboard.py",
-    ".executor/plans/",
     "research/archive/automation_prompts/",
 )
 RETAIN = {
     "AGENTS.md": "Jesse MCP safety boundary; shorten after generated rules are separated",
-    ".executor.md": "Agent project entrypoint; shorten after CLI cutover",
     "research/BACKTEST_EVALUATION_PROTOCOL.md": "compatibility pointer to ATS-owned evaluation gates",
     "research/STRATEGY_CONCEPT_PLAYBOOK.md": "compatibility pointer to ATS-owned concept library",
-    "research/jesse_trade_strategy_import_manifest.json": "licensed-source provenance",
 }
 
 
 def build_inventory(repo: Path) -> dict[str, list[dict[str, object]]]:
     result: dict[str, list[dict[str, object]]] = {"retain": [], "replace": [], "remove": [], "review": []}
     candidates: set[Path] = set()
-    for base in (repo / "research", repo / "docs", repo / "prompts", repo / "skills", repo / ".executor", repo / "algorithmic-trading-strategy-laboratory"):
+    for base in (repo / "research", repo / "docs", repo / "prompts", repo / "skills", repo / "algorithmic-trading-strategy-laboratory"):
         if base.exists():
             candidates.update(
                 path for path in base.rglob("*")

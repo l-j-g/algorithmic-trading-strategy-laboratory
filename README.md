@@ -66,7 +66,7 @@ scripts/jesse-workspace.sh stack up --no-update  # deliberate pinned/offline sta
 commit-tagged immutable image. `image build` can still be run separately. Use
 `stack up --no-update` only for a deliberate pinned/offline start. The default
 upstream checkout is
-`<repo-root>/src/repos/jesse-upstream`; override with
+`<workspace-root>/jesse-upstream`; override with
 `JESSE_UPSTREAM_REPOSITORY` when needed. Do not use `salehmir/jesse:latest`
 for a research run when commit provenance matters.
 
@@ -74,9 +74,10 @@ For recurring polling while the stack is not being restarted, schedule
 `scripts/jesse-workspace.sh upstream refresh`. It fast-forwards the public
 mirror and builds only when the corresponding commit-tagged image is absent.
 
-`jesse-src` remains the configured Agent repository because it contains the
-research workspace. The Jesse engine inside the container comes from the clean
-public upstream checkout. See [workspace integration](docs/workspace-integration.md).
+`jesse-src` remains the configured research workspace repository because it
+contains the research workspace. The Jesse engine inside the container comes
+from the clean public upstream checkout. See
+[workspace integration](docs/workspace-integration.md).
 
 ## What to use
 
@@ -98,7 +99,7 @@ from either repository; it discovers the canonical ATS checkout and database.
 ATS SQLite ready queue
         |
         v
-executor Agent turn
+executor agent turn
   runs up to 8 jobs through Jesse MCP
         |
         v
@@ -113,7 +114,7 @@ deterministic gates
   same fields used by every consumer
         |
         v
-separate analyzer Agent turn
+separate analyzer agent turn
   evaluates whole completed batch once
         |
         v
@@ -131,7 +132,7 @@ Important boundaries:
   not another schema.
 - Jesse owns strategy source, candles and backtest execution.
 - Trading operations use Jesse MCP.
-- Agent executor uses tools. Agent analyzer receives compact normalized
+- The executor agent uses tools. The analyzer agent receives compact normalized
   evidence only and does not own workflow state.
 - Markdown queues, journals and JSON sidecars are legacy evidence only.
 - `ats-lab worker` is compatibility-only. Use `ats-lab supervisor`.
@@ -140,7 +141,7 @@ Important boundaries:
 
 Every completed run is normalized immediately into SQLite. Multi-route runs
 become one row per atomic route and evidence split. Supervisor analysis, HPO,
-deterministic gates, dashboard, CLI and Agent prompts all read these same rows.
+deterministic gates, dashboard, CLI and agent prompts all read these same rows.
 
 Missing values remain SQL/JSON `null` internally and display as `—`. Currency
 `net_profit` is never misread as `net_profit_percentage`. Raw Jesse metrics stay
@@ -195,7 +196,7 @@ http://127.0.0.1:9002/mcp
 If Jesse is stopped:
 
 ```bash
-cd <repo-root>/src/repos/jesse-src/docker
+cd "$JESSE_RESEARCH_REPOSITORY/docker"
 docker compose up
 ```
 
@@ -206,21 +207,22 @@ PYTHONPATH=src python3 -m ats_lab.cli preflight
 ```
 
 Gate checks Docker, Jesse PostgreSQL container/readiness/read-only query/public
-schema, Jesse dashboard/MCP, then Memory. PostgreSQL inspection is limited to
-`SELECT 1` and table names `candle`, `backtestsession`, and
+schema, Jesse dashboard/MCP, then the memory provider. PostgreSQL inspection is
+limited to `SELECT 1` and table names `candle`, `backtestsession`, and
 `significancetestsession`; credential tables and values are never read.
 
 Gate requires local Docker daemon, Jesse dashboard (`127.0.0.1:9000`), Jesse
-MCP (`127.0.0.1:9002/mcp`), and Memory health API
+MCP (`127.0.0.1:9002/mcp`), and memory provider health API
 (`127.0.0.1:18000/health`). Supervisor runs same gate before claiming work.
 Failure returns `infrastructure_preflight_failed` without consuming strategy
-attempts. Override only Memory URL with `ATS_LAB_MEMORY_HEALTH_URL`; keep
-credentials in process environment, never tracked config or command output.
+attempts. Override only the memory provider URL with
+`ATS_LAB_MEMORY_HEALTH_URL`; keep credentials in process environment, never
+tracked config or command output.
 
 ### 2. Inspect plan
 
 ```bash
-cd <repo-root>/src/repos/jesse-src
+cd "$JESSE_RESEARCH_REPOSITORY"
 ats-lab supervisor --plan
 ```
 
@@ -240,7 +242,7 @@ This command is read-only. Check:
 Use separate terminal:
 
 ```bash
-cd <repo-root>/src/repos/jesse-src
+cd "$JESSE_RESEARCH_REPOSITORY"
 ats-lab dashboard --host 127.0.0.1 --port 8765
 ```
 
@@ -339,7 +341,7 @@ Use this sequence:
 6. Run `ats-lab loop start`.
 7. Run `monitor --watch` or `console` in another terminal.
 8. Pause before inspecting or changing blocked requirements.
-9. Use graceful `ats-lab loop stop`; do not kill active Jesse/Agent subprocesses.
+9. Use graceful `ats-lab loop stop`; do not kill active Jesse/executor subprocesses.
 
 Avoid:
 
@@ -697,8 +699,7 @@ ats-lab sanitize
 Before applying sanitation, back up:
 
 ```bash
-cp <repo-root>/src/repos/algorithmic-trading-strategy-laboratory/.ats-lab/laboratory.sqlite3 \
-   <repo-root>/src/repos/algorithmic-trading-strategy-laboratory/.ats-lab/laboratory.sqlite3.backup
+cp .ats-lab/laboratory.sqlite3 .ats-lab/laboratory.sqlite3.backup
 ```
 
 Then, only after reviewing preview:
@@ -712,18 +713,18 @@ ats-lab sanitize --apply
 Local configuration:
 
 ```text
-<repo-root>/src/repos/algorithmic-trading-strategy-laboratory/.ats-lab/config.toml
+<repo-root>/.ats-lab/config.toml
 ```
 
 Example:
 
 ```toml
 [repositories]
-jesse = "<repo-root>/src/repos/jesse-src"
+jesse = "<path-to-jesse-research-workspace>"
 
 [executor]
-executable = "<repo-root>/.local/bin/executor"
-profile = "ats-lab"
+executable = "<your-agent-executor-binary>"
+# profile = "<optional executor profile>"
 timeout_seconds = 3600
 
 [resources]
@@ -811,7 +812,8 @@ ats-lab init
 Requirements:
 
 - Python 3.11+
-- Agent `ats-lab` profile
+- an agent executor binary for analysis/synthesis tasks (execution-only mode
+  needs no agent executor)
 - running Jesse service and MCP
 - local `.ats-lab/config.toml`
 
@@ -838,7 +840,7 @@ git diff --check
 - Operator dashboard: `docs/operator-dashboard.md`
 - Resource policy: `docs/resource-policy.md`
 - Synthesis: `docs/synthesis.md`
-- Agent launcher: `docs/executor-memory-launcher.md`
+- Agent launcher: `docs/agent-launcher.md`
 - Jesse integration: `docs/workspace-integration.md`
 - Migration cleanup: `docs/migration-and-cleanup.md`
 

@@ -6,15 +6,12 @@ read-only until their evidence is verified in SQLite.
 ## Retain as canonical
 
 - `AGENTS.md`: Jesse MCP and trading-safety contract; generated Jesse rules
-  remain owner-managed in `jesse-src`.
-- `.executor.md`: concise Agent project routing.
+  remain owner-managed in the Jesse research workspace.
 - `src/ats_lab/`: schema, services, CLI and migration adapters.
 - `tests/`: public contract, storage and migration tests.
 - `docs/jesse/`: Jesse evaluation gates and thesis/concept library.
-- `<repo-root>/src/repos/jesse-src/research/experiments/`: only reports that
-  cannot yet be regenerated.
-- `<repo-root>/src/repos/jesse-src/research/jesse_trade_strategy_import_manifest.json`:
-  licensed-source provenance manifest.
+- `<jesse-src>/research/experiments/`: only reports that cannot yet be
+  regenerated.
 
 ## Replace with generated views
 
@@ -42,4 +39,4 @@ evaluation and synthesis writes must go through `ats-lab supervisor`.
 - secrets and `.env` files.
 - private strategy source.
 - candle/runtime databases and generated charts.
-- Memory memories and Agent profile configuration.
+- memory provider state and agent executor profile configuration.

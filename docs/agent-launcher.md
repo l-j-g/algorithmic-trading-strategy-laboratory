@@ -1,12 +1,12 @@
-# Agent and Memory launcher
+# Agent launcher
 
 Laboratory supervisor dispatches execution and analysis batches to separate
-Agent turns. Memory remains Agent' optional memory provider.
+agent-executor turns. An optional memory provider supplies context only.
 Laboratory SQLite remains authoritative for queue state and evidence.
 
 ```text
-ATS supervisor -> executor Agent turn -> Jesse MCP batch
-              -> analyzer Agent turn -> evaluations + optional 25-chain cohort
+ATS supervisor -> executor agent turn -> Jesse MCP batch
+              -> analyzer agent turn -> evaluations + optional 25-chain cohort
 ```
 
 ## Local configuration
@@ -18,13 +18,13 @@ Create `.ats-lab/config.toml`. This directory is ignored by Git.
 jesse = "/absolute/path/to/jesse-workspace"
 
 [executor]
-executable = "executor"
-profile = "ats-lab"
+executable = "<your-agent-executor-cli>"
+# profile = "my-agent-profile"
 timeout_seconds = 3600
 # Fallback execution/HPO calls are bounded separately.
 execution_timeout_seconds = 900
 # Strategy preparation is bounded separately so one Jesse inspection cannot
-# hold the supervisor for the full general-purpose Agent timeout.
+# hold the supervisor for the full general-purpose executor timeout.
 preparation_timeout_seconds = 300
 # model = "provider/model"
 # provider = "provider"
@@ -53,28 +53,28 @@ PYTHONPATH=src python3 -m ats_lab.cli preflight
 
 Checks order: Docker daemon; Jesse PostgreSQL container running; `pg_isready`;
 read-only `SELECT 1`; expected public tables `candle`, `backtestsession`, and
-`significancetestsession`; Jesse dashboard; Jesse MCP protocol; Memory health
-API. Supervisor uses same fail-closed gate before any claim/model dispatch.
-Infrastructure failure creates precise `infrastructure_preflight_failed`
+`significancetestsession`; Jesse dashboard; Jesse MCP protocol; memory provider
+health API. Supervisor uses same fail-closed gate before any claim/model
+dispatch. Infrastructure failure creates precise `infrastructure_preflight_failed`
 result and consumes zero strategy attempts. macOS supported through Docker
 Desktop CLI (`docker info`). PostgreSQL checks use argument-vector `docker exec`
 inside container with non-secret identity defaults `postgres`, `jesse_user`, and
 `jesse_db`. Override them with `ATS_LAB_JESSE_POSTGRES_CONTAINER`,
 `ATS_LAB_JESSE_POSTGRES_USER`, and `ATS_LAB_JESSE_POSTGRES_DATABASE`.
 No password, credential row, or `exchangeapikeys` content is read or logged.
-Optional `ATS_LAB_MEMORY_HEALTH_URL` changes local health endpoint without
-storing credentials.
+Optional `ATS_LAB_MEMORY_HEALTH_URL` changes the local memory provider health
+endpoint without storing credentials.
 
 Dashboard fallback authentication reads only `JESSE_AUTH_TOKEN` or
 `JESSE_DASHBOARD_PASSWORD` from supervisor process environment. Never place
 either secret in TOML, logs, dispatch payloads, or SQLite.
 
-Memory configuration stays in Agent. Do not place Memory credentials in this
-file or commit them.
+Memory provider credentials stay in the agent executor's own configuration.
+Do not place them in this file or commit them.
 
 Direct executor handles ordinary homogeneous-window backtests. Source
 preparation, optimizer parameters, fee/config mutation, heterogeneous windows,
-and non-backtest operations retain Agent fallback. Set
+and non-backtest operations retain the agent fallback. Set
 `jesse_executor.enabled = false` for complete legacy execution fallback.
 Endpoint and dashboard URL contain no credentials. Dashboard auth remains in
 approved local environment handling and is never logged.
@@ -91,12 +91,12 @@ The supervisor auto-selects this launcher when `.ats-lab/config.toml` exists.
 Use `--dispatch-command` or `ATS_LAB_DISPATCH_COMMAND` to override it.
 
 Launcher reads one laboratory request from standard input. It runs one bounded
-Agent `--oneshot` process with an argument vector, never a shell. Executor turn
+agent `--oneshot` process with an argument vector, never a shell. Executor turn
 returns one run result per claimed work item and cannot evaluate or synthesize.
 Executor argv exposes only configured Jesse MCP server by default. Analyzer and
-synthesis argv use Agent' zero-tool `context_engine` set. Launcher rejects
+synthesis argv use the agent's zero-tool `context_engine` set. Launcher rejects
 requests containing trades, charts, logs, complete session payloads, or private
-strategy source before starting Agent.
+strategy source before starting the agent.
 Analyzer turn receives compact serialized `NormalizedEvidence` records only,
 and returns verdict/finding/next-action patches. Separate synthesis turns run
 only after queue reaches low watermark. Analyzer receives no raw Jesse metrics,
@@ -104,9 +104,10 @@ dashboard-specific payload, HPO-specific metric schema or prose
 `metrics_summary`. HPO validation parameters appear only in executor
 `execution_context`; they never replace strategy defaults.
 
-Launcher does not call Jesse, Memory, or SQLite directly. Agent accesses Jesse
-through its configured Jesse MCP tools. Memory may inform reasoning, but cannot
-claim jobs, change queue state, or become run evidence.
+Launcher does not call Jesse, the memory provider, or SQLite directly. The
+agent executor accesses Jesse through its configured Jesse MCP tools. Memory
+provider context may inform reasoning, but cannot claim jobs, change queue
+state, or become run evidence.
 
 ## Failure behavior
 
@@ -124,19 +125,19 @@ awaiting analysis remain resumable after analyzer failure.
 
 Synthesis requests use the same launcher but return exactly 25 typed research
 chains in one response. SQLite supplies compact improvement candidates and
-concept learnings using the same normalized evidence serializer; Memory memory
-never replaces authoritative feedback.
+concept learnings using the same normalized evidence serializer; memory provider
+context never replaces authoritative feedback.
 
 ## Transport telemetry
 
-Each configured launcher call passes Agent a private temporary `--usage-file`.
-Launcher deletes that file after reading it and appends one redacted record to
-`.ats-lab/agent-transport.jsonl` by default. Records contain task type, request
-bytes, response bytes, model-call count, and available input/output/cache-read
-token totals. They never contain prompt, response, session ID, credentials,
-strategy source, or metrics.
+Each configured launcher call passes the agent a private temporary
+`--usage-file`. Launcher deletes that file after reading it and appends one
+redacted record to `.ats-lab/agent-transport.jsonl` by default. Records contain
+task type, request bytes, response bytes, model-call count, and available
+input/output/cache-read token totals. They never contain prompt, response,
+session ID, credentials, strategy source, or metrics.
 
-Current fresh ats-lab CLI measurement before task scoping:
+Measured fresh CLI baseline before task scoping:
 
 - 63,775 tool-schema bytes across 33 tools.
 - 11,277 skill-index bytes.

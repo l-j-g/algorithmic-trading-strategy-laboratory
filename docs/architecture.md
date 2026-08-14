@@ -81,10 +81,10 @@ strategy source. See [Jesse workspace integration](workspace-integration.md).
 ## Agent integration
 
 The CLI emits JSON and performs one bounded operation per invocation. It can be
-called by Agent, Codex, cron, CI or another orchestrator. No agent-specific
+called by an orchestrator, cron, CI or another automation. No agent-specific
 memory format is required.
 
-The optional [Agent and Memory launcher](executor-memory-launcher.md) provides a
+The optional [agent launcher](agent-launcher.md) provides a
 bounded subprocess adapter while preserving these ownership boundaries.
 
 [Resource policy](resource-policy.md) keeps agent calls sparse and delegates

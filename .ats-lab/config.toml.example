@@ -1,0 +1,56 @@
+# ATS Lab local configuration template.
+# Copy to .ats-lab/config.toml (gitignored) and fill in your values.
+# Every value here is an example; nothing in this file is secret.
+
+[repositories]
+# Absolute path to the Jesse research workspace that owns strategies and candles.
+jesse = "/absolute/path/to/jesse-research-workspace"
+
+[executor]
+# Agent executor CLI used for analysis/synthesis batches (optional in
+# execution-only mode). Provide a binary name on PATH or an absolute path.
+executable = "executor"
+# profile = "my-agent-profile"
+timeout_seconds = 3600
+# Fallback execution/HPO calls are bounded separately.
+execution_timeout_seconds = 900
+# Strategy preparation is bounded separately so one Jesse inspection cannot
+# hold the supervisor for the full general-purpose timeout.
+preparation_timeout_seconds = 300
+# model = "provider/model"
+# provider = "provider"
+# Defaults shown explicitly:
+execution_toolsets = ["jesse"]
+analysis_toolsets = ["context_engine"]   # built-in zero-tool set
+synthesis_toolsets = ["context_engine"]  # built-in zero-tool set
+# telemetry_path = "agent-transport.jsonl"
+
+[jesse_executor]
+enabled = true
+mcp_url = "http://127.0.0.1:9002/mcp"
+timeout_seconds = 60
+poll_initial_seconds = 2
+poll_max_seconds = 5
+max_polls = 3
+dashboard_api_base_url = "http://127.0.0.1:9000"
+dashboard_display_base_url = "http://127.0.0.1:9000/#/backtest"
+
+[resources]
+mode = "compute_heavy"
+cpu_cores = 6
+significance_simulations = 5000
+hpo_trials_per_parameter = 300
+hpo_best_candidates = 50
+monte_carlo_scenarios = 500
+synthesis_inspect_limit = 25
+synthesis_generate_limit = 25
+synthesis_low_watermark = 5
+synthesis_min_new_concepts = 5
+synthesis_max_improvements = 20
+synthesis_retry_cooldown_seconds = 300
+synthesis_lease_seconds = 3600
+claim_timeout_seconds = 7200
+# Keep execution turns small: one slow executor call must not sink eight
+# independent jobs and create a long retry wave.
+execution_batch_size = 2
+active_ready_limit = 8
