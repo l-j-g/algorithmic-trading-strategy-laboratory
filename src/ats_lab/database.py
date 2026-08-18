@@ -155,6 +155,12 @@ class WorkflowDatabase:
                 "monte_carlo_method": "TEXT",
                 "walk_forward_windows": "INTEGER",
                 "walk_forward_method": "TEXT",
+                "leverage_mode": "TEXT",
+                "configured_futures_leverage": "REAL",
+                "effective_leverage_mean": "REAL",
+                "effective_leverage_p95": "REAL",
+                "effective_leverage_max": "REAL",
+                "liquidation_count": "INTEGER",
             }
             for name, declaration in evidence_additions.items():
                 if name not in evidence_columns:

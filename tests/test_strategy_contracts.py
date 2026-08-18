@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ats_lab.strategy_contracts import StrategyContractValidator
+from ats_lab.strategy_contracts import StrategyContractValidator, max_entry_notional
 
 
 def readiness(**overrides: object) -> dict:
@@ -46,6 +46,40 @@ class StrategyContractValidatorTests(unittest.TestCase):
             },
         })
         self.assertEqual(issues, ())
+
+    def test_beta_variant_requires_btc_benchmark_data_route(self) -> None:
+        missing = self.validator.validate_request({
+            "experiment": {
+                "variant": "btc_beta",
+                "routes": [{"symbol": "ETH-USDT"}],
+            },
+        })
+        self.assertEqual(
+            {issue.code for issue in missing},
+            {"missing_beta_benchmark_data_route"},
+        )
+
+        present = self.validator.validate_request({
+            "experiment": {
+                "variant": "btc_beta",
+                "routes": [{"symbol": "ETH-USDT"}],
+                "data_routes": [{"symbol": "BTC-USDT", "timeframe": "1h"}],
+            },
+        })
+        self.assertEqual(present, ())
+
+    def test_non_beta_variant_does_not_require_benchmark_route(self) -> None:
+        self.assertEqual(self.validator.validate_request({
+            "experiment": {"variant": "trend", "routes": []},
+        }), ())
+
+    def test_declared_l_max_uses_session_leverage_sizing_cap(self) -> None:
+        self.assertEqual(
+            max_entry_notional(10_000, 3, l_max=5),
+            28_500,
+        )
+        with self.assertRaisesRegex(ValueError, "must not exceed declared L_max"):
+            max_entry_notional(10_000, 6, l_max=5)
 
     def test_requires_all_runtime_contract_receipts(self) -> None:
         result = self.validator.validate_readiness(readiness(

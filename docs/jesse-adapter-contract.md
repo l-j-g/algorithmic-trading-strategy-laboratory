@@ -76,3 +76,17 @@ invalid classes and contract failures become terminal strategy evidence for
 analysis; source and patches are forbidden from ATS payloads.
 Unsupported operations remain on the existing Agent path. Set
 `jesse_executor.enabled = false` for full fallback.
+
+## Sizing contract
+
+Strategy sizing is bounded by the session, not tuned as a research parameter.
+The maximum entry notional is:
+
+```text
+0.95 * available_margin * session_leverage
+```
+
+When a strategy declares fixed `L_max`, `session_leverage` must be no greater
+than `L_max`. `L_max` is a contract ceiling and must not be added to HPO
+parameters or searched as an optimization dimension. Use available margin,
+never starting balance, for this cap.

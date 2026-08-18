@@ -62,6 +62,12 @@ class NormalizedEvidence:
     fees: float | None = None
     expectancy: float | None = None
     leverage: float | None = None
+    leverage_mode: str | None = None
+    configured_futures_leverage: float | None = None
+    effective_leverage_mean: float | None = None
+    effective_leverage_p95: float | None = None
+    effective_leverage_max: float | None = None
+    liquidation_count: int | None = None
     risk_per_trade_percentage: float | None = None
     optimizer_objective: str | None = None
     cost_stress_status: CostStressStatus | None = None
@@ -137,7 +143,36 @@ _METRIC_ALIASES = {
     "trade_count": ("trade_count", "total_trades", "total", "trades"),
     "fees": ("fees", "total_fees", "fee"),
     "expectancy": ("expectancy",),
-    "leverage": ("leverage", "configured_futures_leverage"),
+    "leverage_mode": (
+        "leverage_mode", "futures_leverage_mode", "margin_mode", "leverage_type",
+        "mode",
+    ),
+    "leverage": (
+        "leverage", "configured_futures_leverage", "configured_leverage",
+        "futures_leverage",
+    ),
+    "configured_futures_leverage": (
+        "configured_futures_leverage", "configured_leverage", "futures_leverage",
+        "leverage",
+    ),
+    "effective_leverage_mean": (
+        "effective_leverage_mean", "mean_effective_leverage",
+        "effective_leverage_avg", "average_effective_leverage", "mean_leverage",
+        "average_leverage", "avg_leverage", "effective_leverage",
+    ),
+    "effective_leverage_p95": (
+        "effective_leverage_p95", "effective_leverage_95p",
+        "effective_leverage_95th_percentile", "effective_leverage_percentile_95",
+        "leverage_p95", "p95_leverage",
+    ),
+    "effective_leverage_max": (
+        "effective_leverage_max", "max_effective_leverage",
+        "effective_leverage_peak", "max_leverage", "leverage_max",
+    ),
+    "liquidation_count": (
+        "liquidation_count", "liquidations", "total_liquidations",
+        "number_of_liquidations", "num_liquidations", "liquidation_events",
+    ),
     "risk_per_trade_percentage": (
         "risk_per_trade_percentage", "risk_per_trade_pct", "risk_per_trade",
     ),
@@ -259,7 +294,9 @@ def _normalize_atomic(
     for field, aliases in _METRIC_ALIASES.items():
         raw = _first(metrics, spec, names=aliases)
         numeric[field] = (
-            _integer(raw) if field == "trade_count" else _number(raw)
+            _integer(raw)
+            if field in {"trade_count", "liquidation_count"}
+            else _number(raw)
         )
     if numeric["profit_factor"] is None:
         gross_profit = _number(metrics.get("gross_profit"))
@@ -287,6 +324,9 @@ def _normalize_atomic(
     ))
     objective = _text(_first(
         metrics, spec, names=("optimizer_objective", "objective"),
+    ))
+    leverage_mode = _protocol_text(_first(
+        metrics, spec, names=_METRIC_ALIASES["leverage_mode"],
     ))
     monte_carlo_method = _protocol_text(_first(
         metrics, spec,
@@ -332,6 +372,12 @@ def _normalize_atomic(
         fees=numeric["fees"],
         expectancy=numeric["expectancy"],
         leverage=numeric["leverage"],
+        leverage_mode=leverage_mode,
+        configured_futures_leverage=numeric["configured_futures_leverage"],
+        effective_leverage_mean=numeric["effective_leverage_mean"],
+        effective_leverage_p95=numeric["effective_leverage_p95"],
+        effective_leverage_max=numeric["effective_leverage_max"],
+        liquidation_count=numeric["liquidation_count"],
         risk_per_trade_percentage=numeric["risk_per_trade_percentage"],
         optimizer_objective=objective,
         cost_stress_status=cost_status,

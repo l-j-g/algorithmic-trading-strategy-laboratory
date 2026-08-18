@@ -69,6 +69,9 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertIn("exact data.session.metrics object", prompt)
         self.assertIn("Do not include trades", prompt)
         self.assertIn("95% of available margin", prompt)
+        self.assertIn("session_leverage", prompt)
+        self.assertIn("L_max", prompt)
+        self.assertIn("not an HPO parameter", prompt)
         self.assertIn("not a Jesse configuration failure", prompt)
 
     def test_synthesis_prompt_requires_typed_job_request(self) -> None:

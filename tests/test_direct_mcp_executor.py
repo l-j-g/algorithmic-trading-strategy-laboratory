@@ -439,6 +439,21 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 "futures_leverage_mode": "isolated",
             })
 
+    def test_beta_without_btc_benchmark_data_route_blocks_before_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, _database = self.make_dispatcher(tmp, server)
+            request = batch_request()
+            request["requests"][0]["experiment"]["variant"] = "btc_beta"
+            result = dispatcher.dispatch(request)
+
+            item = result.payload["results"][0]
+            self.assertEqual(item["outcome"], "blocked")
+            self.assertEqual(item["blocker_code"], "strategy_contract_invalid")
+            self.assertIn("missing_beta_benchmark_data_route", item["detail"])
+            self.assertEqual(server.http.tool_calls, [])
+
     def test_significance_dispatch_direct_zero_model_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["running", "finished"]

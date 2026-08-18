@@ -509,7 +509,9 @@ class DirectMcpDispatcher:
                 "batch_id": request.get("batch_id"),
                 "instruction": (
                     "Create or materially edit only required Jesse strategies through "
-                    "Jesse MCP. Enforce entry notional <=95% available_margin at 1x. "
+                    "Jesse MCP. Enforce entry notional <=95% available_margin * "
+                    "session_leverage; if fixed L_max is declared, session_leverage "
+                    "must not exceed it and L_max is not an HPO parameter. "
                     "Return prepared_work_item_ids. Never return strategy source."
                 ),
                 "requests": [self._preparation_request(item) for item in preparation],

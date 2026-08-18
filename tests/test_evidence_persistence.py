@@ -85,12 +85,12 @@ class EvidencePersistenceTests(unittest.TestCase):
             finished_at="2026-01-01T00:00:00Z",
         ))
 
-    def test_schema_v5_and_run_write_persist_atomic_routes(self) -> None:
+    def test_schema_v6_and_run_write_persist_atomic_routes(self) -> None:
         self._add_atomic_run()
 
         rows = self.database.normalized_evidence_for_run("RUN-1")
 
-        self.assertEqual(SCHEMA_VERSION, 5)
+        self.assertEqual(SCHEMA_VERSION, 6)
         self.assertEqual(len(rows), 2)
         self.assertEqual(
             {row.evidence_split for row in rows},
@@ -101,8 +101,38 @@ class EvidencePersistenceTests(unittest.TestCase):
             self.database.rows(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )[-1]["version"],
-            5,
+            6,
         )
+
+    def test_new_leverage_evidence_fields_persist(self) -> None:
+        self.database.add_run(RunResult(
+            id="RUN-LEV",
+            experiment_id="EXP-1",
+            work_item_id="JOB-1",
+            session_id="session",
+            status=RunStatus.FINISHED,
+            route=RouteSpec(
+                exchange="Binance", symbol="BTC-USDT", timeframe="1h",
+                start_date="2025-01-01", finish_date="2025-12-31",
+            ),
+            metrics={
+                "leverage_mode": "isolated",
+                "configured_futures_leverage": 2,
+                "effective_leverage_mean": 1.4,
+                "effective_leverage_p95": 1.9,
+                "effective_leverage_max": 2,
+                "liquidation_count": 0,
+            },
+            finished_at="2026-01-01T00:00:00Z",
+        ))
+
+        evidence = self.database.normalized_evidence_for_run("RUN-LEV")[0]
+        self.assertEqual(evidence.leverage_mode, "isolated")
+        self.assertEqual(evidence.configured_futures_leverage, 2.0)
+        self.assertEqual(evidence.effective_leverage_mean, 1.4)
+        self.assertEqual(evidence.effective_leverage_p95, 1.9)
+        self.assertEqual(evidence.effective_leverage_max, 2.0)
+        self.assertEqual(evidence.liquidation_count, 0)
 
     def test_evaluation_enriches_every_atomic_row(self) -> None:
         self._add_atomic_run()

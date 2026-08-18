@@ -88,6 +88,47 @@ class NormalizedEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.risk_per_trade_percentage, 1.5)
         self.assertEqual(evidence.significance_p_value, 0.04)
 
+    def test_normalizes_leverage_contract_aliases_and_serializes_them(self) -> None:
+        evidence = normalize_run_evidence(
+            experiment_id="EXP-1", run_id="RUN-1", session_id="session",
+            strategy="Trend", lifecycle_stage="baseline", experiment_spec={},
+            route={}, metrics={
+                "leverage_mode": "Cross Margin",
+                "configured_leverage": 3,
+                "mean_effective_leverage": 2.1,
+                "effective_leverage_95th_percentile": 2.8,
+                "max_effective_leverage": 3.0,
+                "total_liquidations": 0,
+            }, completed_at=None,
+        )[0]
+
+        self.assertEqual(evidence.leverage, 3.0)
+        self.assertEqual(evidence.leverage_mode, "cross_margin")
+        self.assertEqual(evidence.configured_futures_leverage, 3.0)
+        self.assertEqual(evidence.effective_leverage_mean, 2.1)
+        self.assertEqual(evidence.effective_leverage_p95, 2.8)
+        self.assertEqual(evidence.effective_leverage_max, 3.0)
+        self.assertEqual(evidence.liquidation_count, 0)
+        full = evidence.to_dict()
+        compact = json.loads(evidence.to_compact_json())
+        for field in (
+            "leverage_mode", "configured_futures_leverage",
+            "effective_leverage_mean", "effective_leverage_p95",
+            "effective_leverage_max", "liquidation_count",
+        ):
+            self.assertIn(field, full)
+            self.assertEqual(compact[field], full[field])
+
+    def test_legacy_leverage_populates_new_configured_field(self) -> None:
+        evidence = normalize_run_evidence(
+            experiment_id="EXP-1", run_id="RUN-1", session_id="session",
+            strategy="Trend", lifecycle_stage="baseline", experiment_spec={},
+            route={}, metrics={"leverage": 2}, completed_at=None,
+        )[0]
+
+        self.assertEqual(evidence.leverage, 2.0)
+        self.assertEqual(evidence.configured_futures_leverage, 2.0)
+
     def test_currency_net_profit_never_becomes_percentage(self) -> None:
         evidence = normalize_run_evidence(
             experiment_id="EXP-1",
