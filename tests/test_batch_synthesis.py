@@ -31,8 +31,19 @@ def request(**overrides):
         "schema_version": 1, "action": "new", "strategy_name": "NewStrategy",
         "hypothesis": "Breakouts continue.", "entry_rule": "Close breaks twenty-bar high",
         "change_scope": "new_entry", "routes": [ROUTE],
+        "archetype": "breakout", "target_regime": "expansion",
+        "failure_regime": "false breakout", "edge_thesis": "Expansion persists after compression.",
     }
     payload.update(overrides)
+    proposal_type = "controlled_improvement" if payload.get("action") == "revise" else "new_concept"
+    payload.setdefault("type", proposal_type)
+    payload.setdefault("source_experiment_id", None)
+    payload.setdefault("controlled_change", "")
+    payload.setdefault("thesis", payload["hypothesis"])
+    payload.setdefault("falsifiability_criteria", "Reject if significance or regime holdout fails.")
+    payload.setdefault("entry_rule_summary", payload["entry_rule"])
+    payload.setdefault("why_this_now", "Recent canonical evidence makes this bounded test useful.")
+    payload.setdefault("expected_edge_type", "trend persistence")
     return payload
 
 
@@ -98,6 +109,47 @@ class BatchSynthesisTests(unittest.TestCase):
             )
             self.assertLessEqual(len(candidate["evidence"]), 4)
             self.assertEqual(context["evidence_rows_per_candidate"], 4)
+
+    def test_context_exposes_bounded_research_modes_and_forbidden_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            self.add_source(database, "REVISE", Verdict.REVISE)
+            self.add_source(database, "REJECT", Verdict.REJECT)
+            context = build_batch_context(database)
+
+            self.assertEqual(context["context_schema_version"], 2)
+            self.assertEqual(context["allocation"]["exact_total"], 25)
+            self.assertEqual(context["allocation"]["new_concepts_at_least"], 5)
+            self.assertEqual(context["allocation"]["controlled_improvements_at_most"], 20)
+            self.assertEqual(len(context["promising_inconclusive"]), 1)
+            self.assertEqual(len(context["diagnosed_failures"]), 1)
+            self.assertLessEqual(len(context["stable_tested_entry_fingerprints"]), 12)
+            self.assertLessEqual(len(context["archetype_theme_representation"]), 12)
+            self.assertTrue(any("promotion-locked" in item for item in context["forbidden_states"]))
+            self.assertEqual(context["authority"], "advisory_only")
+            self.assertTrue(context["memory_degraded"])
+
+    def test_honcho_context_hook_is_advisory_and_does_not_change_sqlite(self) -> None:
+        class RecallOnly:
+            def __init__(self) -> None:
+                self.queries = []
+
+            def recall(self, query: str, *, limit: int):
+                self.queries.append((query, limit))
+                return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            adapter = RecallOnly()
+            before = database.rows("SELECT id,state FROM work_items ORDER BY id")
+            context = build_batch_context(database, memory_adapter=adapter)
+            after = database.rows("SELECT id,state FROM work_items ORDER BY id")
+
+            self.assertEqual(before, after)
+            self.assertTrue(adapter.queries)
+            self.assertEqual(context["advisory_memory"], [])
+            self.assertEqual(context["authority"], "advisory_only")
+            self.assertEqual(context["state_authority"], "canonical_sqlite")
 
     def test_revise_request_creates_child_but_hpo_source_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -252,6 +304,18 @@ class BatchSynthesisTests(unittest.TestCase):
             result = apply_batch(database, payloads, cohort_id=cohort["id"])
             self.assertEqual(len(result["generated"]), 25)
             self.assertEqual(sum(row["lane"] == "new_concept" for row in result["generated"]), 5)
+
+    def test_cohort_rejects_missing_typed_proposal_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            cohort = database.reserve_synthesis_cohort(
+                worker_id="planner", requested_count=25, low_watermark=5,
+                lease_seconds=60, retry_cooldown_seconds=60,
+            )
+            payloads = [request(strategy_name=f"Strategy{index}") for index in range(25)]
+            payloads[0].pop("falsifiability_criteria")
+            with self.assertRaisesRegex(ValueError, "typed proposal missing fields"):
+                apply_batch(database, payloads, cohort_id=cohort["id"])
 
     def test_single_planner_lease_prevents_duplicate_synthesis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
