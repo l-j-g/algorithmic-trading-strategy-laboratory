@@ -84,7 +84,25 @@ class LoopControlTests(unittest.TestCase):
         self.assertEqual(status["progress_state"], "stalled")
         self.assertEqual(status["supervisor_liveness"], "stopped")
         self.assertFalse(status["supervisor_process_alive"])
+        self.assertEqual(status["supervisor_phase"], "stopped")
         self.assertEqual(status["next_action"], "start_or_inspect_supervisor")
+
+    def test_dead_supervisor_phase_is_reported_as_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = self.make_database(root)
+            database.update_supervisor_runtime(
+                worker_id="supervisor", process_id=99999999, phase="analyzing",
+                started_at="2026-08-18T00:00:00Z",
+            )
+            control = SupervisorLoopControl(
+                database, root, alive=lambda _pid: False,
+            )
+
+            result = control.status()
+
+        self.assertEqual(result.state, "stopped")
+        self.assertEqual(result.phase, "stopped")
 
     def test_start_resumes_existing_process_and_stop_is_graceful(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

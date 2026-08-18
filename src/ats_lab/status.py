@@ -310,6 +310,10 @@ def operator_status(
     runtime = database.supervisor_runtime_status() or {}
     control = database.control_status()
     supervisor = _supervisor_liveness(runtime, now)
+    supervisor_phase = (
+        "stopped" if supervisor["state"] == "stopped"
+        else runtime.get("phase")
+    )
     supervisor_unhealthy = (
         control.get("desired_state") == "running"
         and bool(runtime)
@@ -354,7 +358,7 @@ def operator_status(
         "checked_at": now.isoformat().replace("+00:00", "Z"),
         "heartbeat_at": runtime.get("heartbeat_at"),
         "desired_state": control.get("desired_state"),
-        "supervisor_phase": runtime.get("phase"),
+        "supervisor_phase": supervisor_phase,
         "supervisor_liveness": supervisor["state"],
         "supervisor_process_alive": supervisor["process_alive"],
         "supervisor_heartbeat_fresh": supervisor["heartbeat_fresh"],

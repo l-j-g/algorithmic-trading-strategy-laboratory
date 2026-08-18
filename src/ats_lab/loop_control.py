@@ -105,10 +105,14 @@ class SupervisorLoopControl:
     def status(self) -> LoopStatus:
         runtime, running = self._runtime()
         control = self.database.control_status()["desired_state"]
+        phase = (
+            str(runtime.get("phase") or "not_reported")
+            if runtime and running else "stopped"
+        )
         return LoopStatus(
             state="running" if running else "stopped",
             process_id=int(runtime["process_id"]) if runtime else None,
-            phase=str(runtime.get("phase") or "not_reported") if runtime else "not_reported",
+            phase=phase,
             control=str(control),
         )
 
