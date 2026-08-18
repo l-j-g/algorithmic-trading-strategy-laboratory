@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
-from .evidence import NormalizedEvidence
+from .evidence import LifecycleStage, NormalizedEvidence
 from .models import Verdict
 from .resources import ResourcePolicy
 
@@ -50,7 +50,7 @@ class PromotionDecision:
         if self.missing:
             parts.append("missing=" + ",".join(self.missing))
         if not parts:
-            parts.append("validation and cost-stress evidence passed")
+            parts.append("validation, robustness, and cost-stress evidence passed")
         return "Promotion evidence: " + "; ".join(parts) + "."
 
 
@@ -59,29 +59,57 @@ def evaluate_promotion(
     *,
     policy: ResourcePolicy,
 ) -> PromotionDecision:
-    """Require OOS/rolling and explicit cost-stress evidence for promotion.
+    """Require explicit validation and robustness evidence for promotion.
 
     This is intentionally separate from :func:`evaluate_gates`: a profitable
     baseline remains valid research evidence and should still reach analysis,
-    while a paper-trade claim must survive an unseen window and fee stress.
+    while a paper-trade claim must survive both OOS and rolling validation,
+    candles-routed Monte Carlo/path checks, and fee stress.  Lifecycle labels
+    alone never satisfy the robustness gate.
     """
     rows = tuple(evidence)
-    validation = tuple(
-        row for row in rows
-        if row.evidence_split in {"oos", "rolling"}
-        or row.lifecycle_stage == "out_of_sample"
-    )
     failed: list[str] = []
     missing: list[str] = []
-    if not validation:
-        missing.append("oos_or_rolling")
-    else:
-        quality = evaluate_gates(validation, policy=policy)
-        failed.extend(quality.failed)
-        missing.extend(
-            name for name in quality.missing
-            if name != "fees_cost_sensitivity"
+
+    oos = tuple(
+        row for row in rows
+        if _value(row, "evidence_split") == "oos"
+        or (
+            _value(row, "lifecycle_stage") == "out_of_sample"
+            and _value(row, "evidence_split") in {None, "oos"}
         )
+    )
+    rolling = tuple(
+        row for row in rows if _value(row, "evidence_split") == "rolling"
+    )
+    _evaluate_validation_lane(
+        "oos_validation", oos, policy, failed, missing,
+    )
+    _evaluate_validation_lane(
+        "walk_forward", rolling, policy, failed, missing,
+    )
+
+    monte_carlo = tuple(
+        row for row in rows
+        if (
+            isinstance(_value(row, "lifecycle_stage"), LifecycleStage)
+            and _value(row, "lifecycle_stage") is LifecycleStage.MONTE_CARLO
+        )
+    )
+    if not monte_carlo:
+        missing.append("candles_based_monte_carlo_path_robustness")
+    else:
+        robustness = [
+            _robustness_state(row, policy) for row in monte_carlo
+        ]
+        if any(state == "failed" for state in robustness):
+            failed.append("candles_based_monte_carlo_path_robustness")
+        elif any(state == "missing" for state in robustness):
+            missing.append("candles_based_monte_carlo_path_robustness")
+        else:
+            # A typed Monte Carlo stage is not enough by itself.  The helper
+            # requires a complete candle route and numeric path metrics.
+            pass
 
     cost_rows = tuple(
         row for row in rows
@@ -104,6 +132,76 @@ def evaluate_promotion(
         failed=tuple(failed),
         missing=tuple(missing),
     )
+
+
+def _value(row: object, name: str, default: Any = None) -> Any:
+    if isinstance(row, Mapping):
+        return row.get(name, default)
+    return getattr(row, name, default)
+
+
+def _has_route(row: object) -> bool:
+    return all(
+        _value(row, name) not in (None, "")
+        for name in ("symbol", "timeframe", "start_date", "finish_date")
+    )
+
+
+def _has_execution_provenance(row: object) -> bool:
+    return all(
+        _value(row, name) not in (None, "")
+        for name in ("run_id", "session_id")
+    )
+
+
+def _has_core_metrics(row: object) -> bool:
+    return all(
+        _value(row, name) is not None
+        for name in (
+            "net_profit_percentage", "max_drawdown_percentage",
+            "sharpe_ratio", "sortino_ratio", "calmar_ratio",
+            "profit_factor", "trade_count",
+        )
+    )
+
+
+def _evaluate_validation_lane(
+    name: str,
+    rows: tuple[object, ...],
+    policy: ResourcePolicy,
+    failed: list[str],
+    missing: list[str],
+) -> None:
+    if not rows or any(not _has_route(row) for row in rows):
+        missing.append(name)
+        return
+    quality = evaluate_gates(rows, policy=policy)  # type: ignore[arg-type]
+    failed.extend(quality.failed)
+    missing.extend(
+        gate for gate in quality.missing
+        if gate != "fees_cost_sensitivity"
+    )
+
+
+def _robustness_state(row: object, policy: ResourcePolicy) -> str:
+    """Classify concrete Monte Carlo/path evidence without reading prose."""
+    if (
+        not _has_route(row)
+        or not _has_execution_provenance(row)
+        or not _has_core_metrics(row)
+    ):
+        return "missing"
+    if _value(row, "verdict") in {"reject", "infrastructure_failure"}:
+        return "failed"
+    if (
+        float(_value(row, "net_profit_percentage")) <= 0
+        or float(_value(row, "max_drawdown_percentage")) > policy.maximum_drawdown_percentage
+        or float(_value(row, "sharpe_ratio")) < policy.minimum_sharpe_ratio
+        or float(_value(row, "profit_factor")) < policy.minimum_profit_factor
+        or int(_value(row, "trade_count")) < policy.minimum_trades
+    ):
+        return "failed"
+    return "passed"
 
 
 def evaluate_gates(

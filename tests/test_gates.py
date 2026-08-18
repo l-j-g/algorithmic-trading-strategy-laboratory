@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from ats_lab.evidence import CostStressStatus, EvidenceSplit, NormalizedEvidence
+from ats_lab.evidence import (
+    CostStressStatus,
+    EvidenceSplit,
+    LifecycleStage,
+    NormalizedEvidence,
+)
 from ats_lab.gates import evaluate_gates, evaluate_promotion
 from ats_lab.models import Verdict
 from ats_lab.resources import ResourcePolicy
@@ -13,6 +18,7 @@ class GateTests(unittest.TestCase):
         payload = {
             "experiment_id": "EXP-1",
             "run_id": "RUN-1",
+            "session_id": "SESSION-1",
             "symbol": "BTC-USDT",
             "timeframe": "1h",
             "start_date": "2024-01-01",
@@ -76,10 +82,14 @@ class GateTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(
             decision.missing,
-            ("oos_or_rolling", "fees_cost_sensitivity"),
+            (
+                "oos_validation", "walk_forward",
+                "candles_based_monte_carlo_path_robustness",
+                "fees_cost_sensitivity",
+            ),
         )
 
-    def test_promotion_passes_valid_oos_and_cost_stress(self) -> None:
+    def test_promotion_requires_both_validation_lanes_and_robustness(self) -> None:
         decision = evaluate_promotion(
             [
                 self.row(
@@ -89,9 +99,49 @@ class GateTests(unittest.TestCase):
             ],
             policy=ResourcePolicy(),
         )
+        self.assertFalse(decision.allowed)
+        self.assertIn("walk_forward", decision.missing)
+        self.assertIn("candles_based_monte_carlo_path_robustness", decision.missing)
+
+    def test_promotion_passes_explicit_oos_walk_forward_mc_and_cost_stress(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(
+                    evidence_split=EvidenceSplit.OOS,
+                    lifecycle_stage=LifecycleStage.OUT_OF_SAMPLE,
+                    cost_stress_status=CostStressStatus.PASS,
+                ),
+                self.row(
+                    evidence_split=EvidenceSplit.ROLLING,
+                    lifecycle_stage=LifecycleStage.MULTI_WINDOW,
+                ),
+                self.row(
+                    lifecycle_stage=LifecycleStage.MONTE_CARLO,
+                    calmar_ratio=1.1,
+                    sortino_ratio=1.3,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.failed, ())
         self.assertEqual(decision.missing, ())
+
+    def test_promotion_rejects_monte_carlo_without_concrete_route_metrics(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(evidence_split=EvidenceSplit.OOS, cost_stress_status=CostStressStatus.PASS),
+                self.row(evidence_split=EvidenceSplit.ROLLING),
+                self.row(
+                    lifecycle_stage=LifecycleStage.MONTE_CARLO,
+                    finding="all paths robust",
+                    session_id=None,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("candles_based_monte_carlo_path_robustness", decision.missing)
 
     def test_promotion_rejects_failed_oos_quality(self) -> None:
         decision = evaluate_promotion(

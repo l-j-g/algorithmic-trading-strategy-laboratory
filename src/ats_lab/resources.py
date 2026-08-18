@@ -3,7 +3,72 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import asdict, dataclass
+from datetime import date, timedelta
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class EvaluationWindowPolicy:
+    """Configurable window defaults resolved into explicit route dates.
+
+    Relative windows are convenient for recurring research.  The resolved
+    dates must still be copied into each :class:`RouteSpec` so a run remains
+    reproducible after the policy or its anchor date changes.  ``explicit``
+    disables default generation and leaves route dates entirely to callers.
+    """
+
+    mode: str = "relative"
+    as_of_date: str | None = None
+    comparison_lookback_days: int = 365
+    oos_lookback_days: int = 180
+    rolling_lookback_days: int = 90
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"relative", "explicit"}:
+            raise ValueError(
+                "resources.evaluation_windows.mode must be relative or explicit"
+            )
+        if self.as_of_date is not None:
+            try:
+                date.fromisoformat(self.as_of_date)
+            except ValueError as error:
+                raise ValueError(
+                    "resources.evaluation_windows.as_of_date must be ISO date"
+                ) from error
+        for name in (
+            "comparison_lookback_days", "oos_lookback_days",
+            "rolling_lookback_days",
+        ):
+            if int(getattr(self, name)) < 1:
+                raise ValueError(
+                    f"resources.evaluation_windows.{name} must be positive"
+                )
+
+    def resolve(self, *, as_of: date | str | None = None) -> dict[str, dict[str, str]]:
+        """Resolve relative defaults; explicit mode returns no defaults."""
+        if self.mode == "explicit":
+            return {}
+        if as_of is None:
+            anchor = (
+                date.fromisoformat(self.as_of_date)
+                if self.as_of_date is not None else date.today()
+            )
+        elif isinstance(as_of, date):
+            anchor = as_of
+        else:
+            anchor = date.fromisoformat(as_of)
+
+        def window(lookback_days: int) -> dict[str, str]:
+            return {
+                "start_date": (anchor - timedelta(days=lookback_days)).isoformat(),
+                "finish_date": anchor.isoformat(),
+            }
+
+        return {
+            "comparison": window(self.comparison_lookback_days),
+            "oos": window(self.oos_lookback_days),
+            "rolling": window(self.rolling_lookback_days),
+        }
 
 
 @dataclass(frozen=True)
@@ -13,7 +78,7 @@ class ResourcePolicy:
     significance_simulations: int = 2000
     hpo_trials_per_parameter: int = 100
     hpo_best_candidates: int = 20
-    monte_carlo_scenarios: int = 200
+    monte_carlo_scenarios: int = 500
     synthesis_inspect_limit: int = 25
     synthesis_generate_limit: int = 25
     synthesis_low_watermark: int = 5
@@ -34,6 +99,7 @@ class ResourcePolicy:
     minimum_sharpe_ratio: float = 0.0
     minimum_profit_factor: float = 1.0
     maximum_holdout_degradation_percentage: float = 50.0
+    evaluation_windows: EvaluationWindowPolicy = EvaluationWindowPolicy()
 
     def __post_init__(self) -> None:
         if self.mode not in {"balanced", "compute_heavy"}:
@@ -91,4 +157,8 @@ def load_resource_policy(config_path: Path) -> ResourcePolicy:
         return ResourcePolicy()
     with config_path.open("rb") as handle:
         payload = tomllib.load(handle).get("resources", {})
+    windows = payload.pop("evaluation_windows", {})
+    if not isinstance(windows, dict):
+        raise ValueError("resources.evaluation_windows must be a table")
+    payload["evaluation_windows"] = EvaluationWindowPolicy(**windows)
     return ResourcePolicy(**payload)
