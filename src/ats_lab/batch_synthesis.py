@@ -218,7 +218,10 @@ def apply_batch(
             if request.action == "new":
                 new_fingerprints.add(request.entry_fingerprint)
             seen.add(key)
-            _validate_source(database, request)
+            _validate_source(
+                database, request,
+                max_revision_depth=policy.synthesis_max_revision_depth,
+            )
             parsed.append(request)
         new_count = sum(request.lane == "new_concept" for request in parsed)
         improvement_count = sum(request.lane == "improvement" for request in parsed)
@@ -243,7 +246,10 @@ def apply_batch(
             if key in seen:
                 raise ValueError("duplicate request in synthesis batch")
             seen.add(key)
-            _validate_source(database, request)
+            _validate_source(
+                database, request,
+                max_revision_depth=policy.synthesis_max_revision_depth,
+            )
             active = database.rows(
                 "SELECT COUNT(*) AS count FROM work_items WHERE state IN ('ready','running')"
             )[0]["count"]
@@ -305,6 +311,11 @@ def _validate_cohort_request(
         "target_regime": request.target_regime,
         "failure_regime": request.failure_regime,
         "edge_thesis": request.edge_thesis,
+        "thesis": request.thesis,
+        "falsifiability_criteria": request.falsifiability_criteria,
+        "entry_rule_summary": request.entry_rule_summary,
+        "why_this_now": request.why_this_now,
+        "expected_edge_type": request.expected_edge_type,
     }
     missing = [name for name, value in required.items() if not value.strip()]
     if missing:
@@ -354,3 +365,58 @@ def _validate_source(
     depth = revision_depth(database, source)
     if depth >= max_revision_depth:
         raise ValueError(f"revision depth limit reached for {source}: {depth}")
+
+
+def _failure_diagnoses(
+    database: WorkflowDatabase, limit: int,
+) -> list[dict[str, Any]]:
+    """Return compact diagnosed failures as planning hints, never as authority."""
+    rows = database.rows(
+        """WITH ranked AS (
+               SELECT ev.*, ROW_NUMBER() OVER (
+                   PARTITION BY ev.experiment_id ORDER BY ev.evaluated_at DESC, ev.id DESC
+               ) AS rn
+               FROM evaluations ev
+           )
+           SELECT e.id AS experiment_id, s.name AS strategy,
+                  ranked.verdict, ranked.summary, ranked.next_step,
+                  ranked.evaluated_at
+           FROM ranked JOIN experiments e ON e.id=ranked.experiment_id
+           LEFT JOIN strategies s ON s.id=e.strategy_id
+           WHERE ranked.rn=1
+             AND ranked.verdict IN ('reject','revise','inconclusive')
+             AND COALESCE(ranked.summary,'') != ''
+           ORDER BY ranked.evaluated_at DESC, ranked.id DESC LIMIT ?""",
+        (max(0, int(limit)),),
+    )
+    return [
+        {
+            "experiment_id": str(row["experiment_id"]),
+            "strategy": str(row["strategy"] or ""),
+            "verdict": str(row["verdict"]),
+            "diagnosis": str(row["summary"])[:600],
+            "next_step": str(row["next_step"] or "")[:300],
+            "evaluated_at": str(row["evaluated_at"] or "")[:60],
+            "trust": "canonical_evaluation_hint",
+        }
+        for row in rows
+    ]
+
+
+def _archetype_coverage(database: WorkflowDatabase) -> list[dict[str, Any]]:
+    rows = database.rows(
+        """SELECT COALESCE(NULLIF(archetype,''),'unclassified') AS archetype,
+                  COUNT(*) AS experiment_count,
+                  COUNT(DISTINCT strategy_id) AS strategy_count
+           FROM experiments
+           GROUP BY COALESCE(NULLIF(archetype,''),'unclassified')
+           ORDER BY experiment_count DESC, archetype ASC LIMIT 20"""
+    )
+    return [
+        {
+            "archetype": str(row["archetype"]),
+            "experiment_count": int(row["experiment_count"]),
+            "strategy_count": int(row["strategy_count"]),
+        }
+        for row in rows
+    ]
