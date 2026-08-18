@@ -943,6 +943,7 @@ class DirectMcpDispatcher:
         data_routes = work_data_routes or experiment_data_routes or []
         if not isinstance(data_routes, list):
             raise ValueError("data_routes must be a list")
+        session_config = self._session_exchange_config(experiment)
         draft = client.call_tool("create_backtest_draft", {
             "exchange": next(iter(exchanges)),
             "routes": json.dumps(mcp_routes, separators=(",", ":")),
@@ -951,6 +952,7 @@ class DirectMcpDispatcher:
             "debug_mode": False, "export_csv": False, "export_json": False,
             "export_chart": True, "export_tradingview": False,
             "fast_mode": False, "benchmark": True,
+            **session_config,
             "title": f"ATS Lab {request['work_item_id']}",
             "description": "ATS Lab deterministic research-only execution.",
         })
@@ -998,6 +1000,7 @@ class DirectMcpDispatcher:
             "debug_mode": False, "export_csv": False, "export_json": False,
             "export_chart": True, "export_tradingview": False,
             "fast_mode": False, "benchmark": True,
+            **self._session_exchange_config(experiment),
             "title": f"ATS Lab significance {request['work_item_id']}",
             "description": "ATS Lab deterministic significance-test execution.",
         }
@@ -1013,6 +1016,24 @@ class DirectMcpDispatcher:
         if not session_id:
             raise McpError("create_significance_test_draft returned no session id")
         return str(session_id)
+
+    @staticmethod
+    def _session_exchange_config(experiment: dict[str, Any]) -> dict[str, Any]:
+        """Return an explicit, immutable exchange snapshot for each draft."""
+        balance = experiment.get("balance", experiment.get("starting_balance", 10_000))
+        fee = experiment.get("fee_rate", experiment.get("fee", 0.0005))
+        leverage = experiment.get(
+            "futures_leverage", experiment.get("leverage", 1),
+        )
+        leverage_mode = experiment.get(
+            "futures_leverage_mode", experiment.get("leverage_mode", "cross"),
+        )
+        return {
+            "balance": balance,
+            "fee": fee,
+            "futures_leverage": leverage,
+            "futures_leverage_mode": leverage_mode,
+        }
 
     def _create_or_resume_session(
         self, client: McpClient, request: dict[str, Any], plan: ExecutionPlan,
@@ -1417,8 +1438,6 @@ class DirectMcpDispatcher:
         if request.get("execution_context", {}).get("optimizer_parameters"):
             return False
         experiment = request.get("experiment", {})
-        if experiment.get("fee_rate") is not None:
-            return False
         routes = experiment.get("routes")
         if not isinstance(routes, list) or not routes:
             return False

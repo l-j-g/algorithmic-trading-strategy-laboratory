@@ -410,6 +410,35 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 request["requests"][0]["work_item"]["data_routes"],
             )
 
+    def test_backtest_draft_snapshots_exchange_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, _database = self.make_dispatcher(tmp, server)
+            request = batch_request()
+            request["requests"][0]["experiment"].update({
+                "balance": 1_000,
+                "fee_rate": 0.001,
+                "leverage": 3,
+                "leverage_mode": "isolated",
+            })
+            result = dispatcher.dispatch(request)
+            self.assertEqual(result.outcome, "finished")
+            create_args = next(
+                args for name, args in server.http.tool_calls
+                if name == "create_backtest_draft"
+            )
+            self.assertEqual({
+                key: create_args[key] for key in (
+                    "balance", "fee", "futures_leverage", "futures_leverage_mode",
+                )
+            }, {
+                "balance": 1_000,
+                "fee": 0.001,
+                "futures_leverage": 3,
+                "futures_leverage_mode": "isolated",
+            })
+
     def test_significance_dispatch_direct_zero_model_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["running", "finished"]
@@ -438,6 +467,20 @@ class DirectMcpExecutorTests(unittest.TestCase):
             self.assertIn("create_significance_test_draft", tools)
             self.assertIn("run_significance_test", tools)
             self.assertNotIn("run_backtest", tools)
+            sig_args = next(
+                args for name, args in server.http.tool_calls
+                if name == "create_significance_test_draft"
+            )
+            self.assertEqual({
+                key: sig_args[key] for key in (
+                    "balance", "fee", "futures_leverage", "futures_leverage_mode",
+                )
+            }, {
+                "balance": 10_000,
+                "fee": 0.0005,
+                "futures_leverage": 1,
+                "futures_leverage_mode": "cross",
+            })
             self.assertEqual(server.http.run_calls, 1)
             telemetry = database.rows(
                 "SELECT * FROM direct_execution_telemetry ORDER BY id DESC LIMIT 1"

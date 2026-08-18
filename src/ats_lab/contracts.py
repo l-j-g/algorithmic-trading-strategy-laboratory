@@ -33,7 +33,13 @@ def experiment_from_payload(payload: dict[str, Any], source_path: str = "") -> E
         experiment_type=ExperimentType(payload["experiment_type"]),
         hypothesis=str(payload.get("hypothesis", "")), archetype=str(payload.get("archetype", "")),
         target_regime=str(payload.get("target_regime", "")), failure_regime=str(payload.get("failure_regime", "")),
-        routes=routes, leverage=payload.get("leverage"), fee_rate=payload.get("fee_rate"),
+        routes=routes,
+        balance=payload.get("balance", payload.get("starting_balance")),
+        leverage=payload.get("leverage", payload.get("futures_leverage")),
+        leverage_mode=payload.get(
+            "leverage_mode", payload.get("futures_leverage_mode", "cross"),
+        ),
+        fee_rate=payload.get("fee_rate"),
         sizing_model=str(payload.get("sizing_model", "")), success_gates=success_gates,
         failure_gates=failure_gates, parent_experiment_id=payload.get("parent_experiment_id"), source_path=source_path,
     )

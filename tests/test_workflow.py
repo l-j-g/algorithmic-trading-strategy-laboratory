@@ -157,11 +157,16 @@ class ContractTests(unittest.TestCase):
         experiment = experiment_from_payload({
             "id": "EXP-1", "strategy_name": "Test", "experiment_type": "baseline",
             "routes": [{"exchange": "Binance", "symbol": "BTC-USDT", "timeframe": "1h", "start_date": "2025-01-01", "finish_date": "2025-12-31"}],
+            "balance": 1_000, "futures_leverage": 3,
+            "futures_leverage_mode": "isolated", "fee_rate": 0.001,
             "success_gates": [{"name": "trades", "operator": ">=", "threshold": 30}], "failure_gates": [],
         })
         work = work_item_from_payload({"id": "JOB-1", "experiment_id": "EXP-1", "state": "ready"})
         evaluation = evaluation_from_payload({"experiment_id": "EXP-1", "verdict": "hpo_candidate"})
         self.assertEqual(experiment.routes[0].symbol, "BTC-USDT")
+        self.assertEqual(experiment.balance, 1_000)
+        self.assertEqual(experiment.leverage, 3)
+        self.assertEqual(experiment.leverage_mode, "isolated")
         self.assertEqual(work.state, WorkState.READY)
         self.assertEqual(evaluation.verdict.value, "hpo_candidate")
 

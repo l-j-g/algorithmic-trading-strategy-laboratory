@@ -7,6 +7,33 @@ The adapter boundary uses two versioned JSON documents:
 - `jesse-execution-result.schema.json`: session ID, dashboard URL, normalized
 metrics, terminal status, and structured error evidence.
 
+## Session configuration snapshot
+
+Every backtest, significance, and Monte Carlo draft receives an explicit
+session exchange snapshot:
+
+```json
+{
+  "balance": 10000,
+  "fee": 0.0005,
+  "futures_leverage": 1,
+  "futures_leverage_mode": "cross"
+}
+```
+
+Jesse stores these values on the draft and snapshots them when `run_*` starts.
+The runner must not reread mutable global exchange configuration while the
+session is running. ATS evidence keeps configured leverage separate from
+observed effective leverage:
+
+- `configured_futures_leverage`
+- `leverage_mode`
+- `effective_leverage_mean`, `effective_leverage_p95`, `effective_leverage_max`
+- `liquidation_count`
+
+Compact session polling returns status, metrics, and liquidation count without
+the trade/order collection. Full trades remain a diagnostic-only path.
+
 Python producers and consumers use `JesseExecutionRequest` and
 `JesseExecutionResult` from `ats_lab.jesse_contracts`.
 

@@ -79,7 +79,9 @@ class ExperimentSpec:
     target_regime: str = ""
     failure_regime: str = ""
     routes: tuple[RouteSpec, ...] = ()
+    balance: float | None = None
     leverage: float | None = None
+    leverage_mode: str | None = None
     fee_rate: float | None = None
     sizing_model: str = ""
     success_gates: tuple[GateSpec, ...] = ()

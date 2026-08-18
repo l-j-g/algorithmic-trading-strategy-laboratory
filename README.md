@@ -734,6 +734,7 @@ Open <http://127.0.0.1:8765>. Jesse's own dashboard stays available at
 - Web interface: [`docs/web-interface.md`](docs/web-interface.md)
 - Research memory: [`docs/research-memory.md`](docs/research-memory.md)
 - Jesse research policy: [`docs/jesse/BACKTEST_EVALUATION_PROTOCOL.md`](docs/jesse/BACKTEST_EVALUATION_PROTOCOL.md) and [`docs/jesse/STRATEGY_CONCEPT_PLAYBOOK.md`](docs/jesse/STRATEGY_CONCEPT_PLAYBOOK.md)
+- Dynamic leverage research brief: [`research/briefs/dynamic-leverage-allocation.md`](research/briefs/dynamic-leverage-allocation.md)
 - Diagrams: [`docs/diagrams/`](docs/diagrams/)
 
 ## Safety
