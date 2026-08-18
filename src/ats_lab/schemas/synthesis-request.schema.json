@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ats-lab://synthesis-request/v1",
   "type": "object",
-  "required": ["schema_version", "strategy_name", "hypothesis", "entry_rule", "change_scope", "routes"],
+  "required": ["schema_version", "strategy_name", "routes"],
   "properties": {
     "schema_version": {"const": 1},
     "strategy_name": {"type": "string", "minLength": 1},
@@ -16,6 +16,12 @@
     "action": {"enum": ["new", "revise"]},
     "source_experiment_id": {"type": ["string", "null"]},
     "controlled_change": {"type": "string"},
+    "type": {"enum": ["new_concept", "controlled_improvement"]},
+    "thesis": {"type": "string", "minLength": 1},
+    "falsifiability_criteria": {"type": "string", "minLength": 1},
+    "entry_rule_summary": {"type": "string", "minLength": 1},
+    "why_this_now": {"type": "string", "minLength": 1},
+    "expected_edge_type": {"type": "string", "minLength": 1},
     "lane": {"enum": ["new_concept", "improvement"]},
     "archetype": {"type": "string", "minLength": 1},
     "target_regime": {"type": "string", "minLength": 1},
@@ -30,5 +36,43 @@
     "cohort_slot": {"type": ["integer", "null"], "minimum": 0},
     "routes": {"type": "array", "minItems": 1, "items": {"$ref": "experiment-work-item.schema.json#/$defs/route"}}
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "not": {
+        "anyOf": [
+          {"required": ["type"]},
+          {"required": ["thesis"]},
+          {"required": ["falsifiability_criteria"]},
+          {"required": ["entry_rule_summary"]},
+          {"required": ["why_this_now"]},
+          {"required": ["expected_edge_type"]}
+        ]
+      },
+      "required": ["hypothesis", "entry_rule", "change_scope"]
+    },
+    {
+      "required": [
+        "type", "source_experiment_id", "controlled_change", "thesis", "archetype",
+        "target_regime", "failure_regime", "falsifiability_criteria", "entry_rule_summary",
+        "why_this_now", "expected_edge_type"
+      ],
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "new_concept"}}},
+          "then": {"properties": {"source_experiment_id": {"const": null}}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "controlled_improvement"}}},
+          "then": {
+            "required": ["change_scope"],
+            "properties": {
+              "source_experiment_id": {"type": "string", "minLength": 1},
+              "controlled_change": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      ]
+    }
+  ]
 }

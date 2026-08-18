@@ -29,27 +29,21 @@ Every evaluation must produce:
 
 No strategy advances from one profitable backtest. A strategy must survive multiple comparison windows and market regimes before HPO.
 
-## Standard Date Windows
+## Evaluation Window Policy
 
-Use these windows unless the research question requires different windows.
+Do not treat calendar dates in this document as permanent defaults. Configure
+relative windows under `[resources.evaluation_windows]`, resolve them at route
+creation time, and persist the resulting explicit `start_date` and
+`finish_date` on every route. This avoids calendar drift while preserving
+reproducible reruns. Set `mode = "explicit"` for legacy jobs or research that
+requires caller-owned dates.
 
-### Primary comparison windows
+The default policy uses a 365-day comparison lookback, a 180-day OOS
+lookback, and a 90-day rolling lookback. These are policy examples, not
+mandatory dates. Regime labels and boundaries must be documented with the
+route set or data-derived regime definition.
 
-1. Full recent window: 2024-01-01 to 2024-12-31
-2. Prior-year window: 2023-01-01 to 2023-12-31
-3. Current-cycle-to-date: 2025-01-01 to 2026-06-02
-
-### Regime windows
-
-4. Bull/trend sample: 2024-01-01 to 2024-03-31
-5. Chop/range sample: 2024-04-01 to 2024-09-30
-6. Late-cycle / mixed sample: 2024-10-01 to 2024-12-31
-
-### Validation split
-
-- In-sample design window: 2023-01-01 to 2024-06-30
-- Out-of-sample validation window: 2024-07-01 to 2025-12-31
-- Never tune on the validation window.
+Never tune on the OOS or rolling validation routes.
 
 ## Baseline Route Set
 
@@ -122,8 +116,12 @@ Only consider HPO if:
 
 Only after:
 
-- robust OOS results
-- Monte Carlo or significance-style validation where appropriate
+- passing OOS evidence with complete explicit candle route and metrics
+- passing rolling walk-forward evidence with complete explicit candle route
+  and metrics
+- passing candles-based Monte Carlo/path robustness with route dates and
+  numeric path metrics; prose, labels, or arbitrary run names do not count
+- fee/cost stress pass
 - reasonable drawdown and liquidation buffer
 - explicit research conclusion, not a live recommendation
 

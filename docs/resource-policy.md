@@ -12,6 +12,15 @@ significance_simulations = 5000
 hpo_trials_per_parameter = 300
 hpo_best_candidates = 50
 monte_carlo_scenarios = 500
+
+[resources.evaluation_windows]
+# Relative defaults are resolved into explicit route dates at submission time.
+# Use mode = "explicit" when every route must provide its own dates.
+mode = "relative"
+# as_of_date = "2026-08-18"     # optional ISO anchor; default means today
+comparison_lookback_days = 365
+oos_lookback_days = 180
+rolling_lookback_days = 90
 synthesis_inspect_limit = 25
 synthesis_generate_limit = 25
 synthesis_low_watermark = 5
@@ -50,3 +59,8 @@ Compute-heavy behavior:
 
 These are execution budgets, not promotion criteria. More trials reduce search
 noise but do not turn weak or overfit results into valid candidates.
+
+Evaluation windows are policy defaults, not hidden mutable state. A relative
+policy must be resolved when routes are created, and the resulting
+`start_date`/`finish_date` remain on each route for reproducibility. Explicit
+route dates remain fully supported for legacy jobs and controlled reruns.

@@ -3,7 +3,72 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import asdict, dataclass
+from datetime import date, timedelta
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class EvaluationWindowPolicy:
+    """Configurable window defaults resolved into explicit route dates.
+
+    Relative windows are convenient for recurring research.  The resolved
+    dates must still be copied into each :class:`RouteSpec` so a run remains
+    reproducible after the policy or its anchor date changes.  ``explicit``
+    disables default generation and leaves route dates entirely to callers.
+    """
+
+    mode: str = "relative"
+    as_of_date: str | None = None
+    comparison_lookback_days: int = 365
+    oos_lookback_days: int = 180
+    rolling_lookback_days: int = 90
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"relative", "explicit"}:
+            raise ValueError(
+                "resources.evaluation_windows.mode must be relative or explicit"
+            )
+        if self.as_of_date is not None:
+            try:
+                date.fromisoformat(self.as_of_date)
+            except ValueError as error:
+                raise ValueError(
+                    "resources.evaluation_windows.as_of_date must be ISO date"
+                ) from error
+        for name in (
+            "comparison_lookback_days", "oos_lookback_days",
+            "rolling_lookback_days",
+        ):
+            if int(getattr(self, name)) < 1:
+                raise ValueError(
+                    f"resources.evaluation_windows.{name} must be positive"
+                )
+
+    def resolve(self, *, as_of: date | str | None = None) -> dict[str, dict[str, str]]:
+        """Resolve relative defaults; explicit mode returns no defaults."""
+        if self.mode == "explicit":
+            return {}
+        if as_of is None:
+            anchor = (
+                date.fromisoformat(self.as_of_date)
+                if self.as_of_date is not None else date.today()
+            )
+        elif isinstance(as_of, date):
+            anchor = as_of
+        else:
+            anchor = date.fromisoformat(as_of)
+
+        def window(lookback_days: int) -> dict[str, str]:
+            return {
+                "start_date": (anchor - timedelta(days=lookback_days)).isoformat(),
+                "finish_date": anchor.isoformat(),
+            }
+
+        return {
+            "comparison": window(self.comparison_lookback_days),
+            "oos": window(self.oos_lookback_days),
+            "rolling": window(self.rolling_lookback_days),
+        }
 
 
 @dataclass(frozen=True)
@@ -36,10 +101,7 @@ class ResourcePolicy:
     minimum_sharpe_ratio: float = 0.0
     minimum_profit_factor: float = 1.0
     maximum_holdout_degradation_percentage: float = 50.0
-    evaluation_anchor_date: str | None = None
-    evaluation_hpo_days: int = 365
-    evaluation_rolling_days: int = 365
-    evaluation_oos_days: int = 90
+    evaluation_windows: EvaluationWindowPolicy = EvaluationWindowPolicy()
     portfolio_correlation_threshold: float = 0.85
     portfolio_capacity_utilization_limit: float = 0.70
 
@@ -57,7 +119,6 @@ class ResourcePolicy:
             "analysis_cohort_min", "analysis_cohort_max",
             "analysis_parallelism", "analyzer_timeout_seconds",
             "minimum_trades",
-            "evaluation_hpo_days", "evaluation_rolling_days", "evaluation_oos_days",
         ):
             if int(getattr(self, name)) < (0 if name == "synthesis_low_watermark" else 1):
                 raise ValueError(f"resources.{name} must be non-negative" if name == "synthesis_low_watermark"
@@ -99,15 +160,6 @@ class ResourcePolicy:
             raise ValueError(
                 "resources.portfolio_capacity_utilization_limit must be in (0, 1]"
             )
-        if self.evaluation_anchor_date:
-            from datetime import date
-            try:
-                date.fromisoformat(self.evaluation_anchor_date)
-            except ValueError as error:
-                raise ValueError(
-                    "resources.evaluation_anchor_date must use YYYY-MM-DD"
-                ) from error
-
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -117,4 +169,8 @@ def load_resource_policy(config_path: Path) -> ResourcePolicy:
         return ResourcePolicy()
     with config_path.open("rb") as handle:
         payload = tomllib.load(handle).get("resources", {})
+    windows = payload.pop("evaluation_windows", {})
+    if not isinstance(windows, dict):
+        raise ValueError("resources.evaluation_windows must be a table")
+    payload["evaluation_windows"] = EvaluationWindowPolicy(**windows)
     return ResourcePolicy(**payload)

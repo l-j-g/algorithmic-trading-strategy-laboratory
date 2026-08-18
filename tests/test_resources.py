@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ats_lab.resources import ResourcePolicy, load_resource_policy
+from datetime import date
+
+from ats_lab.resources import (
+    EvaluationWindowPolicy,
+    ResourcePolicy,
+    load_resource_policy,
+)
 
 
 class ResourcePolicyTests(unittest.TestCase):
@@ -30,6 +36,13 @@ analysis_cohort_min = 4
 analysis_cohort_max = 8
 analysis_parallelism = 2
 analyzer_timeout_seconds = 720
+
+[resources.evaluation_windows]
+mode = "relative"
+as_of_date = "2026-08-18"
+comparison_lookback_days = 365
+oos_lookback_days = 180
+rolling_lookback_days = 90
 """)
             policy = load_resource_policy(path)
             self.assertEqual(policy.cpu_cores, 6)
@@ -40,6 +53,19 @@ analyzer_timeout_seconds = 720
             self.assertEqual(policy.synthesis_min_new_concepts, 5)
             self.assertEqual(policy.analysis_parallelism, 2)
             self.assertEqual(policy.analyzer_timeout_seconds, 720)
+            self.assertEqual(policy.monte_carlo_scenarios, 500)
+            self.assertEqual(
+                policy.evaluation_windows.resolve(),
+                {
+                    "comparison": {"start_date": "2025-08-18", "finish_date": "2026-08-18"},
+                    "oos": {"start_date": "2026-02-19", "finish_date": "2026-08-18"},
+                    "rolling": {"start_date": "2026-05-20", "finish_date": "2026-08-18"},
+                },
+            )
+
+    def test_explicit_mode_preserves_route_owned_dates(self) -> None:
+        policy = EvaluationWindowPolicy(mode="explicit")
+        self.assertEqual(policy.resolve(as_of=date(2026, 8, 18)), {})
 
     def test_rejects_too_few_significance_simulations(self) -> None:
         with self.assertRaises(ValueError):
@@ -54,6 +80,10 @@ analyzer_timeout_seconds = 720
             ResourcePolicy(analysis_cohort_min=3)
         with self.assertRaisesRegex(ValueError, "between 600 and 900"):
             ResourcePolicy(analyzer_timeout_seconds=599)
+
+    def test_rejects_invalid_window_policy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "relative or explicit"):
+            EvaluationWindowPolicy(mode="calendar")
 
 
 if __name__ == "__main__":

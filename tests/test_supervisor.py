@@ -551,7 +551,12 @@ class BatchSupervisorTests(unittest.TestCase):
                    WHERE experiment_id='EXP-1'"""
             )[0]
             self.assertEqual(evaluation["verdict"], "inconclusive")
-            self.assertIn("oos_or_rolling", evaluation["summary"])
+            self.assertIn("oos_validation", evaluation["summary"])
+            self.assertIn("walk_forward", evaluation["summary"])
+            self.assertIn(
+                "candles_based_monte_carlo_path_robustness",
+                evaluation["summary"],
+            )
             self.assertIn("cost-stress", evaluation["next_step"])
 
     def test_hpo_execution_uses_public_study_id_contract(self) -> None:
