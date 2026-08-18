@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -18,6 +19,69 @@ HPO_LIFECYCLE_STATES = (
     "revise",
     "reject",
 )
+
+SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS = 120
+
+
+def _process_is_alive(process_id: int) -> bool:
+    if process_id <= 0:
+        return False
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _supervisor_liveness(
+    runtime: dict[str, Any], now: datetime,
+) -> dict[str, Any]:
+    """Project supervisor liveness separately from queue/claim health."""
+    if not runtime:
+        return {
+            "state": "not_reported",
+            "process_alive": False,
+            "heartbeat_fresh": False,
+            "heartbeat_age_seconds": None,
+        }
+    process_id = int(runtime.get("process_id") or 0)
+    process_alive = _process_is_alive(process_id)
+    heartbeat = runtime.get("heartbeat_at")
+    heartbeat_age_seconds: float | None = None
+    heartbeat_fresh = False
+    if heartbeat:
+        try:
+            heartbeat_at = datetime.fromisoformat(
+                str(heartbeat).replace("Z", "+00:00"),
+            )
+            if heartbeat_at.tzinfo is None:
+                heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+            heartbeat_age_seconds = max(
+                0.0, (now - heartbeat_at).total_seconds(),
+            )
+            heartbeat_fresh = (
+                heartbeat_age_seconds <= SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS
+            )
+        except (TypeError, ValueError):
+            heartbeat_age_seconds = None
+    if runtime.get("phase") == "stopped":
+        state = "stopped"
+    elif not process_alive:
+        state = "stopped"
+    elif not heartbeat_fresh:
+        state = "stale"
+    else:
+        state = "running"
+    return {
+        "state": state,
+        "process_alive": process_alive,
+        "heartbeat_fresh": heartbeat_fresh,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+    }
 
 
 def _route_count(specification: dict[str, Any], split: str) -> int:
@@ -245,10 +309,18 @@ def operator_status(
     hpo = hpo_lifecycle_snapshot(database)
     runtime = database.supervisor_runtime_status() or {}
     control = database.control_status()
+    supervisor = _supervisor_liveness(runtime, now)
+    supervisor_unhealthy = (
+        control.get("desired_state") == "running"
+        and bool(runtime)
+        and supervisor["state"] != "running"
+    )
     ready = int(states.get("ready", 0))
     running = int(states.get("running", 0))
     scheduled = int(states.get("scheduled", 0))
-    if invalid_retry_schedules:
+    if supervisor_unhealthy:
+        next_action = "start_or_inspect_supervisor"
+    elif invalid_retry_schedules:
         next_action = "repair_retry_schedules"
     elif stale_claims:
         next_action = "recover_or_inspect_running_claim"
@@ -272,13 +344,21 @@ def operator_status(
         else "idle"
     )
     return {
-        "healthy": not bool(stale_claims or invalid_retry_schedules),
-        "progress_state": progress_state,
+        "healthy": not bool(
+            stale_claims or invalid_retry_schedules or supervisor_unhealthy
+        ),
+        "progress_state": (
+            "stalled" if supervisor_unhealthy else progress_state
+        ),
         "invalid_retry_schedules": invalid_retry_schedules,
         "checked_at": now.isoformat().replace("+00:00", "Z"),
         "heartbeat_at": runtime.get("heartbeat_at"),
         "desired_state": control.get("desired_state"),
         "supervisor_phase": runtime.get("phase"),
+        "supervisor_liveness": supervisor["state"],
+        "supervisor_process_alive": supervisor["process_alive"],
+        "supervisor_heartbeat_fresh": supervisor["heartbeat_fresh"],
+        "supervisor_heartbeat_age_seconds": supervisor["heartbeat_age_seconds"],
         "stale_execution_claim_ids": stale_claim_ids,
         "database": str(database.path),
         "work_states": states,

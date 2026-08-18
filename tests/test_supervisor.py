@@ -211,8 +211,30 @@ class BatchSupervisorTests(unittest.TestCase):
                 (item["id"],),
             )[0]
             self.assertEqual(row["state"], "waiting_retry")
-            self.assertEqual(row["attempts"], 0)
-            self.assertEqual(row["blocker_code"], "executor_provider_failed")
+        self.assertEqual(row["attempts"], 0)
+        self.assertEqual(row["blocker_code"], "executor_provider_failed")
+
+    def test_invalid_executor_result_is_infrastructure_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            item = database.claim_next("batch-worker")
+            supervisor = BatchSupervisor(
+                database, SequenceDispatcher([]), "batch-worker",
+                retry_delay_seconds=0,
+            )
+
+            supervisor._retry_or_block(
+                item, "invalid_executor_result", "Hermes returned malformed JSON",
+            )
+
+            row = database.rows(
+                "SELECT state,attempts,blocker_code FROM work_items WHERE id=?",
+                (item["id"],),
+            )[0]
+
+        self.assertEqual(row["state"], "waiting_retry")
+        self.assertEqual(row["attempts"], 0)
+        self.assertEqual(row["blocker_code"], "invalid_executor_result")
 
     def test_execution_rejects_metrics_that_do_not_match_raw_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -713,7 +735,18 @@ class BatchSupervisorTests(unittest.TestCase):
             database = self.make_database(tmp)
             dispatcher = SequenceDispatcher([
                 self.execution_result(),
-                DispatchResult(outcome="retry", detail="model unavailable"),
+                DispatchResult(
+                    outcome="retry", blocker_code="analyzer_model_failure",
+                    detail="model unavailable",
+                ),
+                DispatchResult(
+                    outcome="retry", blocker_code="analyzer_model_failure",
+                    detail="model unavailable",
+                ),
+                DispatchResult(
+                    outcome="retry", blocker_code="analyzer_model_failure",
+                    detail="model unavailable",
+                ),
             ])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
@@ -753,7 +786,18 @@ class BatchSupervisorTests(unittest.TestCase):
             database = self.make_database(tmp)
             invalid = self.analysis_result()
             del invalid.payload["evaluations"][1]["next_action"]
-            dispatcher = SequenceDispatcher([self.execution_result(), invalid])
+            dispatcher = SequenceDispatcher([
+                self.execution_result(),
+                invalid,
+                DispatchResult(
+                    outcome="retry", blocker_code="analyzer_model_failure",
+                    detail="model unavailable",
+                ),
+                DispatchResult(
+                    outcome="retry", blocker_code="analyzer_model_failure",
+                    detail="model unavailable",
+                ),
+            ])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
                 resource_policy=ResourcePolicy(synthesis_low_watermark=0),

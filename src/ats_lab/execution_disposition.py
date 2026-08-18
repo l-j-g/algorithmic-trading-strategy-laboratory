@@ -24,7 +24,10 @@ class FailureKind(StrEnum):
 
 INFRASTRUCTURE_FAILURE_CODES = frozenset({
     "executor_provider_failed", "executor_timeout", "executor_start_failed",
-    "executor_failed", "direct_mcp_error", "malformed_jesse_session",
+    "executor_failed", "invalid_executor_result", "invalid_executor_contract",
+    "invalid_dispatch_result", "dispatcher_exception",
+    "batch_coverage_mismatch", "invalid_execution_result", "invalid_run_evidence",
+    "direct_mcp_error", "malformed_jesse_session",
     "invalid_jesse_metrics", "jesse_execution_deferred",
     "jesse_draft_not_started", "jesse_start_recovery_failed",
     "jesse_zombie_recovery_pending", "jesse_zombie_recovery_required",
