@@ -860,7 +860,7 @@ class BatchSupervisorTests(unittest.TestCase):
                 database.supervisor_runtime_status()["phase"], "stopped",
             )
 
-    def test_pause_does_not_abandon_pending_batch_analysis(self) -> None:
+    def test_pause_prevents_pending_batch_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
             claimed = database.claim_batch("batch-worker", 8)
@@ -883,14 +883,11 @@ class BatchSupervisorTests(unittest.TestCase):
 
             result = resumed.run_round()
 
-            self.assertEqual(result["status"], "batch_complete")
-            self.assertEqual(
-                [request["task_type"] for request in resumed_dispatcher.requests],
-                ["analyze_batch"],
-            )
+            self.assertEqual(result["status"], "paused")
+            self.assertEqual(resumed_dispatcher.requests, [])
             self.assertEqual(
                 database.rows("SELECT state,COUNT(*) count FROM work_items GROUP BY state"),
-                [{"state": "finished", "count": 2}],
+                [{"state": "running", "count": 2}],
             )
 
     def test_compact_execution_uses_only_canonical_normalized_evidence(self) -> None:

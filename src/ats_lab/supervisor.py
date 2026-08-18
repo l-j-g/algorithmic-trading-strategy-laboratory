@@ -119,21 +119,25 @@ class BatchSupervisor:
 
     def run_round(self) -> dict[str, Any]:
         self._runtime("checking")
-        pending = self.database.pending_batch_evaluation(self.worker_id)
-        if pending:
-            return self._analyze_pending(pending, recovered=0, promoted=0)
-
         desired_state = self.database.control_status()["desired_state"]
-        if desired_state == "stop_requested":
-            self._runtime("stopping")
-            return {
-                "status": "stop_requested",
-                "operator": operator_status(self.database),
-            }
+        # Pause must gate pending analysis too.  Checking pending work first
+        # lets a paused supervisor continue dispatching analyzer turns (and
+        # therefore keep Hermes/Jesse traffic alive).
         if desired_state == "paused":
             self._runtime("paused")
             return {
                 "status": "paused",
+                "operator": operator_status(self.database),
+            }
+
+        pending = self.database.pending_batch_evaluation(self.worker_id)
+        if pending:
+            return self._analyze_pending(pending, recovered=0, promoted=0)
+
+        if desired_state == "stop_requested":
+            self._runtime("stopping")
+            return {
+                "status": "stop_requested",
                 "operator": operator_status(self.database),
             }
 

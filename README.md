@@ -364,7 +364,7 @@ after a graceful stop with `ats-lab loop start`.
 
 ```bash
 ats-lab control status
-ats-lab control pause     # finish current batch + analysis, claim no new work
+ats-lab control pause     # pause before pending analysis; claim no new work
 ats-lab control resume
 ats-lab control stop      # finish current batch + analysis, exit before next claim
 ```
