@@ -1,9 +1,10 @@
 """Batch planning context and guarded persistence for idle synthesis."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from .database import WorkflowDatabase
+from .research_memory import ResearchMemoryAdapter, compact_advisory_memory
 from .resources import ResourcePolicy
 from .synthesis import SynthesisRequest, synthesis_request_from_payload, synthesize
 
@@ -14,6 +15,19 @@ ACTIVE_READY_LIMIT = 3
 MAX_REVISION_DEPTH = 3
 LOCKED_VERDICTS = {"hpo_candidate", "paper_trade_candidate"}
 REVISION_VERDICTS = {"revise", "inconclusive"}
+CONTEXT_EVIDENCE_LIMIT = 4
+CONTEXT_FAILURE_LIMIT = 8
+CONTEXT_FINGERPRINT_LIMIT = 12
+CONTEXT_THEME_LIMIT = 12
+TYPED_PROPOSAL_FIELDS = (
+    "type", "source_experiment_id", "controlled_change", "thesis",
+    "archetype", "target_regime", "failure_regime", "falsifiability_criteria",
+    "entry_rule_summary", "why_this_now", "expected_edge_type",
+)
+TYPED_CONTRACT_MARKERS = frozenset({
+    "type", "thesis", "falsifiability_criteria", "entry_rule_summary",
+    "why_this_now", "expected_edge_type",
+})
 
 
 def revision_depth(database: WorkflowDatabase, experiment_id: str) -> int:
@@ -40,13 +54,15 @@ def is_promotion_locked(database: WorkflowDatabase, experiment_id: str) -> bool:
 
 
 def build_batch_context(
-    database: WorkflowDatabase, limit: int | None = None, policy: ResourcePolicy | None = None,
+    database: WorkflowDatabase, limit: int | None = None,
+    policy: ResourcePolicy | None = None,
+    memory_adapter: ResearchMemoryAdapter | None = None,
 ) -> dict[str, Any]:
-    """Inspect revise outcomes first, then scheduled ideas; never expose promotion locks."""
+    """Build bounded synthesis context; Honcho recall remains advisory only."""
     policy = policy or ResourcePolicy()
     limit = limit or policy.synthesis_inspect_limit
     revision_limit = min(limit, policy.synthesis_max_improvements)
-    evidence_limit = 4
+    evidence_limit = CONTEXT_EVIDENCE_LIMIT
     latest = database.rows(
         """WITH ranked AS (
                SELECT ev.*, ROW_NUMBER() OVER (
@@ -134,12 +150,83 @@ def build_batch_context(
                 limit=evidence_limit,
             )
         ]
+    recent = database.rows(
+        """WITH ranked AS (
+               SELECT ev.*, ROW_NUMBER() OVER (
+                   PARTITION BY ev.experiment_id ORDER BY ev.evaluated_at DESC, ev.id DESC
+               ) AS rn
+               FROM evaluations ev
+           )
+           SELECT e.id AS experiment_id, s.name AS strategy, e.archetype,
+                  e.target_regime, e.failure_regime, ranked.verdict,
+                  ranked.summary, ranked.next_step, ranked.evaluated_at
+           FROM ranked JOIN experiments e ON e.id=ranked.experiment_id
+           LEFT JOIN strategies s ON s.id=e.strategy_id
+           WHERE ranked.rn=1
+             AND ranked.verdict NOT IN ('hpo_candidate','paper_trade_candidate',
+                                        'infrastructure_failure')
+           ORDER BY ranked.evaluated_at DESC, e.id DESC LIMIT ?""",
+        (max(limit, CONTEXT_FAILURE_LIMIT),),
+    )
+    promising = [
+        _compact_recent_item(database, row, evidence_limit=2)
+        for row in recent if row["verdict"] in REVISION_VERDICTS
+    ][:limit]
+    diagnosed_failures = [
+        _compact_recent_item(database, row, evidence_limit=2)
+        for row in recent if row["verdict"] == "reject"
+    ][:CONTEXT_FAILURE_LIMIT]
+    stable_fingerprints = database.rows(
+        """WITH latest AS (
+               SELECT ev.*, ROW_NUMBER() OVER (
+                   PARTITION BY ev.experiment_id ORDER BY ev.evaluated_at DESC, ev.id DESC
+               ) AS rn
+               FROM evaluations ev
+           ), tested AS (
+               SELECT json_extract(e.specification_json,'$.entry_rule.fingerprint') AS fingerprint,
+                      COUNT(DISTINCT e.id) AS tested_count,
+                      MAX(latest.evaluated_at) AS last_evaluated_at
+               FROM experiments e JOIN latest ON latest.experiment_id=e.id AND latest.rn=1
+               WHERE json_extract(e.specification_json,'$.entry_rule.fingerprint') IS NOT NULL
+                 AND EXISTS (SELECT 1 FROM normalized_evidence n
+                             WHERE n.experiment_id=e.id)
+                 AND latest.verdict NOT IN ('hpo_candidate','paper_trade_candidate',
+                                             'infrastructure_failure')
+               GROUP BY fingerprint
+           )
+           SELECT fingerprint, tested_count, last_evaluated_at
+           FROM tested ORDER BY tested_count DESC,last_evaluated_at DESC,fingerprint
+           LIMIT ?""",
+        (CONTEXT_FINGERPRINT_LIMIT,),
+    )
     fingerprint_count = database.rows(
         """SELECT COUNT(DISTINCT json_extract(specification_json,'$.entry_rule.fingerprint')) AS count
            FROM experiments
            WHERE json_extract(specification_json,'$.entry_rule.fingerprint') IS NOT NULL"""
     )[0]["count"]
-    return {
+    themes = database.rows(
+        """WITH ranked AS (
+               SELECT ev.*, ROW_NUMBER() OVER (
+                   PARTITION BY ev.experiment_id ORDER BY ev.evaluated_at DESC, ev.id DESC
+               ) AS rn
+               FROM evaluations ev
+           )
+           SELECT COALESCE(NULLIF(e.archetype,''),'unspecified') AS archetype,
+                  COUNT(*) AS tested_count,
+                  SUM(CASE WHEN ranked.verdict IN ('revise','inconclusive') THEN 1 ELSE 0 END)
+                    AS promising_count,
+                  SUM(CASE WHEN ranked.verdict='reject' THEN 1 ELSE 0 END)
+                    AS failure_count
+           FROM ranked JOIN experiments e ON e.id=ranked.experiment_id
+           WHERE ranked.rn=1
+             AND ranked.verdict NOT IN ('hpo_candidate','paper_trade_candidate',
+                                        'infrastructure_failure')
+           GROUP BY COALESCE(NULLIF(e.archetype,''),'unspecified')
+           ORDER BY tested_count DESC, archetype LIMIT ?""",
+        (CONTEXT_THEME_LIMIT,),
+    )
+    context = {
+        "context_schema_version": 2,
         "inspect_limit": limit, "generate_limit": policy.synthesis_generate_limit,
         "evidence_rows_per_candidate": evidence_limit,
         "low_watermark": policy.synthesis_low_watermark,
@@ -150,40 +237,109 @@ def build_batch_context(
             "maximum_improvements": policy.synthesis_max_improvements,
             "allocation": "eligible improvements first; reserve new-concept floor; backfill either lane",
         },
-        "synthesis_modes": {
-            "new_concept": {
-                "minimum_slots": policy.synthesis_min_new_concepts,
-                "purpose": "Generate distinct falsifiable theses across under-represented archetypes.",
-            },
-            "controlled_improvement": {
-                "maximum_slots": policy.synthesis_max_improvements,
-                "purpose": "Make one surgical change tied to inconclusive or failed evidence.",
-            },
-            "failure_diagnosis_counter": {
-                "purpose": "Attack diagnosed failure modes; never reinterpret infrastructure failure as strategy evidence.",
-            },
-        },
-        "agent_authority": {
-            "role": "bounded_research_planner",
-            "may_propose": ["synthesis_requests"],
-            "may_not": [
-                "change_job_state", "invent_evidence", "bypass_significance",
-                "override_capacity", "override_fingerprints", "revise_promotion_locked",
-            ],
+        "allocation": {
+            "exact_total": policy.synthesis_generate_limit,
+            "new_concepts_at_least": policy.synthesis_min_new_concepts,
+            "controlled_improvements_at_most": policy.synthesis_max_improvements,
+            "new_concept_slots_reserved": policy.synthesis_min_new_concepts,
         },
         "resource_policy": policy.to_dict(),
         "improvement_candidates": revisions, "scheduled_candidates": scheduled,
         "concept_learnings": learnings,
-        "failure_diagnoses": _failure_diagnoses(database, policy.synthesis_failure_diagnosis_limit),
-        "archetype_coverage": _archetype_coverage(database),
+        "promising_inconclusive": promising,
+        "diagnosed_failures": diagnosed_failures,
+        "failure_diagnoses": diagnosed_failures,
+        "stable_tested_entry_fingerprints": [dict(row) for row in stable_fingerprints],
+        "archetype_theme_representation": [dict(row) for row in themes],
+        "archetype_coverage": [dict(row) for row in themes],
+        "known_entry_fingerprint_count": int(fingerprint_count),
+        "promotion_locked_count": locked_count,
+        "forbidden_states": [
+            "hpo_candidate and paper_trade_candidate are promotion-locked",
+            "revision depth at or above max_revision_depth is not eligible",
+            "requirements_pending work is not runnable",
+            "infrastructure failures are retries, never research revisions",
+            "duplicate entry fingerprints and duplicate cohort requests are rejected",
+            "agent proposals cannot mutate SQLite state, evidence, leases, or gates",
+        ],
         "forbidden_actions": [
             "revise hpo_candidate or paper_trade_candidate",
-            "repeat a known entry-rule fingerprint",
-            "exceed configured revision depth",
-            "treat infrastructure failure as a strategy result",
+            "invent evidence or bypass significance gates",
+            "repeat a tested entry-rule fingerprint",
         ],
-        "known_entry_fingerprint_count": fingerprint_count,
-        "promotion_locked_count": locked_count,
+        "portfolio_layer": _portfolio_context(database, policy),
+        "agent_authority": "propose_only; canonical SQLite validation and gates decide",
+    }
+    if memory_adapter is None:
+        context.update({
+            "advisory_memory": [], "memory_degraded": True,
+            "advisory_memory_provider": "honcho_unavailable",
+            "authority": "advisory_only", "state_authority": "canonical_sqlite",
+        })
+    else:
+        context.update(compact_advisory_memory(
+            memory_adapter, context, max_items=5, max_bytes=8000,
+            max_text_chars=600, max_queries=3, stop_on_failure=True,
+        ))
+        context["advisory_memory_provider"] = "honcho_v3_adapter"
+    return context
+
+
+def _compact_recent_item(
+    database: WorkflowDatabase, row: Mapping[str, Any], *, evidence_limit: int,
+) -> dict[str, Any]:
+    item = {
+        key: row[key] for key in (
+            "experiment_id", "strategy", "archetype", "target_regime",
+            "failure_regime", "verdict", "evaluated_at",
+        ) if key in row
+    }
+    item["finding"] = str(row["summary"] or "")[:500]
+    item["next_action"] = str(row["next_step"] or "")[:500]
+    item["evidence"] = [
+        evidence.to_compact_dict()
+        for evidence in database.query_normalized_evidence(
+            {"experiment_id": row["experiment_id"]}, limit=evidence_limit,
+        )
+    ]
+    return item
+
+
+def _portfolio_context(
+    database: WorkflowDatabase, policy: ResourcePolicy,
+) -> dict[str, Any]:
+    """Expose paper candidates for a future portfolio preflight, read-only."""
+    rows = database.rows(
+        """WITH ranked AS (
+               SELECT ev.*, ROW_NUMBER() OVER (
+                   PARTITION BY ev.experiment_id ORDER BY ev.evaluated_at DESC, ev.id DESC
+               ) AS rn
+               FROM evaluations ev
+           )
+           SELECT e.id AS experiment_id, s.name AS strategy, ranked.evaluated_at
+           FROM ranked JOIN experiments e ON e.id=ranked.experiment_id
+           LEFT JOIN strategies s ON s.id=e.strategy_id
+           WHERE ranked.rn=1 AND ranked.verdict='paper_trade_candidate'
+           ORDER BY ranked.evaluated_at DESC, e.id LIMIT 25"""
+    )
+    return {
+        "status": "advisory_preflight_only",
+        "candidate_count": len(rows),
+        "candidates": [
+            {
+                "experiment_id": str(row["experiment_id"]),
+                "strategy": str(row["strategy"] or ""),
+                "evaluated_at": str(row["evaluated_at"] or "")[:60],
+                "correlation_status": "requires_aligned_return_series",
+                "capacity_status": "requires_operator_capacity_input",
+            }
+            for row in rows
+        ],
+        "policy": {
+            "correlation_threshold": policy.portfolio_correlation_threshold,
+            "capacity_utilization_limit": policy.portfolio_capacity_utilization_limit,
+        },
+        "authority": "advisory_only; does not promote or schedule work",
     }
 
 
@@ -193,6 +349,7 @@ def apply_batch(
 ) -> dict[str, Any]:
     """Validate and persist one planning batch with promotion locks and capacity control."""
     policy = policy or ResourcePolicy()
+    payloads = [_normalize_typed_proposal(raw) for raw in payloads]
     payloads = _canonicalize_non_entry_rules(database, payloads)
     generate_limit = policy.synthesis_generate_limit
     generated: list[dict[str, Any]] = []
@@ -205,6 +362,7 @@ def apply_batch(
         new_fingerprints: set[str] = set()
         for index, raw_payload in enumerate(payloads):
             payload = dict(raw_payload)
+            _validate_typed_proposal_payload(payload)
             payload.setdefault("n_simulations", policy.significance_simulations)
             payload["cohort_id"] = cohort_id
             payload["cohort_slot"] = index
@@ -269,6 +427,59 @@ def apply_batch(
     return {"generated": generated, "rejected": rejected, "submitted": len(payloads)}
 
 
+def _normalize_typed_proposal(payload: dict[str, Any]) -> dict[str, Any]:
+    """Map richer agent proposal names onto existing synthesis request fields."""
+    result = dict(payload)
+    proposal_type = result.get("type")
+    if proposal_type == "new_concept":
+        result.setdefault("action", "new")
+        result.setdefault("lane", "new_concept")
+    elif proposal_type == "controlled_improvement":
+        result.setdefault("action", "revise")
+        result.setdefault("lane", "improvement")
+    if result.get("thesis"):
+        result.setdefault("hypothesis", result["thesis"])
+        result.setdefault("edge_thesis", result["thesis"])
+    if result.get("entry_rule_summary"):
+        result.setdefault("entry_rule", result["entry_rule_summary"])
+    if proposal_type == "new_concept":
+        result.setdefault("change_scope", "new_entry")
+    elif proposal_type == "controlled_improvement":
+        result.setdefault("change_scope", "entry_changed")
+    return result
+
+
+def _validate_typed_proposal_payload(payload: dict[str, Any]) -> None:
+    # Older direct Worker callers use the pre-typed request contract. Preserve
+    # that compatibility; any proposal using the richer contract is strict.
+    if not TYPED_CONTRACT_MARKERS.intersection(payload):
+        return
+    missing = [
+        field for field in TYPED_PROPOSAL_FIELDS
+        if field not in payload
+    ]
+    if missing:
+        raise ValueError("typed proposal missing fields: " + ", ".join(missing))
+    proposal_type = payload["type"]
+    if proposal_type not in {"new_concept", "controlled_improvement"}:
+        raise ValueError("typed proposal type must be new_concept or controlled_improvement")
+    if proposal_type == "new_concept":
+        if payload["source_experiment_id"] is not None:
+            raise ValueError("new concept source_experiment_id must be null")
+    else:
+        if not payload["source_experiment_id"]:
+            raise ValueError("controlled improvement requires source_experiment_id")
+        if not str(payload["controlled_change"] or "").strip():
+            raise ValueError("controlled improvement requires controlled_change")
+    for field in (
+        "thesis", "archetype", "target_regime", "failure_regime",
+        "falsifiability_criteria", "entry_rule_summary", "why_this_now",
+        "expected_edge_type",
+    ):
+        if not str(payload[field] or "").strip():
+            raise ValueError(f"typed proposal requires {field}")
+
+
 def _canonicalize_non_entry_rules(
     database: WorkflowDatabase,
     payloads: list[dict[str, Any]],
@@ -311,11 +522,6 @@ def _validate_cohort_request(
         "target_regime": request.target_regime,
         "failure_regime": request.failure_regime,
         "edge_thesis": request.edge_thesis,
-        "thesis": request.thesis,
-        "falsifiability_criteria": request.falsifiability_criteria,
-        "entry_rule_summary": request.entry_rule_summary,
-        "why_this_now": request.why_this_now,
-        "expected_edge_type": request.expected_edge_type,
     }
     missing = [name for name, value in required.items() if not value.strip()]
     if missing:
@@ -365,58 +571,3 @@ def _validate_source(
     depth = revision_depth(database, source)
     if depth >= max_revision_depth:
         raise ValueError(f"revision depth limit reached for {source}: {depth}")
-
-
-def _failure_diagnoses(
-    database: WorkflowDatabase, limit: int,
-) -> list[dict[str, Any]]:
-    """Return compact diagnosed failures as planning hints, never as authority."""
-    rows = database.rows(
-        """WITH ranked AS (
-               SELECT ev.*, ROW_NUMBER() OVER (
-                   PARTITION BY ev.experiment_id ORDER BY ev.evaluated_at DESC, ev.id DESC
-               ) AS rn
-               FROM evaluations ev
-           )
-           SELECT e.id AS experiment_id, s.name AS strategy,
-                  ranked.verdict, ranked.summary, ranked.next_step,
-                  ranked.evaluated_at
-           FROM ranked JOIN experiments e ON e.id=ranked.experiment_id
-           LEFT JOIN strategies s ON s.id=e.strategy_id
-           WHERE ranked.rn=1
-             AND ranked.verdict IN ('reject','revise','inconclusive')
-             AND COALESCE(ranked.summary,'') != ''
-           ORDER BY ranked.evaluated_at DESC, ranked.id DESC LIMIT ?""",
-        (max(0, int(limit)),),
-    )
-    return [
-        {
-            "experiment_id": str(row["experiment_id"]),
-            "strategy": str(row["strategy"] or ""),
-            "verdict": str(row["verdict"]),
-            "diagnosis": str(row["summary"])[:600],
-            "next_step": str(row["next_step"] or "")[:300],
-            "evaluated_at": str(row["evaluated_at"] or "")[:60],
-            "trust": "canonical_evaluation_hint",
-        }
-        for row in rows
-    ]
-
-
-def _archetype_coverage(database: WorkflowDatabase) -> list[dict[str, Any]]:
-    rows = database.rows(
-        """SELECT COALESCE(NULLIF(archetype,''),'unclassified') AS archetype,
-                  COUNT(*) AS experiment_count,
-                  COUNT(DISTINCT strategy_id) AS strategy_count
-           FROM experiments
-           GROUP BY COALESCE(NULLIF(archetype,''),'unclassified')
-           ORDER BY experiment_count DESC, archetype ASC LIMIT 20"""
-    )
-    return [
-        {
-            "archetype": str(row["archetype"]),
-            "experiment_count": int(row["experiment_count"]),
-            "strategy_count": int(row["strategy_count"]),
-        }
-        for row in rows
-    ]

@@ -77,6 +77,17 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertIn("New or changed entry rules", prompt)
         self.assertIn("promotion-locked", prompt)
         self.assertIn("normally 25", prompt)
+        for field in (
+            '"type"', '"source_experiment_id"', '"controlled_change"',
+            '"thesis"', '"falsifiability_criteria"', '"entry_rule_summary"',
+            '"why_this_now"', '"expected_edge_type"',
+        ):
+            self.assertIn(field, prompt)
+        self.assertIn("New Concept", prompt)
+        self.assertIn("Controlled Improvement", prompt)
+        self.assertIn("Failure Diagnosis / Counter", prompt)
+        self.assertIn("Memory outage/degradation must not block", prompt)
+        self.assertIn("stable_tested_entry_fingerprints", prompt)
 
     def test_batch_execution_and_analysis_have_separate_contracts(self) -> None:
         execution = build_prompt({"task_type": "execute_batch", "requests": []})

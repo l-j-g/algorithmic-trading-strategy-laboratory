@@ -359,7 +359,12 @@ def _first(
 
 def _protocol_text(value: object) -> str | None:
     text = _text(value)
-    return text.casefold().replace("-", "_").replace(" ", "_") or None
+    if not text:
+        return None
+    normalized = text.casefold().replace("-", "_").replace(" ", "_")
+    if normalized in {"candle", "candles_based", "candle_resampled", "candle_data"}:
+        return "candle_based"
+    return normalized
 
 
 def _number(value: object) -> float | None:

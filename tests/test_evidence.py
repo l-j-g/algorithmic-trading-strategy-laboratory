@@ -104,6 +104,29 @@ class NormalizedEvidenceTests(unittest.TestCase):
         self.assertIsNone(evidence.net_profit_percentage)
         self.assertEqual(evidence.win_rate, 48)
 
+    def test_normalizes_typed_monte_carlo_and_walk_forward_protocol(self) -> None:
+        monte_carlo = normalize_run_evidence(
+            experiment_id="EXP-1", run_id="MC-1", session_id="mc-session",
+            strategy="Trend", lifecycle_stage="monte_carlo", experiment_spec={},
+            route={"symbol": "BTC-USDT", "timeframe": "1h",
+                   "start_date": "2025-01-01", "finish_date": "2025-06-01"},
+            metrics={"monte_carlo_method": "candles-based",
+                     "monte_carlo_scenarios": 500}, completed_at=None,
+        )[0]
+        rolling = normalize_run_evidence(
+            experiment_id="EXP-1", run_id="WF-1", session_id="wf-session",
+            strategy="Trend", lifecycle_stage="out_of_sample", experiment_spec={},
+            route={"symbol": "BTC-USDT", "timeframe": "1h",
+                   "start_date": "2025-06-01", "finish_date": "2025-08-01",
+                   "evidence_split": "rolling"},
+            metrics={"walk_forward_method": "rolling", "walk_forward_windows": 4},
+            completed_at=None,
+        )[0]
+        self.assertEqual(monte_carlo.monte_carlo_method, "candle_based")
+        self.assertEqual(monte_carlo.monte_carlo_scenarios, 500)
+        self.assertEqual(rolling.walk_forward_method, "rolling")
+        self.assertEqual(rolling.walk_forward_windows, 4)
+
     def test_derives_profit_factor_from_raw_jesse_gross_totals(self) -> None:
         evidence = normalize_run_evidence(
             experiment_id="EXP-1",

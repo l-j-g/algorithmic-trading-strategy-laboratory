@@ -540,6 +540,7 @@ def _recall_queries(context: Mapping[str, Any]) -> list[str]:
     refinement_terms: list[str] = []
     for collection in (
         "improvement_candidates", "scheduled_candidates", "concept_learnings",
+        "promising_inconclusive", "diagnosed_failures",
     ):
         for item in context.get(collection, []) if isinstance(context.get(collection), list) else []:
             if not isinstance(item, dict):
@@ -568,6 +569,11 @@ def _recall_queries(context: Mapping[str, Any]) -> list[str]:
                     refinement_terms.append(
                         " ".join(str(evidence["finding"]).split())[:160]
                     )
+    for fingerprint in context.get("stable_tested_entry_fingerprints", []) or []:
+        if isinstance(fingerprint, dict) and fingerprint.get("fingerprint"):
+            refinement_terms.append(
+                "tested entry fingerprint " + str(fingerprint["fingerprint"])[:128]
+            )
     queries = [
         f"ATS strategy learnings {strategy}"
         for strategy in dict.fromkeys(strategy_names)
@@ -590,7 +596,7 @@ def compact_advisory_memory(
     max_items: int = 5,
     max_bytes: int = 8000,
     max_text_chars: int = 600,
-    max_queries: int | None = None,
+    max_queries: int | None = 3,
     stop_on_failure: bool = False,
 ) -> dict[str, Any]:
     existing = {
@@ -623,7 +629,10 @@ def compact_advisory_memory(
             continue
         recalled.extend(item for item in batch if isinstance(item, dict))
     if not recalled and recall_failed:
-        return {"advisory_memory": [], "memory_degraded": True}
+        return {
+            "advisory_memory": [], "memory_degraded": True,
+            "authority": "advisory_only", "state_authority": "canonical_sqlite",
+        }
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
     degraded = recall_failed
@@ -677,7 +686,10 @@ def compact_advisory_memory(
         seen.add(learning_id)
         if len(items) >= max_items:
             break
-    return {"advisory_memory": items, "memory_degraded": degraded}
+    return {
+        "advisory_memory": items, "memory_degraded": degraded,
+        "authority": "advisory_only", "state_authority": "canonical_sqlite",
+    }
 
 
 @dataclass(frozen=True)
@@ -807,7 +819,8 @@ class MemoryResearchAdapter:
         )
 
     def recall(self, query: str, *, limit: int) -> list[dict[str, Any]]:
-        self._ensure_namespace()
+        # Recall must remain read-only at provider boundary. Delivery path owns
+        # namespace creation; an unavailable namespace degrades to no hints.
         result = []
         for message in self._search(query, limit):
             payload = self._payload_from_message(message)

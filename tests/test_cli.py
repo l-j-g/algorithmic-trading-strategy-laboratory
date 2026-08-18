@@ -429,13 +429,17 @@ class CliEvidenceTests(unittest.TestCase):
 
     def test_hpo_defaults_are_visible_and_explicitly_applicable(self) -> None:
         preview = self.invoke("hpo-defaults")
-        self.assertIn("2024-01-01 -> 2025-01-01", preview)
+        self.assertIn("->", preview)
+        self.assertIn("hpo", preview)
         self.assertIn("NEXT", preview)
         payload = json.loads(self.invoke(
             "hpo-defaults", "--apply", "--format", "json",
         ))
         self.assertEqual(payload["applied"], [self.study_id])
-        self.assertEqual(payload["policy"]["oos"][0]["start_date"], "2026-01-01")
+        self.assertEqual(
+            payload["policy"]["rolling"][0]["finish_date"],
+            payload["policy"]["oos"][0]["start_date"],
+        )
 
 
 if __name__ == "__main__":

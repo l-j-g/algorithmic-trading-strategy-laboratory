@@ -342,6 +342,8 @@ class ResearchMemoryTests(unittest.TestCase):
             max_items=5, max_bytes=3000, max_text_chars=200,
         )
         self.assertFalse(result["memory_degraded"])
+        self.assertEqual(result["authority"], "advisory_only")
+        self.assertEqual(result["state_authority"], "canonical_sqlite")
         self.assertLessEqual(len(result["advisory_memory"]), 5)
         self.assertTrue(all(
             item["trust"] == "untrusted_advisory_data"
@@ -366,6 +368,8 @@ class ResearchMemoryTests(unittest.TestCase):
         )
         self.assertEqual(unavailable["advisory_memory"], [])
         self.assertTrue(unavailable["memory_degraded"])
+        self.assertEqual(unavailable["authority"], "advisory_only")
+        self.assertEqual(unavailable["state_authority"], "canonical_sqlite")
         self.assertEqual(malformed["advisory_memory"], [])
         self.assertTrue(malformed["memory_degraded"])
 
@@ -377,7 +381,7 @@ class ResearchMemoryTests(unittest.TestCase):
                 self.paths: list[str] = []
 
             def _request(self, method: str, path: str, payload: dict | None = None):
-                self.paths.append(path)
+                self.paths.append((method, path))
                 if path.endswith("/messages"):
                     message = payload["messages"][0]
                     self.messages.append(message)
@@ -399,11 +403,16 @@ class ResearchMemoryTests(unittest.TestCase):
         }
         adapter.deliver(payload)
         adapter.deliver(payload)
+        paths_before_recall = len(adapter.paths)
         recalled = adapter.recall("Strategy", limit=5)
         self.assertEqual(len(adapter.messages), 1)
         self.assertEqual(recalled, [payload])
-        self.assertTrue(any("/messages/list" in path for path in adapter.paths))
-        self.assertTrue(any(path.endswith("/search") for path in adapter.paths))
+        self.assertTrue(any("/messages/list" in path for _, path in adapter.paths))
+        self.assertTrue(any(path.endswith("/search") for _, path in adapter.paths))
+        self.assertFalse(any(
+            method == "POST" and path.endswith(("/workspaces", "/peers", "/sessions"))
+            for method, path in adapter.paths[paths_before_recall:]
+        ))
 
 
 if __name__ == "__main__":

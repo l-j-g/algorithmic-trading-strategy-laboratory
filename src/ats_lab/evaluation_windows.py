@@ -44,10 +44,15 @@ def resolve_evaluation_windows(
     anchor_date: date | str | None = None,
 ) -> EvaluationWindowPlan:
     policy = policy or ResourcePolicy()
-    anchor = _coerce_date(anchor_date or policy.evaluation_anchor_date) or date.today()
-    oos_start = anchor - timedelta(days=policy.evaluation_oos_days)
-    rolling_start = oos_start - timedelta(days=policy.evaluation_rolling_days)
-    hpo_start = rolling_start - timedelta(days=policy.evaluation_hpo_days)
+    configured = policy.evaluation_windows
+    if configured.mode == "explicit":
+        raise ValueError(
+            "relative evaluation windows disabled; provide explicit route dates"
+        )
+    anchor = _coerce_date(anchor_date or configured.as_of_date) or date.today()
+    oos_start = anchor - timedelta(days=configured.oos_lookback_days)
+    rolling_start = oos_start - timedelta(days=configured.rolling_lookback_days)
+    hpo_start = rolling_start - timedelta(days=configured.comparison_lookback_days)
     return EvaluationWindowPlan(
         anchor_date=anchor,
         hpo_start=hpo_start,

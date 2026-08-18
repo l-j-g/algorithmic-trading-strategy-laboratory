@@ -12,15 +12,6 @@ significance_simulations = 5000
 hpo_trials_per_parameter = 300
 hpo_best_candidates = 50
 monte_carlo_scenarios = 500
-
-[resources.evaluation_windows]
-# Relative defaults are resolved into explicit route dates at submission time.
-# Use mode = "explicit" when every route must provide its own dates.
-mode = "relative"
-# as_of_date = "2026-08-18"     # optional ISO anchor; default means today
-comparison_lookback_days = 365
-oos_lookback_days = 180
-rolling_lookback_days = 90
 synthesis_inspect_limit = 25
 synthesis_generate_limit = 25
 synthesis_low_watermark = 5
@@ -31,6 +22,15 @@ synthesis_lease_seconds = 3600
 claim_timeout_seconds = 7200
 execution_batch_size = 8
 active_ready_limit = 8
+
+[resources.evaluation_windows]
+# Relative defaults are resolved into explicit route dates at submission time.
+# Use mode = "explicit" when every route must provide its own dates.
+mode = "relative"
+# as_of_date = "2026-08-18"     # optional ISO anchor; default means today
+comparison_lookback_days = 365
+oos_lookback_days = 180
+rolling_lookback_days = 90
 ```
 
 Compute-heavy behavior:

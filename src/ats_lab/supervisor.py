@@ -1044,8 +1044,9 @@ class BatchSupervisor:
                             f"{promotion.finding}"
                         ).strip(),
                         next_step=(
-                            "Complete OOS/rolling validation and cost-stress "
-                            "checks before paper-trade review."
+                            "Complete OOS and rolling walk-forward validation, "
+                            "candle-based Monte Carlo/path robustness, and "
+                            "cost-stress checks before paper-trade review."
                         ),
                     )
             operation = self._operation(run_row)
@@ -1168,13 +1169,8 @@ class BatchSupervisor:
         )
         context = build_batch_context(
             self.database, policy=self.resource_policy,
+            memory_adapter=self.memory_adapter,
         )
-        if self.memory_adapter is None:
-            context.update({"advisory_memory": [], "memory_degraded": True})
-        else:
-            context.update(compact_advisory_memory(
-                self.memory_adapter, context,
-            ))
         dispatch = self._dispatch({
             "schema_version": 1,
             "task_type": "synthesize_batch",

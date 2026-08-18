@@ -85,6 +85,7 @@ class GateTests(unittest.TestCase):
             (
                 "oos_validation", "walk_forward",
                 "candles_based_monte_carlo_path_robustness",
+                "walk_forward_protocol",
                 "fees_cost_sensitivity",
             ),
         )
@@ -110,15 +111,23 @@ class GateTests(unittest.TestCase):
                     evidence_split=EvidenceSplit.OOS,
                     lifecycle_stage=LifecycleStage.OUT_OF_SAMPLE,
                     cost_stress_status=CostStressStatus.PASS,
+                    sortino_ratio=1.0,
+                    calmar_ratio=1.0,
                 ),
                 self.row(
                     evidence_split=EvidenceSplit.ROLLING,
                     lifecycle_stage=LifecycleStage.MULTI_WINDOW,
+                    sortino_ratio=1.0,
+                    calmar_ratio=1.0,
+                    walk_forward_method="rolling",
+                    walk_forward_windows=3,
                 ),
                 self.row(
                     lifecycle_stage=LifecycleStage.MONTE_CARLO,
                     calmar_ratio=1.1,
                     sortino_ratio=1.3,
+                    monte_carlo_method="candle_based",
+                    monte_carlo_scenarios=500,
                 ),
             ],
             policy=ResourcePolicy(),

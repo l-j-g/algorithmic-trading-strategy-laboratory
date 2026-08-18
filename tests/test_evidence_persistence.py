@@ -85,12 +85,12 @@ class EvidencePersistenceTests(unittest.TestCase):
             finished_at="2026-01-01T00:00:00Z",
         ))
 
-    def test_schema_v4_and_run_write_persist_atomic_routes(self) -> None:
+    def test_schema_v5_and_run_write_persist_atomic_routes(self) -> None:
         self._add_atomic_run()
 
         rows = self.database.normalized_evidence_for_run("RUN-1")
 
-        self.assertEqual(SCHEMA_VERSION, 4)
+        self.assertEqual(SCHEMA_VERSION, 5)
         self.assertEqual(len(rows), 2)
         self.assertEqual(
             {row.evidence_split for row in rows},
@@ -101,7 +101,7 @@ class EvidencePersistenceTests(unittest.TestCase):
             self.database.rows(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )[-1]["version"],
-            4,
+            5,
         )
 
     def test_evaluation_enriches_every_atomic_row(self) -> None:

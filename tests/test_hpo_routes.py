@@ -60,10 +60,10 @@ class HpoRoutePlannerTests(unittest.TestCase):
 
     def test_default_routes_are_disjoint_and_release_scheduled_study(self) -> None:
         study = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")
-        routes = default_hpo_routes()
-        self.assertEqual(routes["hpo"][0]["start_date"], "2024-01-01")
-        self.assertEqual(routes["rolling"][0]["start_date"], "2025-01-01")
-        self.assertEqual(routes["oos"][0]["start_date"], "2026-01-01")
+        routes = default_hpo_routes(anchor_date="2026-04-01")
+        self.assertEqual(routes["hpo"][0]["finish_date"], routes["rolling"][0]["start_date"])
+        self.assertEqual(routes["rolling"][0]["finish_date"], routes["oos"][0]["start_date"])
+        self.assertEqual(routes["oos"][0]["finish_date"], "2026-04-01")
         self.database.configure_default_hpo_routes(study["id"], routes)
         plan = HpoRoutePlanner(self.database).build(study["id"])
         self.assertTrue(all(item["ready"] for item in plan.splits.values()))
