@@ -66,6 +66,10 @@ class NormalizedEvidence:
     optimizer_objective: str | None = None
     cost_stress_status: CostStressStatus | None = None
     significance_p_value: float | None = None
+    monte_carlo_scenarios: int | None = None
+    monte_carlo_method: str | None = None
+    walk_forward_windows: int | None = None
+    walk_forward_method: str | None = None
     completed_at: str | None = None
     finding: str | None = None
     next_action: str | None = None
@@ -284,6 +288,24 @@ def _normalize_atomic(
     objective = _text(_first(
         metrics, spec, names=("optimizer_objective", "objective"),
     ))
+    monte_carlo_method = _protocol_text(_first(
+        metrics, spec,
+        names=("monte_carlo_method", "simulation_method", "resampling_method"),
+    ))
+    if monte_carlo_method is None and metrics.get("candle_based") is True:
+        monte_carlo_method = "candle_based"
+    monte_carlo_scenarios = _integer(_first(
+        metrics, spec,
+        names=("monte_carlo_scenarios", "n_scenarios", "scenario_count"),
+    ))
+    walk_forward_windows = _integer(_first(
+        metrics, spec,
+        names=("walk_forward_windows", "n_walk_forward_windows", "rolling_windows"),
+    ))
+    walk_forward_method = _protocol_text(_first(
+        metrics, spec,
+        names=("walk_forward_method", "validation_method", "window_method"),
+    ))
     return NormalizedEvidence(
         strategy=_text(strategy),
         strategy_version=_text(_first(
@@ -314,6 +336,10 @@ def _normalize_atomic(
         optimizer_objective=objective,
         cost_stress_status=cost_status,
         significance_p_value=numeric["significance_p_value"],
+        monte_carlo_scenarios=monte_carlo_scenarios,
+        monte_carlo_method=monte_carlo_method,
+        walk_forward_windows=walk_forward_windows,
+        walk_forward_method=walk_forward_method,
         completed_at=_text(completed_at),
         finding=_text(finding),
         next_action=_text(next_action),
@@ -329,6 +355,11 @@ def _first(
             if name in payload and payload[name] is not None:
                 return payload[name]
     return None
+
+
+def _protocol_text(value: object) -> str | None:
+    text = _text(value)
+    return text.casefold().replace("-", "_").replace(" ", "_") or None
 
 
 def _number(value: object) -> float | None:

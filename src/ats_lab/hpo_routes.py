@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from .database import WorkflowDatabase
+from .evaluation_windows import resolve_evaluation_windows
+from .resources import ResourcePolicy
 
 
 REQUIRED_SPLITS = ("hpo", "oos", "rolling")
@@ -21,22 +24,25 @@ DEFAULT_ROUTE = {
     "symbol": "BTC-USDT",
     "timeframe": "1h",
 }
-DEFAULT_ROUTE_PERIODS = {
-    "hpo": ("2024-01-01", "2025-01-01"),
-    "rolling": ("2025-01-01", "2026-01-01"),
-    "oos": ("2026-01-01", "2026-04-01"),
-}
-
-
-def default_hpo_routes() -> dict[str, list[dict[str, str]]]:
-    """Return fresh, disjoint bootstrap routes for a scheduled HPO study."""
+def default_hpo_routes(
+    policy: ResourcePolicy | None = None,
+    *,
+    anchor_date: date | str | None = None,
+) -> dict[str, list[dict[str, str]]]:
+    """Return fresh disjoint routes from relative/configured windows."""
+    windows = resolve_evaluation_windows(policy, anchor_date=anchor_date)
+    periods = {
+        "hpo": (windows.hpo_start, windows.hpo_finish),
+        "rolling": (windows.rolling_start, windows.rolling_finish),
+        "oos": (windows.oos_start, windows.oos_finish),
+    }
     return {
         split: [{
             **DEFAULT_ROUTE,
-            "start_date": start,
-            "finish_date": finish,
+            "start_date": start.isoformat(),
+            "finish_date": finish.isoformat(),
         }]
-        for split, (start, finish) in DEFAULT_ROUTE_PERIODS.items()
+        for split, (start, finish) in periods.items()
     }
 
 
@@ -123,9 +129,11 @@ class HpoRoutePlanner:
             warnings=tuple(dict.fromkeys(warnings)),
         )
 
-    def default_payload(self) -> dict[str, list[dict[str, str]]]:
+    def default_payload(
+        self, policy: ResourcePolicy | None = None,
+    ) -> dict[str, list[dict[str, str]]]:
         """Expose the explicit bootstrap policy without database mutation."""
-        return default_hpo_routes()
+        return default_hpo_routes(policy)
 
     def _known_routes(self, strategy: str) -> list[dict[str, str]]:
         """Return route shapes seen for this strategy, never recommendations."""

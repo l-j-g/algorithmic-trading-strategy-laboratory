@@ -79,7 +79,7 @@ def build_batch_context(
                 limit=evidence_limit,
             )
         ]
-        if item["revision_depth"] < MAX_REVISION_DEPTH:
+        if item["revision_depth"] < policy.synthesis_max_revision_depth:
             revisions.append(item)
     remaining = max(0, limit - len(revisions))
     revision_ids = {row["source_experiment_id"] for row in revisions}
@@ -143,15 +143,45 @@ def build_batch_context(
         "inspect_limit": limit, "generate_limit": policy.synthesis_generate_limit,
         "evidence_rows_per_candidate": evidence_limit,
         "low_watermark": policy.synthesis_low_watermark,
-        "active_ready_limit": policy.active_ready_limit, "max_revision_depth": MAX_REVISION_DEPTH,
+        "active_ready_limit": policy.active_ready_limit,
+        "max_revision_depth": policy.synthesis_max_revision_depth,
         "lane_policy": {
             "minimum_new_concepts": policy.synthesis_min_new_concepts,
             "maximum_improvements": policy.synthesis_max_improvements,
             "allocation": "eligible improvements first; reserve new-concept floor; backfill either lane",
         },
+        "synthesis_modes": {
+            "new_concept": {
+                "minimum_slots": policy.synthesis_min_new_concepts,
+                "purpose": "Generate distinct falsifiable theses across under-represented archetypes.",
+            },
+            "controlled_improvement": {
+                "maximum_slots": policy.synthesis_max_improvements,
+                "purpose": "Make one surgical change tied to inconclusive or failed evidence.",
+            },
+            "failure_diagnosis_counter": {
+                "purpose": "Attack diagnosed failure modes; never reinterpret infrastructure failure as strategy evidence.",
+            },
+        },
+        "agent_authority": {
+            "role": "bounded_research_planner",
+            "may_propose": ["synthesis_requests"],
+            "may_not": [
+                "change_job_state", "invent_evidence", "bypass_significance",
+                "override_capacity", "override_fingerprints", "revise_promotion_locked",
+            ],
+        },
         "resource_policy": policy.to_dict(),
         "improvement_candidates": revisions, "scheduled_candidates": scheduled,
         "concept_learnings": learnings,
+        "failure_diagnoses": _failure_diagnoses(database, policy.synthesis_failure_diagnosis_limit),
+        "archetype_coverage": _archetype_coverage(database),
+        "forbidden_actions": [
+            "revise hpo_candidate or paper_trade_candidate",
+            "repeat a known entry-rule fingerprint",
+            "exceed configured revision depth",
+            "treat infrastructure failure as a strategy result",
+        ],
         "known_entry_fingerprint_count": fingerprint_count,
         "promotion_locked_count": locked_count,
     }
@@ -301,7 +331,12 @@ def _validate_cohort_request(
             raise ValueError("non-entry improvement must retain source entry rule")
 
 
-def _validate_source(database: WorkflowDatabase, request: SynthesisRequest) -> None:
+def _validate_source(
+    database: WorkflowDatabase,
+    request: SynthesisRequest,
+    *,
+    max_revision_depth: int = MAX_REVISION_DEPTH,
+) -> None:
     if request.action == "new":
         if request.source_experiment_id:
             raise ValueError("new action must not set source_experiment_id")
@@ -317,5 +352,5 @@ def _validate_source(database: WorkflowDatabase, request: SynthesisRequest) -> N
     if not rows or rows[0]["verdict"] not in REVISION_VERDICTS:
         raise ValueError(f"revision source must have latest revise/inconclusive verdict: {source}")
     depth = revision_depth(database, source)
-    if depth >= MAX_REVISION_DEPTH:
+    if depth >= max_revision_depth:
         raise ValueError(f"revision depth limit reached for {source}: {depth}")

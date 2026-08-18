@@ -224,7 +224,7 @@ class BatchSupervisor:
         for study in self.database.hpo_studies_needing_default_routes():
             study_id = str(study["study_id"])
             self.database.configure_default_hpo_routes(
-                study_id, default_hpo_routes(),
+                study_id, default_hpo_routes(self.resource_policy),
             )
             applied.append(study_id)
         if applied:

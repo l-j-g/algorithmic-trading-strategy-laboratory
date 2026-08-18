@@ -13,12 +13,14 @@ class ResourcePolicy:
     significance_simulations: int = 2000
     hpo_trials_per_parameter: int = 100
     hpo_best_candidates: int = 20
-    monte_carlo_scenarios: int = 200
+    monte_carlo_scenarios: int = 500
     synthesis_inspect_limit: int = 25
     synthesis_generate_limit: int = 25
     synthesis_low_watermark: int = 5
     synthesis_min_new_concepts: int = 5
     synthesis_max_improvements: int = 20
+    synthesis_max_revision_depth: int = 3
+    synthesis_failure_diagnosis_limit: int = 8
     synthesis_retry_cooldown_seconds: int = 300
     synthesis_lease_seconds: int = 3600
     claim_timeout_seconds: int = 7200
@@ -34,6 +36,12 @@ class ResourcePolicy:
     minimum_sharpe_ratio: float = 0.0
     minimum_profit_factor: float = 1.0
     maximum_holdout_degradation_percentage: float = 50.0
+    evaluation_anchor_date: str | None = None
+    evaluation_hpo_days: int = 365
+    evaluation_rolling_days: int = 365
+    evaluation_oos_days: int = 90
+    portfolio_correlation_threshold: float = 0.85
+    portfolio_capacity_utilization_limit: float = 0.70
 
     def __post_init__(self) -> None:
         if self.mode not in {"balanced", "compute_heavy"}:
@@ -43,17 +51,21 @@ class ResourcePolicy:
             "hpo_best_candidates", "monte_carlo_scenarios", "synthesis_inspect_limit",
             "synthesis_generate_limit", "synthesis_low_watermark",
             "synthesis_min_new_concepts", "synthesis_max_improvements",
+            "synthesis_max_revision_depth", "synthesis_failure_diagnosis_limit",
             "synthesis_retry_cooldown_seconds", "synthesis_lease_seconds",
             "claim_timeout_seconds", "execution_batch_size", "active_ready_limit",
             "analysis_cohort_min", "analysis_cohort_max",
             "analysis_parallelism", "analyzer_timeout_seconds",
             "minimum_trades",
+            "evaluation_hpo_days", "evaluation_rolling_days", "evaluation_oos_days",
         ):
             if int(getattr(self, name)) < (0 if name == "synthesis_low_watermark" else 1):
                 raise ValueError(f"resources.{name} must be non-negative" if name == "synthesis_low_watermark"
                                  else f"resources.{name} must be positive")
         if self.significance_simulations < 2000:
             raise ValueError("resources.significance_simulations must be at least 2000")
+        if self.monte_carlo_scenarios < 500:
+            raise ValueError("resources.monte_carlo_scenarios must be at least 500")
         if self.synthesis_generate_limit > self.synthesis_inspect_limit:
             raise ValueError("resources.synthesis_generate_limit cannot exceed inspect limit")
         if self.synthesis_low_watermark >= self.synthesis_generate_limit:
@@ -81,6 +93,20 @@ class ResourcePolicy:
         ):
             if float(getattr(self, name)) < 0:
                 raise ValueError(f"resources.{name} must be non-negative")
+        if not 0 < float(self.portfolio_correlation_threshold) <= 1:
+            raise ValueError("resources.portfolio_correlation_threshold must be in (0, 1]")
+        if not 0 < float(self.portfolio_capacity_utilization_limit) <= 1:
+            raise ValueError(
+                "resources.portfolio_capacity_utilization_limit must be in (0, 1]"
+            )
+        if self.evaluation_anchor_date:
+            from datetime import date
+            try:
+                date.fromisoformat(self.evaluation_anchor_date)
+            except ValueError as error:
+                raise ValueError(
+                    "resources.evaluation_anchor_date must use YYYY-MM-DD"
+                ) from error
 
     def to_dict(self) -> dict:
         return asdict(self)

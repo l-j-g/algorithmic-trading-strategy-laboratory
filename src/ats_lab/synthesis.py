@@ -37,6 +37,11 @@ class SynthesisRequest:
     target_regime: str = ""
     failure_regime: str = ""
     edge_thesis: str = ""
+    thesis: str = ""
+    falsifiability_criteria: str = ""
+    entry_rule_summary: str = ""
+    why_this_now: str = ""
+    expected_edge_type: str = ""
     cohort_id: str | None = None
     cohort_slot: int | None = None
 
@@ -95,7 +100,23 @@ def synthesis_request_from_payload(payload: dict[str, Any]) -> SynthesisRequest:
         lane=payload.get("lane"), archetype=str(payload.get("archetype", "")),
         target_regime=str(payload.get("target_regime", "")),
         failure_regime=str(payload.get("failure_regime", "")),
-        edge_thesis=str(payload.get("edge_thesis", "")),
+        edge_thesis=str(payload.get("edge_thesis") or payload.get("expected_edge_type", "")),
+        thesis=str(payload.get("thesis") or payload["hypothesis"]),
+        falsifiability_criteria=str(
+            payload.get("falsifiability_criteria")
+            or "Reject when the stated edge is absent in the target regime."
+        ),
+        entry_rule_summary=str(payload.get("entry_rule_summary") or payload["entry_rule"]),
+        why_this_now=str(
+            payload.get("why_this_now")
+            or payload.get("controlled_change")
+            or "Selected from the current evidence and regime coverage."
+        ),
+        expected_edge_type=str(
+            payload.get("expected_edge_type")
+            or payload.get("edge_thesis")
+            or "unclassified"
+        ),
         cohort_id=payload.get("cohort_id"),
         cohort_slot=(int(payload["cohort_slot"]) if payload.get("cohort_slot") is not None else None),
     )
@@ -160,6 +181,11 @@ def synthesize(
         "target_regime": request.target_regime,
         "failure_regime": request.failure_regime,
         "edge_thesis": request.edge_thesis,
+        "thesis": request.thesis,
+        "falsifiability_criteria": request.falsifiability_criteria,
+        "entry_rule_summary": request.entry_rule_summary,
+        "why_this_now": request.why_this_now,
+        "expected_edge_type": request.expected_edge_type,
         "cohort_id": request.cohort_id,
         "cohort_slot": request.cohort_slot,
     }

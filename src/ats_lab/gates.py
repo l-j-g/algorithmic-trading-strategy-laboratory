@@ -59,7 +59,7 @@ def evaluate_promotion(
     *,
     policy: ResourcePolicy,
 ) -> PromotionDecision:
-    """Require OOS/rolling and explicit cost-stress evidence for promotion.
+    """Require validation, candle Monte Carlo, walk-forward, and cost stress.
 
     This is intentionally separate from :func:`evaluate_gates`: a profitable
     baseline remains valid research evidence and should still reach analysis,
@@ -82,6 +82,34 @@ def evaluate_promotion(
             name for name in quality.missing
             if name != "fees_cost_sensitivity"
         )
+
+    monte_carlo = tuple(
+        row for row in rows if row.lifecycle_stage == "monte_carlo"
+    )
+    if not monte_carlo:
+        missing.append("candle_based_monte_carlo")
+    else:
+        if any(row.monte_carlo_method != "candle_based" for row in monte_carlo):
+            failed.append("candle_based_monte_carlo")
+        scenarios = [row.monte_carlo_scenarios for row in monte_carlo]
+        if any(value is None for value in scenarios):
+            missing.append("monte_carlo_scenarios")
+        elif any(value < policy.monte_carlo_scenarios for value in scenarios):
+            failed.append("monte_carlo_scenarios")
+
+    walk_forward = tuple(
+        row for row in rows
+        if row.evidence_split == "rolling"
+        and row.walk_forward_method in {"walk_forward", "rolling"}
+    )
+    if not walk_forward:
+        missing.append("walk_forward")
+    else:
+        windows = [row.walk_forward_windows for row in walk_forward]
+        if any(value is None for value in windows):
+            missing.append("walk_forward_windows")
+        elif any(value < 2 for value in windows):
+            failed.append("walk_forward_windows")
 
     cost_rows = tuple(
         row for row in rows

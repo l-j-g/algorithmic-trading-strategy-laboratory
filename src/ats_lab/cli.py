@@ -989,7 +989,7 @@ def main() -> int:
             print(render_hpo_route_plan(plan))
     elif args.command == "hpo-defaults":
         database.initialize()
-        routes = default_hpo_routes()
+        routes = default_hpo_routes(load_resource_policy(repo / ".ats-lab" / "config.toml"))
         eligible = database.hpo_studies_needing_default_routes()
         if args.study_id:
             eligible = [

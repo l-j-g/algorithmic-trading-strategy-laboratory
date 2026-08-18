@@ -145,6 +145,22 @@ class WorkflowDatabase:
                     connection.execute(
                         f"ALTER TABLE direct_execution_sessions ADD COLUMN {name} {declaration}"
                     )
+            evidence_columns = {
+                row["name"] for row in connection.execute(
+                    "PRAGMA table_info(normalized_evidence)"
+                ).fetchall()
+            }
+            evidence_additions = {
+                "monte_carlo_scenarios": "INTEGER",
+                "monte_carlo_method": "TEXT",
+                "walk_forward_windows": "INTEGER",
+                "walk_forward_method": "TEXT",
+            }
+            for name, declaration in evidence_additions.items():
+                if name not in evidence_columns:
+                    connection.execute(
+                        f"ALTER TABLE normalized_evidence ADD COLUMN {name} {declaration}"
+                    )
             migration = connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (SCHEMA_VERSION, utc_now()),

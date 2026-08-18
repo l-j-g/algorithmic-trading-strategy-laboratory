@@ -21,6 +21,11 @@
     "target_regime": {"type": "string", "minLength": 1},
     "failure_regime": {"type": "string", "minLength": 1},
     "edge_thesis": {"type": "string", "minLength": 1},
+    "thesis": {"type": "string", "minLength": 1},
+    "falsifiability_criteria": {"type": "string", "minLength": 1},
+    "entry_rule_summary": {"type": "string", "minLength": 1},
+    "why_this_now": {"type": "string", "minLength": 1},
+    "expected_edge_type": {"type": "string", "minLength": 1},
     "cohort_id": {"type": ["string", "null"]},
     "cohort_slot": {"type": ["integer", "null"], "minimum": 0},
     "routes": {"type": "array", "minItems": 1, "items": {"$ref": "experiment-work-item.schema.json#/$defs/route"}}

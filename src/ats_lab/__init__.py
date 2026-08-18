@@ -1,3 +1,3 @@
 """Algorithmic Trading Strategy Laboratory."""
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
