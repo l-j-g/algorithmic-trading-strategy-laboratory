@@ -16,6 +16,16 @@ from .models import ExperimentSpec, ExperimentType, GateSpec, RouteSpec, WorkIte
 ENTRY_CHANGE_SCOPES = {"new_entry", "entry_changed"}
 NON_ENTRY_CHANGE_SCOPES = {"exit_only", "sizing_only", "risk_only", "refactor"}
 SYNTHESIS_ACTIONS = {"new", "revise"}
+PROPOSAL_TYPES = {"new_concept", "controlled_improvement"}
+TYPED_PROPOSAL_MARKERS = {
+    "type", "thesis", "falsifiability_criteria", "entry_rule_summary",
+    "why_this_now", "expected_edge_type",
+}
+TYPED_PROPOSAL_REQUIRED_FIELDS = {
+    "type", "source_experiment_id", "controlled_change", "thesis", "archetype",
+    "target_regime", "failure_regime", "falsifiability_criteria", "entry_rule_summary",
+    "why_this_now", "expected_edge_type",
+}
 
 
 @dataclass(frozen=True)
@@ -37,6 +47,10 @@ class SynthesisRequest:
     target_regime: str = ""
     failure_regime: str = ""
     edge_thesis: str = ""
+    proposal_type: str | None = None
+    falsifiability_criteria: str = ""
+    why_this_now: str = ""
+    expected_edge_type: str = ""
     cohort_id: str | None = None
     cohort_slot: int | None = None
 
@@ -62,6 +76,7 @@ def synthesis_request_from_file(path: Path) -> SynthesisRequest:
 
 
 def synthesis_request_from_payload(payload: dict[str, Any]) -> SynthesisRequest:
+    payload, proposal_type = _normalize_typed_proposal(payload)
     if payload.get("schema_version") != 1:
         raise ValueError("schema_version must be 1")
     required = ("strategy_name", "hypothesis", "entry_rule", "change_scope", "routes")
@@ -96,9 +111,67 @@ def synthesis_request_from_payload(payload: dict[str, Any]) -> SynthesisRequest:
         target_regime=str(payload.get("target_regime", "")),
         failure_regime=str(payload.get("failure_regime", "")),
         edge_thesis=str(payload.get("edge_thesis", "")),
+        proposal_type=proposal_type,
+        falsifiability_criteria=str(payload.get("falsifiability_criteria", "")),
+        why_this_now=str(payload.get("why_this_now", "")),
+        expected_edge_type=str(payload.get("expected_edge_type", "")),
         cohort_id=payload.get("cohort_id"),
         cohort_slot=(int(payload["cohort_slot"]) if payload.get("cohort_slot") is not None else None),
     )
+
+
+def _normalize_typed_proposal(payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Validate an agent proposal and map its typed fields to the legacy request.
+
+    Legacy CLI/manual payloads intentionally remain supported. Presence of the new
+    ``type`` marker, or any typed-only field, opts into strict validation so partial
+    or ambiguous agent proposals cannot reach deterministic persistence.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("synthesis request must be an object")
+    if not TYPED_PROPOSAL_MARKERS.intersection(payload):
+        return dict(payload), None
+
+    missing = sorted(TYPED_PROPOSAL_REQUIRED_FIELDS - payload.keys())
+    if missing:
+        raise ValueError("typed proposal missing fields: " + ", ".join(missing))
+    proposal_type = payload["type"]
+    if proposal_type not in PROPOSAL_TYPES:
+        raise ValueError(f"unsupported proposal type: {proposal_type}")
+
+    normalized = dict(payload)
+    for name in TYPED_PROPOSAL_REQUIRED_FIELDS - {"source_experiment_id", "controlled_change"}:
+        value = payload[name]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"typed proposal field must be a non-empty string: {name}")
+    source_experiment_id = payload["source_experiment_id"]
+    controlled_change = payload["controlled_change"]
+    if proposal_type == "new_concept":
+        if source_experiment_id is not None:
+            raise ValueError("new_concept source_experiment_id must be null")
+        if not isinstance(controlled_change, str):
+            raise ValueError("typed proposal field must be a string: controlled_change")
+        expected_action, expected_lane = "new", "new_concept"
+        normalized.setdefault("change_scope", "new_entry")
+    else:
+        if not isinstance(source_experiment_id, str) or not source_experiment_id.strip():
+            raise ValueError("controlled_improvement source_experiment_id must be non-empty")
+        if not isinstance(controlled_change, str) or not controlled_change.strip():
+            raise ValueError("controlled_improvement controlled_change must be non-empty")
+        expected_action, expected_lane = "revise", "improvement"
+        if not payload.get("change_scope"):
+            raise ValueError("controlled_improvement requires change_scope")
+
+    if payload.get("action", expected_action) != expected_action:
+        raise ValueError(f"{proposal_type} proposal requires action={expected_action}")
+    if payload.get("lane", expected_lane) != expected_lane:
+        raise ValueError(f"{proposal_type} proposal requires lane={expected_lane}")
+    normalized["action"] = expected_action
+    normalized["lane"] = expected_lane
+    normalized.setdefault("hypothesis", payload["thesis"])
+    normalized.setdefault("entry_rule", payload["entry_rule_summary"])
+    normalized.setdefault("edge_thesis", payload["expected_edge_type"])
+    return normalized, proposal_type
 
 
 def _slug(value: str) -> str:
@@ -160,6 +233,12 @@ def synthesize(
         "target_regime": request.target_regime,
         "failure_regime": request.failure_regime,
         "edge_thesis": request.edge_thesis,
+        "proposal_type": request.proposal_type,
+        "thesis": request.hypothesis,
+        "falsifiability_criteria": request.falsifiability_criteria,
+        "entry_rule_summary": request.entry_rule,
+        "why_this_now": request.why_this_now,
+        "expected_edge_type": request.expected_edge_type,
         "cohort_id": request.cohort_id,
         "cohort_slot": request.cohort_slot,
     }

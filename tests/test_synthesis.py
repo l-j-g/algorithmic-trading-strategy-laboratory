@@ -6,7 +6,11 @@ from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import RouteSpec, RunResult, RunStatus
-from ats_lab.synthesis import SynthesisRequest, synthesize
+from ats_lab.synthesis import (
+    SynthesisRequest,
+    synthesis_request_from_payload,
+    synthesize,
+)
 
 
 ROUTE = RouteSpec(
@@ -14,8 +18,80 @@ ROUTE = RouteSpec(
     start_date="2024-01-01", finish_date="2025-12-31",
 )
 
+ROUTE_PAYLOAD = ROUTE.__dict__
+
 
 class SynthesisTests(unittest.TestCase):
+    def typed_payload(self, proposal_type: str = "new_concept") -> dict:
+        payload = {
+            "schema_version": 1,
+            "type": proposal_type,
+            "source_experiment_id": None,
+            "controlled_change": "",
+            "thesis": "Compression releases into directional expansion.",
+            "archetype": "breakout",
+            "target_regime": "volatility expansion",
+            "failure_regime": "false breakout",
+            "falsifiability_criteria": "Reject if edge disappears after costs in out-of-sample candles.",
+            "entry_rule_summary": "Close breaks the twenty-bar high after low ATR.",
+            "why_this_now": "Recent evidence shows compression is under-tested.",
+            "expected_edge_type": "volatility expansion continuation",
+            "strategy_name": "TypedBreakout",
+            "change_scope": "new_entry",
+            "routes": [ROUTE_PAYLOAD],
+        }
+        if proposal_type == "controlled_improvement":
+            payload.update({
+                "source_experiment_id": "EXP-1",
+                "controlled_change": "Add an ATR expansion confirmation.",
+                "change_scope": "entry_changed",
+            })
+        return payload
+
+    def test_valid_new_concept_typed_proposal(self) -> None:
+        request = synthesis_request_from_payload(self.typed_payload())
+        self.assertEqual(request.action, "new")
+        self.assertEqual(request.lane, "new_concept")
+        self.assertIsNone(request.source_experiment_id)
+        self.assertEqual(request.hypothesis, "Compression releases into directional expansion.")
+        self.assertEqual(request.entry_rule, "Close breaks the twenty-bar high after low ATR.")
+        self.assertEqual(request.proposal_type, "new_concept")
+
+    def test_valid_controlled_improvement_typed_proposal(self) -> None:
+        request = synthesis_request_from_payload(self.typed_payload("controlled_improvement"))
+        self.assertEqual(request.action, "revise")
+        self.assertEqual(request.lane, "improvement")
+        self.assertEqual(request.source_experiment_id, "EXP-1")
+        self.assertEqual(request.controlled_change, "Add an ATR expansion confirmation.")
+
+    def test_malformed_typed_proposal_fails_closed(self) -> None:
+        payload = self.typed_payload()
+        del payload["falsifiability_criteria"]
+        with self.assertRaisesRegex(ValueError, "typed proposal missing fields"):
+            synthesis_request_from_payload(payload)
+
+        payload = self.typed_payload()
+        payload["type"] = "improvement"
+        with self.assertRaisesRegex(ValueError, "unsupported proposal type"):
+            synthesis_request_from_payload(payload)
+
+        payload = self.typed_payload("controlled_improvement")
+        payload["source_experiment_id"] = None
+        with self.assertRaisesRegex(ValueError, "source_experiment_id must be non-empty"):
+            synthesis_request_from_payload(payload)
+
+    def test_legacy_manual_payload_remains_compatible(self) -> None:
+        request = synthesis_request_from_payload({
+            "schema_version": 1,
+            "strategy_name": "ManualStrategy",
+            "hypothesis": "Manual hypothesis.",
+            "entry_rule": "Manual entry rule.",
+            "change_scope": "new_entry",
+            "routes": [ROUTE_PAYLOAD],
+        })
+        self.assertEqual(request.action, "new")
+        self.assertIsNone(request.proposal_type)
+
     def make_request(self, scope: str = "new_entry") -> SynthesisRequest:
         return SynthesisRequest(
             strategy_name="TrendPullback", hypothesis="Trend pullbacks continue.",
