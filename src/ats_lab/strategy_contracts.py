@@ -92,6 +92,15 @@ class StrategyContractValidator:
                     "beta variants require a BTC benchmark data_route",
                 ))
 
+        if _is_liquidation_stress(experiment, request.get("work_item")):
+            leverage_mode = _leverage_mode(experiment, request.get("work_item"))
+            if leverage_mode != "isolated":
+                issues.append(ContractIssue(
+                    "liquidation_stress_requires_isolated",
+                    "liquidation-stress jobs require futures_leverage_mode=isolated; "
+                    "cross mode has no account-level liquidation model",
+                ))
+
         sizing = experiment.get("sizing_model")
         if sizing is not None and not isinstance(sizing, str):
             issues.append(ContractIssue("invalid_sizing_model", "sizing_model must be text"))
@@ -232,3 +241,45 @@ def _has_btc_benchmark_data_route(
         if normalized == "BTCUSDT":
             return True
     return False
+
+
+def _is_liquidation_stress(
+    experiment: Mapping[str, Any], work_item: object,
+) -> bool:
+    """Identify explicit liquidation-stress jobs without guessing from prose."""
+    payloads = [experiment]
+    if isinstance(work_item, Mapping):
+        payloads.append(work_item)
+        specification = work_item.get("specification")
+        if isinstance(specification, Mapping):
+            payloads.append(specification)
+    for payload in payloads:
+        for key in ("liquidation_stress", "liq_stress", "liquidation_test"):
+            if payload.get(key) is True:
+                return True
+        labels = payload.get("labels")
+        if isinstance(labels, (list, tuple, set)) and any(
+            str(label).casefold().replace("-", "_") in {
+                "liquidation_stress", "liq_stress", "liquidation_test",
+            }
+            for label in labels
+        ):
+            return True
+    return False
+
+
+def _leverage_mode(
+    experiment: Mapping[str, Any], work_item: object,
+) -> str:
+    """Read the explicit session mode; default matches the Jesse adapter."""
+    payloads = [experiment]
+    if isinstance(work_item, Mapping):
+        payloads.append(work_item)
+        specification = work_item.get("specification")
+        if isinstance(specification, Mapping):
+            payloads.append(specification)
+    for payload in payloads:
+        value = payload.get("futures_leverage_mode", payload.get("leverage_mode"))
+        if value is not None:
+            return str(value).casefold().replace("-", "_").replace(" ", "_")
+    return "cross"

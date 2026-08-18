@@ -73,6 +73,24 @@ class StrategyContractValidatorTests(unittest.TestCase):
             "experiment": {"variant": "trend", "routes": []},
         }), ())
 
+    def test_liquidation_stress_requires_isolated_mode(self) -> None:
+        issues = self.validator.validate_request({
+            "experiment": {"liquidation_stress": True, "leverage_mode": "cross"},
+        })
+        self.assertEqual(
+            {issue.code for issue in issues},
+            {"liquidation_stress_requires_isolated"},
+        )
+
+    def test_isolated_liquidation_stress_is_allowed(self) -> None:
+        issues = self.validator.validate_request({
+            "experiment": {
+                "liquidation_stress": True,
+                "futures_leverage_mode": "isolated",
+            },
+        })
+        self.assertEqual(issues, ())
+
     def test_declared_l_max_uses_session_leverage_sizing_cap(self) -> None:
         self.assertEqual(
             max_entry_notional(10_000, 3, l_max=5),

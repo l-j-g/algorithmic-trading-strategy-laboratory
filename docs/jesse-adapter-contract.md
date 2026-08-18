@@ -34,6 +34,10 @@ observed effective leverage:
 Compact session polling returns status, metrics, and liquidation count without
 the trade/order collection. Full trades remain a diagnostic-only path.
 
+Cross mode does not currently expose an account-level liquidation model. ATS
+therefore rejects explicitly labelled liquidation-stress jobs unless their
+session snapshot sets `futures_leverage_mode` to `isolated`.
+
 Python producers and consumers use `JesseExecutionRequest` and
 `JesseExecutionResult` from `ats_lab.jesse_contracts`.
 
