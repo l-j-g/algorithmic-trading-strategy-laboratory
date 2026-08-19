@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from ats_lab.agent_launcher import (
     AgentLauncherConfig,
+    _decode_first_json_object,
     build_command,
     build_prompt,
     launch,
@@ -164,6 +165,39 @@ class AgentLauncherTests(unittest.TestCase):
             AgentLauncherConfig(Path("/tmp")), runner=runner,
         )
         self.assertEqual(result["blocker_code"], "invalid_executor_contract")
+
+    @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
+    def test_launch_tolerates_trailing_junk_after_json(self, _which) -> None:
+        runner = Mock(return_value=subprocess.CompletedProcess(
+            [], 0,
+            '{"outcome":"finished","evidence":{}}\nHere is my analysis...\n'
+            "Everything looks fine.",
+            "",
+        ))
+        result = launch(
+            {"work_item_id": "JOB-1"},
+            AgentLauncherConfig(Path("/tmp")), runner=runner,
+        )
+        self.assertEqual(result["outcome"], "finished")
+
+    @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
+    def test_launch_rejects_non_json_stdout(self, _which) -> None:
+        runner = Mock(return_value=subprocess.CompletedProcess(
+            [], 0, "No JSON here at all", "",
+        ))
+        result = launch(
+            {"work_item_id": "JOB-1"},
+            AgentLauncherConfig(Path("/tmp")), runner=runner,
+        )
+        self.assertEqual(result["outcome"], "retry")
+        self.assertEqual(result["blocker_code"], "invalid_executor_result")
+
+    def test_decode_first_json_object_skips_trailing_commentary(self) -> None:
+        decoded = _decode_first_json_object(
+            '{"outcome":"finished","detail":"ok"}\n'
+            "Extra explanatory text on line two.",
+        )
+        self.assertEqual(decoded, {"outcome": "finished", "detail": "ok"})
 
     @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
     def test_launch_uses_argv_without_shell_and_configured_cwd(self, _which) -> None:

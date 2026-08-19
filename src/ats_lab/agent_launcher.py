@@ -121,6 +121,23 @@ def _optional_string(value: object, name: str) -> str | None:
     return value
 
 
+def _decode_first_json_object(text: str) -> Any:
+    """Parse the first JSON object in agent stdout, tolerating trailing
+    commentary some hosted models append after the single required object.
+
+    Raises json.JSONDecodeError when no complete JSON object exists.
+    """
+    decoder = json.JSONDecoder()
+    stripped = (text or "").lstrip()
+    try:
+        obj, _end = decoder.raw_decode(stripped)
+    except ValueError as error:
+        raise json.JSONDecodeError(
+            str(error), text or "", getattr(error, "pos", 0),
+        ) from error
+    return obj
+
+
 def build_prompt(request: Mapping[str, Any]) -> str:
     serialized = json.dumps(request, separators=(",", ":"), sort_keys=True)
     task_type = request.get("task_type")
@@ -476,7 +493,7 @@ def launch(
         detail = completed.stderr.strip() or f"Agent exited {completed.returncode}"
         return {"outcome": "retry", "blocker_code": "executor_failed", "detail": detail}
     try:
-        result = json.loads(completed.stdout)
+        result = _decode_first_json_object(completed.stdout)
     except json.JSONDecodeError as error:
         if usage.get("failed"):
             return {
