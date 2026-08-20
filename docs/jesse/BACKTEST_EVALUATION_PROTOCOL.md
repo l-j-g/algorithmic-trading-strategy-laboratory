@@ -102,12 +102,21 @@ Revise if:
 - trade count is low but signal quality is plausible
 - one symbol/timeframe works and others fail, suggesting regime or route filter needed
 
+Trade-count interpretation is window-normalized. A short 90-day or
+low-frequency 4h study is not rejected merely because it cannot produce 100
+trades. The hard floor is only a sample-adequacy screen; significance,
+independent windows, fees, drawdown, and liquidation behavior remain required.
+
 ### HPO candidate
 
 Only consider HPO if:
 
 - baseline is positive after fees
-- at least 100 trades across the relevant route set, or a clear reason why lower frequency is acceptable
+- every dated route/window clears the normalized activity floor:
+  `max(12, ceil(20 * window_days / 365.25))` trades; legacy rows without
+  complete dates use the configured fallback
+- at least two independent windows are positive or flat when the strategy is
+  low-frequency; trade count alone never substitutes for route/regime evidence
 - multiple windows are positive or flat rather than catastrophic
 - no single route dominates all performance
 - fee sensitivity does not destroy the edge

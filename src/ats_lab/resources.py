@@ -97,6 +97,8 @@ class ResourcePolicy:
     analyzer_timeout_seconds: int = 900
     analyzer_retry_limit: int = 1
     minimum_trades: int = 50
+    minimum_trades_per_year: int = 20
+    minimum_trade_floor: int = 12
     maximum_drawdown_percentage: float = 30.0
     minimum_sharpe_ratio: float = 0.0
     minimum_profit_factor: float = 1.0
@@ -118,7 +120,7 @@ class ResourcePolicy:
             "claim_timeout_seconds", "execution_batch_size", "active_ready_limit",
             "analysis_cohort_min", "analysis_cohort_max",
             "analysis_parallelism", "analyzer_timeout_seconds",
-            "minimum_trades",
+            "minimum_trades", "minimum_trades_per_year", "minimum_trade_floor",
         ):
             if int(getattr(self, name)) < (0 if name == "synthesis_low_watermark" else 1):
                 raise ValueError(f"resources.{name} must be non-negative" if name == "synthesis_low_watermark"

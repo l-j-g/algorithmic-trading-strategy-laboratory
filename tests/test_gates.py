@@ -59,6 +59,24 @@ class GateTests(unittest.TestCase):
         self.assertIn("max_drawdown", decision.failed)
         self.assertIn("minimum_trades", decision.failed)
 
+    def test_trade_floor_scales_with_dated_window(self) -> None:
+        decision = evaluate_gates(
+            [self.row(trade_count=25)],
+            policy=ResourcePolicy(),
+        )
+        self.assertNotIn("minimum_trades", decision.failed)
+
+    def test_trade_floor_keeps_hard_floor_for_short_window(self) -> None:
+        decision = evaluate_gates(
+            [self.row(
+                start_date="2026-01-01",
+                finish_date="2026-03-01",
+                trade_count=11,
+            )],
+            policy=ResourcePolicy(),
+        )
+        self.assertIn("minimum_trades", decision.failed)
+
     def test_train_holdout_degradation_uses_canonical_split(self) -> None:
         train = self.row(
             evidence_split=EvidenceSplit.TRAIN,
