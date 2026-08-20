@@ -414,7 +414,7 @@ def render_page(database: WorkflowDatabase, page: str, params: dict[str, str]) -
         _render_evidence_table(rows)
         if page in {"candidates", "runs"}
         else _render_hpo_table(rows) if page == "hpo"
-        else _render_generic_table(rows)
+        else _render_generic_table(rows, actions=page == "queue")
     )
     live = f"""<section class=cards>{cards}</section>
 <h2>{html.escape(spec['title'])} <small>{len(rows)} shown</small></h2>{table}"""
@@ -426,7 +426,7 @@ def render_page(database: WorkflowDatabase, page: str, params: dict[str, str]) -
 <label>search<input name=q value="{html.escape(clean.get('q', ''), quote=True)}" maxlength=200 placeholder="ID, strategy, metrics…"></label>
 {filter_control}<label>sort<select name=sort>{sort_options}</select></label><button>Apply</button><a href="/{page}">Clear</a></form>
 <div id=live-content>{live}</div>
-</main><footer>Read-only local view · maximum 500 rows</footer></body></html>"""
+</main><footer>Local operator view · retry/rectify actions audited · maximum 500 rows</footer></body></html>"""
 
 
 def render_fragment(database: WorkflowDatabase, page: str, params: dict[str, str]) -> str:
@@ -436,7 +436,7 @@ def render_fragment(database: WorkflowDatabase, page: str, params: dict[str, str
         _render_evidence_table(rows)
         if page in {"candidates", "runs"}
         else _render_hpo_table(rows) if page == "hpo"
-        else _render_generic_table(rows)
+        else _render_generic_table(rows, actions=page == "queue")
     )
     return f"""<section class=cards>{_render_cards(dashboard_counts(database))}</section>
 <h2>{html.escape(spec['title'])} <small>{len(rows)} shown</small></h2>
@@ -766,15 +766,18 @@ def _render_hpo_detail(detail: Mapping[str, Any]) -> str:
     )
 
 
-def _render_generic_table(rows: list[dict]) -> str:
+def _render_generic_table(rows: list[dict], *, actions: bool = False) -> str:
     columns = list(rows[0]) if rows else []
     header = "".join(
         f"<th>{html.escape(column.replace('_', ' '))}</th>"
         for column in columns
     )
+    if actions:
+        header += "<th>actions</th>"
     body = "".join(
         "<tr>"
         + "".join(_render_cell(column, row[column]) for column in columns)
+        + (_render_queue_actions(row) if actions else "")
         + "</tr>"
         for row in rows
     )
@@ -783,6 +786,21 @@ def _render_generic_table(rows: list[dict]) -> str:
     return (
         f'<div class=table-wrap><table><thead><tr>{header}</tr></thead>'
         f"<tbody>{body}</tbody></table></div>"
+    )
+
+
+def _render_queue_actions(row: Mapping[str, Any]) -> str:
+    if row.get("state") != "blocked":
+        return "<td class=actions>—</td>"
+    work_item_id = html.escape(str(row.get("id") or ""), quote=True)
+    return (
+        '<td class=actions>'
+        f'<form data-work-item-action="retry" data-work-item-id="{work_item_id}">'
+        '<button type="submit" title="Preserve old evidence and run again">retry</button>'
+        "</form>"
+        f'<form data-work-item-action="rectify" data-work-item-id="{work_item_id}">'
+        '<button type="submit" title="Archive blocker without running">rectify</button>'
+        "</form></td>"
     )
 
 
@@ -1052,12 +1070,85 @@ def make_handler(database: WorkflowDatabase) -> type[BaseHTTPRequestHandler]:
                        else render_page(database, page, params)).encode()
             self._send(payload, "text/html; charset=utf-8")
 
-        def _send(self, payload: bytes, content_type: str) -> None:
-            self.send_response(200)
+        def do_POST(self) -> None:  # noqa: N802
+            request = urlsplit(self.path)
+            prefix = "/api/work-items/"
+            if not request.path.startswith(prefix):
+                self._send(_json_bytes({
+                    "error": {"code": "not_found", "detail": "action not found"},
+                }), "application/json", status=404)
+                return
+            parts = request.path.removeprefix(prefix).strip("/").split("/")
+            if len(parts) != 2 or parts[1] not in {"retry", "rectify"}:
+                self._send(_json_bytes({
+                    "error": {"code": "not_found", "detail": "action not found"},
+                }), "application/json", status=404)
+                return
+            work_item_id = unquote(parts[0])
+            action = parts[1]
+            if not work_item_id or "/" in work_item_id:
+                self._send(_json_bytes({
+                    "error": {"code": "not_found", "detail": "work item not found"},
+                }), "application/json", status=404)
+                return
+            if self.headers.get("X-ATS-Lab-Confirm") != action:
+                self._send(_json_bytes({
+                    "error": {
+                        "code": "confirmation_required",
+                        "detail": f"send X-ATS-Lab-Confirm: {action} to confirm action",
+                    },
+                }), "application/json", status=428)
+                return
+            try:
+                payload = self._request_json()
+                reason = str(payload.get("reason") or f"dashboard {action}")[:500]
+                if action == "retry":
+                    row = database.retry_blocked_work_item(
+                        work_item_id, reason=reason,
+                    )
+                    result = {
+                        "action": action, "work_item_id": work_item_id,
+                        "state": row["state"], "promoted": row.get("promoted", 0),
+                    }
+                else:
+                    row = database.rectify_blocked_work_item(
+                        work_item_id, reason=reason,
+                    )
+                    result = {
+                        "action": action, "work_item_id": work_item_id,
+                        "state": row["state"],
+                    }
+                self._send(_json_bytes(result), "application/json")
+            except KeyError as error:
+                self._send(_json_bytes({
+                    "error": {"code": "not_found", "detail": str(error)},
+                }), "application/json", status=404)
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                self._send(_json_bytes({
+                    "error": {"code": "invalid_request", "detail": str(error)},
+                }), "application/json", status=400)
+
+        def _request_json(self) -> dict[str, object]:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError as error:
+                raise ValueError("invalid Content-Length") from error
+            if length < 0 or length > 32_768:
+                raise ValueError("request body too large")
+            raw = self.rfile.read(length)
+            if not raw:
+                return {}
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be a JSON object")
+            return payload
+
+        def _send(self, payload: bytes, content_type: str, *, status: int = 200) -> None:
+            self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(payload)
@@ -1094,7 +1185,7 @@ def main() -> int:
 
 STYLE = """
 :root{color-scheme:dark;--bg:#101418;--panel:#192027;--line:#303a44;--text:#e7edf2;--muted:#9eabb6;--accent:#55d6a9}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}header{display:flex;align-items:center;gap:2rem;padding:1rem 2rem;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:3}h1{font-size:1.2rem;margin:0}nav{display:flex;gap:.5rem}a{color:var(--accent);text-decoration:none}nav a{padding:.45rem .7rem;border-radius:6px}nav a.active{background:var(--panel)}main{padding:1.5rem 2rem}.live-controls{margin-left:auto;display:flex;align-items:center;gap:.6rem}.live-controls label{display:flex;align-items:center;gap:.3rem}.live-controls input{min-width:auto}.cards{display:flex;gap:1rem;flex-wrap:wrap}.card{background:var(--panel);border:1px solid var(--line);padding:.8rem 1.2rem;border-radius:8px;min-width:110px}.card b{font-size:1.5rem;display:block}.card span,small,footer{color:var(--muted)}form{display:flex;gap:1rem;align-items:end;flex-wrap:wrap;margin:1.5rem 0}label{display:grid;gap:.3rem;color:var(--muted)}input,select,button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:.5rem}input{min-width:260px}button{cursor:pointer}h2{margin-top:1.5rem}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px}table{border-collapse:collapse;width:100%;min-width:900px}th,td{text-align:left;padding:.65rem;border-bottom:1px solid var(--line);vertical-align:top}th{position:sticky;top:0;background:var(--panel)}td.detail{min-width:200px;max-width:520px;white-space:normal}.empty{text-align:center;color:var(--muted);padding:2rem}.positive{color:#55d6a9}.negative{color:#ff7b86}details dl{display:grid;grid-template-columns:max-content minmax(100px,1fr);gap:.25rem .7rem;min-width:320px}details dt{color:var(--muted)}details dd{margin:0}.chart-panel{margin-top:1.5rem;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1.2rem}.chart-heading{display:flex;align-items:start;justify-content:space-between;gap:2rem}.chart-heading h2{margin:0}.chart-heading form{margin:0}.chart-heading input{min-width:100px;width:120px}.leaderboard{margin-top:1.3rem}.leaderboard table{min-width:1150px}.leaderboard td{font-variant-numeric:tabular-nums}.leaderboard td:nth-child(2){min-width:180px}.leaderboard .context{display:block}.leaderboard .ranked{background:#20352f;color:var(--accent);font-weight:700}footer{padding:1rem 2rem}@media(max-width:800px){header{position:static;display:block;padding:1rem}nav{margin-top:.7rem;overflow:auto}.live-controls{margin-top:.8rem}.chart-heading{display:block}.chart-heading form{margin-top:1rem}main{padding:1rem}input{min-width:200px}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}header{display:flex;align-items:center;gap:2rem;padding:1rem 2rem;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:3}h1{font-size:1.2rem;margin:0}nav{display:flex;gap:.5rem}a{color:var(--accent);text-decoration:none}nav a{padding:.45rem .7rem;border-radius:6px}nav a.active{background:var(--panel)}main{padding:1.5rem 2rem}.live-controls{margin-left:auto;display:flex;align-items:center;gap:.6rem}.live-controls label{display:flex;align-items:center;gap:.3rem}.live-controls input{min-width:auto}.cards{display:flex;gap:1rem;flex-wrap:wrap}.card{background:var(--panel);border:1px solid var(--line);padding:.8rem 1.2rem;border-radius:8px;min-width:110px}.card b{font-size:1.5rem;display:block}.card span,small,footer{color:var(--muted)}form{display:flex;gap:1rem;align-items:end;flex-wrap:wrap;margin:1.5rem 0}label{display:grid;gap:.3rem;color:var(--muted)}input,select,button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:.5rem}input{min-width:260px}button{cursor:pointer}h2{margin-top:1.5rem}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px}table{border-collapse:collapse;width:100%;min-width:900px}th,td{text-align:left;padding:.65rem;border-bottom:1px solid var(--line);vertical-align:top}th{position:sticky;top:0;background:var(--panel)}td.detail{min-width:200px;max-width:520px;white-space:normal}.actions{white-space:nowrap}.actions form{display:inline-block;margin:0 .25rem 0 0}.actions button{padding:.3rem .45rem}.empty{text-align:center;color:var(--muted);padding:2rem}.positive{color:#55d6a9}.negative{color:#ff7b86}details dl{display:grid;grid-template-columns:max-content minmax(100px,1fr);gap:.25rem .7rem;min-width:320px}details dt{color:var(--muted)}details dd{margin:0}.chart-panel{margin-top:1.5rem;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1.2rem}.chart-heading{display:flex;align-items:start;justify-content:space-between;gap:2rem}.chart-heading h2{margin:0}.chart-heading form{margin:0}.chart-heading input{min-width:100px;width:120px}.leaderboard{margin-top:1.3rem}.leaderboard table{min-width:1150px}.leaderboard td{font-variant-numeric:tabular-nums}.leaderboard td:nth-child(2){min-width:180px}.leaderboard .context{display:block}.leaderboard .ranked{background:#20352f;color:var(--accent);font-weight:700}footer{padding:1rem 2rem}@media(max-width:800px){header{position:static;display:block;padding:1rem}nav{margin-top:.7rem;overflow:auto}.live-controls{margin-top:.8rem}.chart-heading{display:block}.chart-heading form{margin-top:1rem}main{padding:1rem}input{min-width:200px}}
 """
 
 DASHBOARD_JS = r"""
@@ -1187,6 +1278,40 @@ DASHBOARD_JS = r"""
     }
     finally { busy = false; }
   }
+  document.addEventListener('submit', async event => {
+    const form = event.target.closest('form[data-work-item-action]');
+    if (!form) return;
+    event.preventDefault();
+    const action = form.dataset.workItemAction;
+    const workItemId = form.dataset.workItemId;
+    const button = form.querySelector('button');
+    if (!action || !workItemId || !button) return;
+    const label = action === 'retry' ? 'retry this blocked work item' : 'rectify this blocker without running it';
+    if (!window.confirm(`Confirm: ${label}?\n\n${workItemId}`)) return;
+    button.disabled = true;
+    try {
+      const response = await fetch(`/api/work-items/${encodeURIComponent(workItemId)}/${action}`, {
+        method: 'POST',
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Content-Type': 'application/json',
+          'X-ATS-Lab-Confirm': action,
+        },
+        body: JSON.stringify({reason: `dashboard ${action}`}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error?.detail || `HTTP ${response.status}`);
+      stamp(true, `${action} applied`);
+      await refresh();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error('ATS queue action failed', {action, workItemId, detail, error});
+      stamp(false, detail);
+    } finally {
+      button.disabled = false;
+    }
+  });
   function drawChart(rows) {
     const target = document.querySelector('#top-chart');
     if (!rows.length) { target.innerHTML = '<p class=empty>No qualifying finished backtests yet.</p>'; return; }

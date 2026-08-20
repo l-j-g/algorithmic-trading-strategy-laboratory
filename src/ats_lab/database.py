@@ -2430,6 +2430,115 @@ class WorkflowDatabase:
                 "SELECT * FROM work_items WHERE id=?", (work_item_id,)
             ).fetchone())
 
+    def retry_blocked_work_item(
+        self,
+        work_item_id: str,
+        *,
+        reason: str = "operator requested retry",
+        active_limit: int = 5,
+    ) -> dict:
+        """Requeue one blocked item while preserving its prior failure event."""
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("retry reason is required")
+        if active_limit < 1:
+            raise ValueError("active_limit must be positive")
+        now = utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE id=?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown work item: {work_item_id}")
+            if row["state"] != WorkState.BLOCKED.value:
+                raise ValueError(
+                    f"cannot retry {work_item_id} from {row['state']}"
+                )
+            connection.execute(
+                """UPDATE work_items SET state='scheduled',attempts=0,
+                   retry_after=NULL,blocker_code=NULL,blocker_detail=NULL,
+                   claimed_by=NULL,claimed_at=NULL,updated_at=?
+                   WHERE id=? AND state='blocked'""",
+                (now, work_item_id),
+            )
+            connection.execute(
+                """INSERT INTO events(
+                       aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                   ) VALUES ('work_item',?,'blocker_retry_requested',?,?)""",
+                (
+                    work_item_id,
+                    json.dumps({
+                        "from": "blocked",
+                        "to": "scheduled",
+                        "previous_attempts": row["attempts"],
+                        "previous_blocker_code": row["blocker_code"],
+                        "previous_blocker_detail": row["blocker_detail"],
+                        "reason": reason,
+                        "attempts_reset": True,
+                        "prior_runs_preserved": True,
+                    }, sort_keys=True),
+                    now,
+                ),
+            )
+        promoted = self.promote_scheduled_runnable(active_limit)
+        result = dict(self.rows(
+            "SELECT * FROM work_items WHERE id=?", (work_item_id,)
+        )[0])
+        result["promoted"] = promoted
+        return result
+
+    def rectify_blocked_work_item(
+        self,
+        work_item_id: str,
+        *,
+        reason: str = "operator rectified historical blocker",
+    ) -> dict:
+        """Archive one blocker without executing it, preserving the audit trail."""
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("rectification reason is required")
+        now = utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE id=?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown work item: {work_item_id}")
+            if row["state"] != WorkState.BLOCKED.value:
+                raise ValueError(
+                    f"cannot rectify {work_item_id} from {row['state']}"
+                )
+            connection.execute(
+                """UPDATE work_items SET state='archived',retry_after=NULL,
+                   blocker_code='legacy_history',blocker_detail=?,
+                   claimed_by=NULL,claimed_at=NULL,updated_at=?
+                   WHERE id=? AND state='blocked'""",
+                (f"Rectified by operator: {reason}", now, work_item_id),
+            )
+            connection.execute(
+                """INSERT INTO events(
+                       aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                   ) VALUES ('work_item',?,'blocker_rectified',?,?)""",
+                (
+                    work_item_id,
+                    json.dumps({
+                        "from": "blocked",
+                        "to": "archived",
+                        "previous_attempts": row["attempts"],
+                        "previous_blocker_code": row["blocker_code"],
+                        "previous_blocker_detail": row["blocker_detail"],
+                        "reason": reason,
+                        "execution_started": False,
+                    }, sort_keys=True),
+                    now,
+                ),
+            )
+            return dict(connection.execute(
+                "SELECT * FROM work_items WHERE id=?", (work_item_id,)
+            ).fetchone())
+
     def promote_due_retries(self) -> int:
         """Return retryable work to ready state using lexicographic ISO-8601 UTC timestamps."""
         now = utc_now()

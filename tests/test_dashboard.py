@@ -98,6 +98,8 @@ class DashboardTests(unittest.TestCase):
         run_page = render_page(self.database, "runs", {})
         self.assertNotIn("<script>alert(1)</script>", page)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
+        self.assertIn('data-work-item-action="retry"', page)
+        self.assertIn('data-work-item-action="rectify"', page)
         self.assertIn("<summary>standardized</summary>", run_page)
         self.assertNotIn("diagnostic-only", run_page)
         self.assertIn("—", run_page)
@@ -390,6 +392,77 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 self.assertIsInstance(rows, list)
                 self.assertEqual(rows[0]["run_id"], "RUN-1")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_queue_actions_require_confirmation_and_write_audit_events(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.database))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = urllib.request.Request(
+                f"{base}/api/work-items/JOB-1/retry",
+                data=b"{}", method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request)
+            self.assertEqual(error.exception.code, 428)
+            self.assertEqual(
+                self.database.rows("SELECT state FROM work_items WHERE id='JOB-1'")[0]["state"],
+                "blocked",
+            )
+
+            request = urllib.request.Request(
+                f"{base}/api/work-items/JOB-1/retry",
+                data=b'{"reason":"operator test retry"}',
+                headers={"X-ATS-Lab-Confirm": "retry"}, method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                payload = json.load(response)
+            self.assertEqual(payload["action"], "retry")
+            self.assertEqual(payload["state"], "ready")
+            self.assertEqual(
+                self.database.rows(
+                    "SELECT attempts,blocker_code FROM work_items WHERE id='JOB-1'"
+                )[0],
+                {"attempts": 0, "blocker_code": None},
+            )
+            self.assertEqual(
+                self.database.rows(
+                    "SELECT COUNT(*) AS count FROM events WHERE aggregate_id='JOB-1' AND event_type='blocker_retry_requested'"
+                )[0]["count"],
+                1,
+            )
+
+            self.database.transition_work_item(
+                "JOB-1", WorkState.BLOCKED, allowed_from=(WorkState.READY,),
+                blocker_code="analyzer_retry_exhausted",
+                blocker_detail="old analyzer failure",
+            )
+            request = urllib.request.Request(
+                f"{base}/api/work-items/JOB-1/rectify",
+                data=b'{"reason":"operator test rectify"}',
+                headers={"X-ATS-Lab-Confirm": "rectify"}, method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                payload = json.load(response)
+            self.assertEqual(payload["action"], "rectify")
+            self.assertEqual(payload["state"], "archived")
+            self.assertEqual(
+                self.database.rows(
+                    "SELECT state,blocker_code FROM work_items WHERE id='JOB-1'"
+                )[0],
+                {"state": "archived", "blocker_code": "legacy_history"},
+            )
+            self.assertEqual(
+                self.database.rows(
+                    "SELECT COUNT(*) AS count FROM events WHERE aggregate_id='JOB-1' AND event_type='blocker_rectified'"
+                )[0]["count"],
+                1,
+            )
         finally:
             server.shutdown()
             server.server_close()
