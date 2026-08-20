@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+from math import ceil
 from typing import Any, Iterable, Mapping
 
 from .evidence import LifecycleStage, NormalizedEvidence
@@ -222,7 +224,7 @@ def _robustness_state(row: object, policy: ResourcePolicy) -> str:
         or float(_value(row, "max_drawdown_percentage")) > policy.maximum_drawdown_percentage
         or float(_value(row, "sharpe_ratio")) < policy.minimum_sharpe_ratio
         or float(_value(row, "profit_factor")) < policy.minimum_profit_factor
-        or int(_value(row, "trade_count")) < policy.minimum_trades
+        or int(_value(row, "trade_count")) < required_trade_count(row, policy)
     ):
         return "failed"
     return "passed"
@@ -265,10 +267,7 @@ def evaluate_gates(
     else:
         failed.append("route_completion")
 
-    _minimum_gate(
-        "minimum_trades", rows, "trade_count", policy.minimum_trades,
-        passed, failed, missing,
-    )
+    _minimum_trade_gate(rows, policy, passed, failed, missing)
     _minimum_gate(
         "net_profit", rows, "net_profit_percentage", 0.0,
         passed, failed, missing, strict=True,
@@ -350,6 +349,45 @@ def _minimum_gate(
         failed.append(name)
     else:
         passed.append(name)
+
+
+def required_trade_count(row: object, policy: ResourcePolicy) -> int:
+    """Return a window-normalized trade floor for one evidence row."""
+    start = _value(row, "start_date")
+    finish = _value(row, "finish_date")
+    if not start or not finish:
+        return int(policy.minimum_trades)
+    try:
+        days = max(
+            1,
+            (
+                date.fromisoformat(str(finish))
+                - date.fromisoformat(str(start))
+            ).days,
+        )
+    except ValueError:
+        return int(policy.minimum_trades)
+    annualized = ceil(int(policy.minimum_trades_per_year) * days / 365.25)
+    return max(int(policy.minimum_trade_floor), annualized)
+
+
+def _minimum_trade_gate(
+    rows: tuple[NormalizedEvidence, ...],
+    policy: ResourcePolicy,
+    passed: list[str],
+    failed: list[str],
+    missing: list[str],
+) -> None:
+    values = [row.trade_count for row in rows]
+    if not values or any(value is None for value in values):
+        missing.append("minimum_trades")
+    elif any(
+        int(value) < required_trade_count(row, policy)
+        for row, value in zip(rows, values)
+    ):
+        failed.append("minimum_trades")
+    else:
+        passed.append("minimum_trades")
 
 
 def _maximum_gate(
