@@ -450,10 +450,17 @@ def _import_study_snapshot(
                     "target HPO study is not awaiting optimizer import: "
                     f"{target['lifecycle_state']}"
                 )
-            if target["study_name"] != snapshot.name:
+            target_study_name = str(target["study_name"])
+            target_strategy = str(target["strategy"] or "").strip()
+            jesse_alias = (
+                bool(target_strategy)
+                and target_study_name.startswith(f"{target_strategy}-")
+                and snapshot.name.startswith(f"{target_strategy}_optuna_ray_")
+            )
+            if target_study_name != snapshot.name and not jesse_alias:
                 raise ValueError(
                     f"{provider_label} study name does not match target HPO study: "
-                    f"{snapshot.name!r} != {target['study_name']!r}"
+                    f"{snapshot.name!r} != {target_study_name!r}"
                 )
             if target["source_database_path"] is not None and (
                 target["source_database_path"] != source_identity_path
@@ -477,6 +484,9 @@ def _import_study_snapshot(
             parent_work_item_id = target["parent_work_item_id"]
             strategy = target["strategy"] or strategy
             objective_name = target["objective_name"] or objective_name
+        persisted_study_name = (
+            str(target["study_name"]) if target is not None else snapshot.name
+        )
         objective_name = objective_name or "holdout_score"
         if not parent_experiment_id or not parent_work_item_id:
             raise ValueError(
@@ -532,7 +542,7 @@ def _import_study_snapshot(
                    completed_at=excluded.completed_at,
                    updated_at=excluded.updated_at""",
             (
-                study_id, snapshot.name, strategy,
+                study_id, persisted_study_name, strategy,
                 parent_experiment_id, parent_work_item_id,
                 hpo_experiment_id, hpo_work_item_id,
                 objective_name, snapshot.direction,
@@ -715,7 +725,8 @@ def _import_study_snapshot(
     return {
         "study_id": study_id,
         "source_study_id": source_study_id,
-        "study_name": snapshot.name,
+        "study_name": persisted_study_name,
+        "source_study_name": snapshot.name,
         "source_path": str(source_path),
         "trials_imported": imported,
         "normalized_evidence_rows": evidence_rows,

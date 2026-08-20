@@ -399,6 +399,40 @@ class OptunaImportTests(unittest.TestCase):
             1,
         )
 
+    def test_import_accepts_jesse_optuna_alias_for_parked_study(self) -> None:
+        target = self.park_target_study("HPO-ALIAS")
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE hpo_studies SET study_name='Trend-HPO-ALIAS' WHERE id=?",
+                (target,),
+            )
+        source = sqlite3.connect(self.source)
+        source.execute(
+            "UPDATE studies SET study_name=? WHERE study_id=1",
+            ("Trend_optuna_ray_9bff6b0c-e699-453c-bd8d-c32c6ded2c66",),
+        )
+        source.commit()
+        source.close()
+
+        result = import_optuna_study(
+            self.database,
+            self.source,
+            study_name="Trend_optuna_ray_9bff6b0c-e699-453c-bd8d-c32c6ded2c66",
+            target_study_id=target,
+        )
+
+        self.assertEqual(result["study_name"], "Trend-HPO-ALIAS")
+        self.assertEqual(
+            result["source_study_name"],
+            "Trend_optuna_ray_9bff6b0c-e699-453c-bd8d-c32c6ded2c66",
+        )
+        study = self.database.rows(
+            "SELECT study_name,lifecycle_state FROM hpo_studies WHERE id=?",
+            (target,),
+        )[0]
+        self.assertEqual(study["study_name"], "Trend-HPO-ALIAS")
+        self.assertEqual(study["lifecycle_state"], "hpo_analysis")
+
     def test_complete_jesse_session_export_resumes_parked_study(self) -> None:
         source = self.write_jesse_export()
         target = self.park_target_study()
