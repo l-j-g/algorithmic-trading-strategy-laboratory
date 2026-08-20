@@ -10,8 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ats_lab.dashboard import (
-    dashboard_counts, make_handler, query_page, render_overview, render_page,
-    top_backtests,
+    DASHBOARD_JS, dashboard_counts, make_handler, query_page, render_overview,
+    render_page, top_backtests,
 )
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import (
@@ -113,6 +113,60 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(rows[0]["evidence_split"], "holdout")
         self.assertEqual(top_backtests(self.database, "sharpe", 20, 100), [])
 
+    def test_unsplit_route_complete_baseline_is_rankable(self) -> None:
+        self.database.add_run(RunResult(
+            id="RUN-BASELINE", experiment_id="EXP-1", work_item_id="JOB-1",
+            session_id="SESSION-BASELINE", status=RunStatus.FINISHED,
+            route=RouteSpec(
+                exchange="Binance Perpetual Futures", symbol="BTC-USDT",
+                timeframe="1h", start_date="2025-01-01",
+                finish_date="2026-01-01",
+            ),
+            metrics={"sharpe": 2.0, "total_trades": 42},
+            finished_at="2026-08-01T01:00:00Z",
+        ))
+
+        rows = top_backtests(self.database, "sharpe", 20, 20)
+
+        self.assertEqual([row["run_id"] for row in rows], ["RUN-BASELINE"])
+
+    def test_partial_comparison_filters_keep_unselected_dimensions(self) -> None:
+        self.database.add_run(RunResult(
+            id="RUN-OTHER-PAIR", experiment_id="EXP-1", work_item_id="JOB-1",
+            session_id="SESSION-OTHER-PAIR", status=RunStatus.FINISHED,
+            route=RouteSpec(
+                exchange="Binance Perpetual Futures", symbol="ETH-USDT",
+                timeframe="1h", start_date="2024-01-01",
+                finish_date="2025-01-01",
+            ),
+            metrics={"sharpe": 1.5, "total_trades": 42},
+            finished_at="2026-08-01T01:00:00Z",
+        ))
+        self.database.add_run(RunResult(
+            id="RUN-OTHER-PERIOD", experiment_id="EXP-1", work_item_id="JOB-1",
+            session_id="SESSION-OTHER-PERIOD", status=RunStatus.FINISHED,
+            route=RouteSpec(
+                exchange="Binance Perpetual Futures", symbol="BTC-USDT",
+                timeframe="1h", start_date="2025-01-01",
+                finish_date="2026-01-01",
+            ),
+            metrics={"sharpe": 1.25, "total_trades": 42},
+            finished_at="2026-08-01T02:00:00Z",
+        ))
+
+        period_rows = top_backtests(
+            self.database, "sharpe", 20, 20, period="2024-01-01 to 2025-01-01",
+        )
+        symbol_rows = top_backtests(
+            self.database, "sharpe", 20, 20, symbol="BTC-USDT",
+        )
+
+        self.assertEqual([row["run_id"] for row in period_rows], ["RUN-OTHER-PAIR"])
+        self.assertEqual(
+            {row["run_id"] for row in symbol_rows},
+            {"RUN-1", "RUN-OTHER-PERIOD"},
+        )
+
     def test_default_comparison_uses_one_complete_compatibility_tuple(self) -> None:
         self.database.add_run(RunResult(
             id="RUN-2", experiment_id="EXP-1", work_item_id="JOB-1",
@@ -158,6 +212,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("rank: sharpe", page)
         self.assertIn("net profit", page)
         self.assertIn("standardized", page)
+        self.assertIn("refresh(); schedule();", DASHBOARD_JS)
 
     def test_hpo_lifecycle_page_uses_shared_states_and_progress(self) -> None:
         study = {

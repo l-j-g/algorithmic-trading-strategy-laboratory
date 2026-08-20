@@ -54,10 +54,12 @@ timings. Lifecycle labels are:
 - `reject`
 
 Missing values display as `—`. No normal page or API returns raw run JSON.
-Comparison defaults to the newest record with a complete compatibility key and
-then matches exact symbol, timeframe, start date, finish date and evidence split.
-Changing rank metric changes ordering only; every standardized metric remains
-visible.
+Comparison defaults to the newest record with a complete route key and then
+matches its exact symbol, timeframe, start date, finish date and evidence split.
+Unsplit baseline rows remain comparable with other unsplit rows. When a pair,
+period, timeframe or split filter is selected, unselected dimensions remain
+unfiltered and are shown in each result row. Changing rank metric changes
+ordering only; every standardized metric remains visible.
 
 Read-only JSON endpoints are available for scripts and alternate frontends:
 

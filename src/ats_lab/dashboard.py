@@ -106,7 +106,21 @@ def _compatibility_key(value: Mapping[str, Any]) -> tuple[object, ...]:
 
 
 def _complete_compatibility(value: Mapping[str, Any]) -> bool:
-    return all(part not in (None, "") for part in _compatibility_key(value))
+    # Unsplit baseline evidence is valid. Split remains part of the exact peer
+    # key, but it is optional for route-complete baseline rows.
+    return all(
+        value.get(name) not in (None, "")
+        for name in ("symbol", "timeframe", "start_date", "finish_date")
+    )
+
+
+def _matches_comparison_filters(
+    value: Mapping[str, Any], filters: Mapping[str, str],
+) -> bool:
+    for name, expected in filters.items():
+        if value.get(name) != expected:
+            return False
+    return True
 
 
 def _newest_complete_evidence(
@@ -133,23 +147,44 @@ def top_backtests(database: WorkflowDatabase, metric: str = "sharpe", limit: int
     minimum_trades = max(0, min(int(minimum_trades), 1_000_000))
     key, higher_is_better = RANK_METRICS[metric]
     filters: dict[str, object] = {}
+    comparison_filters: dict[str, str] = {}
     if symbol:
         filters["symbol"] = symbol
+        comparison_filters["symbol"] = symbol
     if timeframe:
         filters["timeframe"] = timeframe
+        comparison_filters["timeframe"] = timeframe
     if experiment_type:
         filters["lifecycle_stage"] = experiment_type
     if evidence_split:
         filters["evidence_split"] = evidence_split
+        comparison_filters["evidence_split"] = evidence_split
     if period and " to " in period:
-        filters["start_date"], filters["finish_date"] = period.split(" to ", 1)
-    anchor = _newest_complete_evidence(database, filters)
-    if anchor is None:
-        return []
-    evidence = database.compatible_evidence(anchor, limit=2000)
+        start_date, finish_date = period.split(" to ", 1)
+        filters["start_date"], filters["finish_date"] = start_date, finish_date
+        comparison_filters.update({
+            "start_date": start_date, "finish_date": finish_date,
+        })
+    if comparison_filters:
+        evidence = [
+            _evidence_dict(item)
+            for item in database.query_normalized_evidence(limit=5000)
+            if _complete_compatibility(_evidence_dict(item))
+            and _matches_comparison_filters(
+                _evidence_dict(item), comparison_filters,
+            )
+        ]
+    else:
+        anchor = _newest_complete_evidence(database, filters)
+        if anchor is None:
+            return []
+        evidence = [
+            _evidence_dict(item)
+            for item in database.compatible_evidence(anchor, limit=2000)
+        ]
     ranked = []
     for item in evidence:
-        row = _evidence_dict(item)
+        row = item
         if (
             experiment_type
             and row.get("lifecycle_stage") != experiment_type
@@ -457,7 +492,7 @@ def render_overview(database: WorkflowDatabase, params: dict[str, str]) -> str:
 <body data-page="overview" data-refresh-url="/overview"><header><h1>ATS Lab</h1><nav>{nav}</nav>
 <div class=live-controls><label><input id=live-toggle type=checkbox checked> live</label><select id=refresh-interval><option value=5>5s</option><option value=15>15s</option><option value=30>30s</option></select><span id=last-updated>—</span></div></header><main>
 <section class=cards id=summary-cards>{_render_cards(dashboard_counts(database))}</section>
-<section class=chart-panel><div class=chart-heading><div><h2>Top 20 comparable results</h2><small>Rank by one metric; inspect all metrics across the same market and period.</small></div>
+<section class=chart-panel><div class=chart-heading><div><h2>Top 20 comparable results</h2><small>Rank by one metric; default uses one exact tuple. Selected filters leave other dimensions unfiltered.</small></div>
 <form id=chart-controls method=get action=/overview><label>metric<select name=metric>{metric_options}</select></label>
 <label>pair<select name=symbol>{options("symbols")}</select></label><label>period<select name=period>{options("periods")}</select></label>
 <label>timeframe<select name=timeframe>{options("timeframes")}</select></label><label>run type<select name=experiment_type>{options("experiment_types")}</select></label>
@@ -1188,7 +1223,7 @@ DASHBOARD_JS = r"""
   let timer; const schedule = () => { clearInterval(timer); timer = setInterval(refresh, delay()); };
   interval?.addEventListener('change', schedule); toggle?.addEventListener('change', () => { if (toggle.checked) refresh(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-  window.addEventListener('focus', refresh); stamp(true); schedule();
+  window.addEventListener('focus', refresh); stamp(false, 'waiting for first refresh'); refresh(); schedule();
 })();
 """
 
