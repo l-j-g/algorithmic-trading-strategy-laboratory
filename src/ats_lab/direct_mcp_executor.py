@@ -431,6 +431,10 @@ class DashboardClient:
             "routes": form["routes"],
             "data_routes": form.get("data_routes", []),
             "config": config,
+            "balance": form.get("balance"),
+            "fee": form.get("fee"),
+            "futures_leverage": form.get("futures_leverage"),
+            "futures_leverage_mode": form.get("futures_leverage_mode"),
             "start_date": form["start_date"],
             "finish_date": form["finish_date"],
             "debug_mode": form.get("debug_mode", False),
@@ -1517,11 +1521,15 @@ class DirectMcpDispatcher:
 
     @staticmethod
     def _fingerprint(request: dict[str, Any]) -> str:
+        experiment = request.get("experiment", {})
         work_item = request.get("work_item", {})
         material = {
             "experiment_id": request.get("experiment_id"),
-            "strategy_name": request.get("experiment", {}).get("strategy_name"),
-            "routes": request.get("experiment", {}).get("routes"),
+            "strategy_name": experiment.get("strategy_name"),
+            "routes": experiment.get("routes"),
+            "session_exchange_config": DirectMcpDispatcher._session_exchange_config(
+                experiment,
+            ),
             "operation": work_item.get("operation"),
             "execution_context": request.get("execution_context"),
         }

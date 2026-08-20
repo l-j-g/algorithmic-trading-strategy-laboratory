@@ -739,6 +739,10 @@ class DirectMcpExecutorTests(unittest.TestCase):
             Response({"data": {"session": {"state": {"form": {
                 "exchange": "Binance Perpetual Futures", "routes": [],
                 "start_date": "2024-01-01", "finish_date": "2024-02-01",
+                "balance": 1_000,
+                "fee": 0.001,
+                "futures_leverage": 3,
+                "futures_leverage_mode": "isolated",
             }}}}}),
             Response({"data": {"data": {"backtest": {"balance": 10_000}}}}),
             Response({"status": "started"}),
@@ -760,7 +764,34 @@ class DirectMcpExecutorTests(unittest.TestCase):
         payload = json.loads(requests[-1].data)
         self.assertEqual(payload["id"], "session-1")
         self.assertEqual(payload["config"], {"balance": 10_000})
+        self.assertEqual({
+            key: payload[key] for key in (
+                "balance", "fee", "futures_leverage", "futures_leverage_mode",
+            )
+        }, {
+            "balance": 1_000,
+            "fee": 0.001,
+            "futures_leverage": 3,
+            "futures_leverage_mode": "isolated",
+        })
         self.assertEqual(requests[-1].headers["Authorization"], "secret-token")
+
+    def test_fingerprint_changes_when_session_exchange_config_changes(self) -> None:
+        request = batch_request()["requests"][0]
+        baseline = DirectMcpDispatcher._fingerprint(request)
+
+        for field, value in (
+            ("balance", 1_000),
+            ("fee_rate", 0.001),
+            ("leverage", 3),
+            ("leverage_mode", "isolated"),
+        ):
+            with self.subTest(field=field):
+                mutated = json.loads(json.dumps(request))
+                mutated["experiment"][field] = value
+                self.assertNotEqual(
+                    DirectMcpDispatcher._fingerprint(mutated), baseline,
+                )
 
     def test_restart_resumes_polling_without_create_or_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
