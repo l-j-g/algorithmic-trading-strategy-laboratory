@@ -1022,13 +1022,25 @@ class DirectMcpDispatcher:
     @staticmethod
     def _session_exchange_config(experiment: dict[str, Any]) -> dict[str, Any]:
         """Return an explicit, immutable exchange snapshot for each draft."""
-        balance = experiment.get("balance", experiment.get("starting_balance", 10_000))
-        fee = experiment.get("fee_rate", experiment.get("fee", 0.0005))
-        leverage = experiment.get(
-            "futures_leverage", experiment.get("leverage", 1),
+        # Work-item/experiment JSON may contain explicit nulls for optional
+        # fields. ``dict.get(key, default)`` does not fall back in that case,
+        # and Jesse's draft schema rejects null for all four settings.
+        def first_non_null(*keys: str, default: Any) -> Any:
+            for key in keys:
+                value = experiment.get(key)
+                if value is not None:
+                    return value
+            return default
+
+        balance = first_non_null(
+            "balance", "starting_balance", default=10_000,
         )
-        leverage_mode = experiment.get(
-            "futures_leverage_mode", experiment.get("leverage_mode", "cross"),
+        fee = first_non_null("fee_rate", "fee", default=0.0005)
+        leverage = first_non_null(
+            "futures_leverage", "leverage", default=1,
+        )
+        leverage_mode = first_non_null(
+            "futures_leverage_mode", "leverage_mode", default="cross",
         )
         return {
             "balance": balance,

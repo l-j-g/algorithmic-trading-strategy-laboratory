@@ -502,6 +502,47 @@ class DirectMcpExecutorTests(unittest.TestCase):
             )[0]
             self.assertEqual(telemetry["model_call_count"], 0)
 
+    def test_significance_draft_defaults_explicit_null_exchange_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, _database = self.make_dispatcher(
+                tmp, server, work_id="JOB-SIG", experiment_id="EXP-SIG",
+                specification={
+                    "operation": "significance",
+                    "parameters": {"n_simulations": 5000},
+                },
+            )
+            request = significance_request()
+            request["requests"][0]["experiment"].update({
+                "balance": None,
+                "starting_balance": None,
+                "fee_rate": None,
+                "fee": None,
+                "futures_leverage": None,
+                "leverage": None,
+                "futures_leverage_mode": None,
+                "leverage_mode": None,
+            })
+
+            result = dispatcher.dispatch(request)
+
+            self.assertEqual(result.outcome, "finished")
+            sig_args = next(
+                args for name, args in server.http.tool_calls
+                if name == "create_significance_test_draft"
+            )
+            self.assertEqual({
+                key: sig_args[key] for key in (
+                    "balance", "fee", "futures_leverage", "futures_leverage_mode",
+                )
+            }, {
+                "balance": 10_000,
+                "fee": 0.0005,
+                "futures_leverage": 1,
+                "futures_leverage_mode": "cross",
+            })
+
     def test_significance_incomplete_metrics_retries_without_attempt_charge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["finished"]
