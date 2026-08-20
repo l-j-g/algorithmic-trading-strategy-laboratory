@@ -1067,29 +1067,89 @@ DASHBOARD_JS = r"""
   const toggle = document.querySelector('#live-toggle');
   const interval = document.querySelector('#refresh-interval');
   const updated = document.querySelector('#last-updated');
+  const requestTimeoutMs = 10000;
   let busy = false;
-  const stamp = (ok = true) => { if (updated) { updated.textContent = (ok ? 'updated ' : 'error ') + new Date().toLocaleTimeString(); updated.className = ok ? '' : 'negative'; } };
+  const stamp = (ok = true, detail = '') => {
+    if (updated) {
+      updated.textContent = (ok ? 'updated ' : 'error ') + new Date().toLocaleTimeString();
+      updated.className = ok ? '' : 'negative';
+      updated.title = detail;
+    }
+  };
+  const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+  async function request(input) {
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+      try {
+        const response = await fetch(input, {
+          cache: 'no-store',
+          headers: {'Cache-Control': 'no-cache'},
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const error = new Error(`HTTP ${response.status} ${response.statusText || 'request failed'}`);
+          error.name = 'RefreshHttpError';
+          error.status = response.status;
+          error.statusText = response.statusText;
+          error.url = response.url || String(input);
+          throw error;
+        }
+        return response;
+      } catch (error) {
+        lastError = error;
+        if (error && typeof error === 'object') error.requestUrl = String(input);
+        if (attempt === 0) await wait(250);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    throw lastError;
+  }
   async function refresh() {
     if (busy || !toggle?.checked || document.hidden) return;
     busy = true;
+    const page = document.body.dataset.page;
+    const targets = page === 'overview'
+      ? [document.querySelector('#summary-cards'), document.querySelector('#top-chart')]
+      : [document.querySelector('#live-content')];
+    const previousContent = targets.map(target => target?.innerHTML);
     try {
-      if (document.body.dataset.page === 'overview') {
+      if (page === 'overview') {
         const form = document.querySelector('#chart-controls');
         const query = new URLSearchParams(new FormData(form));
         query.set('limit', '20');
-        const [summaryResponse, chartResponse] = await Promise.all([fetch('/api/summary'), fetch('/api/top-backtests?' + query)]);
-        if (!summaryResponse.ok || !chartResponse.ok) throw new Error('refresh failed');
+        const [summaryResponse, chartResponse] = await Promise.all([request('/api/summary'), request('/api/top-backtests?' + query)]);
         const summary = await summaryResponse.json();
         const rows = await chartResponse.json();
+        if (!summary || typeof summary !== 'object' || !Array.isArray(rows)) throw new Error('invalid dashboard response');
         document.querySelector('#summary-cards').innerHTML = Object.entries(summary).map(([key,value]) => `<div class=card><b>${value}</b><span>${key}</span></div>`).join('');
         drawChart(rows);
       } else {
         const url = new URL(location.href); url.searchParams.set('fragment', '1');
-        const response = await fetch(url); if (!response.ok) throw new Error('refresh failed');
-        document.querySelector('#live-content').innerHTML = await response.text();
+        const response = await request(url);
+        const content = await response.text();
+        if (!content.trim()) throw new Error(`refresh returned empty content: ${response.url || url}`);
+        document.querySelector('#live-content').innerHTML = content;
       }
       stamp(true);
-    } catch (_) { stamp(false); }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      targets.forEach((target, index) => {
+        if (target && previousContent[index] !== undefined) target.innerHTML = previousContent[index];
+      });
+      console.error('ATS dashboard refresh failed', {
+        page,
+        detail,
+        requestUrl: error?.requestUrl,
+        status: error?.status,
+        statusText: error?.statusText,
+        timeoutMs: requestTimeoutMs,
+        error,
+      });
+      stamp(false, detail);
+    }
     finally { busy = false; }
   }
   function drawChart(rows) {

@@ -306,6 +306,40 @@ class DashboardTests(unittest.TestCase):
             server.server_close()
             thread.join()
 
+    def test_live_refresh_contract_returns_fragments_and_json(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.database))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for page in ("queue", "candidates", "runs", "hpo"):
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_port}/{page}?fragment=1"
+                ) as response:
+                    body = response.read().decode()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.headers.get_content_type(), "text/html")
+                    self.assertTrue(body.startswith("<section class=cards>"))
+                    self.assertNotIn("<!doctype", body.lower())
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/summary"
+            ) as response:
+                summary = json.load(response)
+                self.assertEqual(response.status, 200)
+                self.assertEqual(summary["queue"], 1)
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/top-backtests?limit=20"
+            ) as response:
+                rows = json.load(response)
+                self.assertEqual(response.status, 200)
+                self.assertIsInstance(rows, list)
+                self.assertEqual(rows[0]["run_id"], "RUN-1")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
 
 if __name__ == "__main__":
     unittest.main()
