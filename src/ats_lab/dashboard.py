@@ -790,6 +790,11 @@ def _render_generic_table(rows: list[dict], *, actions: bool = False) -> str:
 
 
 def _render_queue_actions(row: Mapping[str, Any]) -> str:
+    if row.get("state") == "waiting_retry":
+        return (
+            '<td class=actions><span title="Automatic retry is scheduled">'
+            "retry scheduled</span></td>"
+        )
     if row.get("state") != "blocked":
         return "<td class=actions>—</td>"
     work_item_id = html.escape(str(row.get("id") or ""), quote=True)

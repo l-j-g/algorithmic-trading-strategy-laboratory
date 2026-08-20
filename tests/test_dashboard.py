@@ -104,6 +104,29 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("diagnostic-only", run_page)
         self.assertIn("—", run_page)
 
+    def test_queue_renders_blocked_controls_and_waiting_retry_status(self) -> None:
+        self.database.upsert_work_item(WorkItem(
+            id="JOB-RETRY", experiment_id="EXP-1", priority=3,
+            state=WorkState.WAITING_RETRY, attempts=1,
+            retry_after="2099-01-01T00:00:00Z",
+            blocker_code="temporary_failure", blocker_detail="Try later",
+        ))
+
+        page = render_page(self.database, "queue", {})
+
+        blocked_start = page.index("<tr><td>JOB-1</td>")
+        blocked_end = page.index("</tr>", blocked_start)
+        blocked_cell = page[blocked_start:blocked_end]
+        self.assertIn('data-work-item-action="retry"', blocked_cell)
+        self.assertIn('data-work-item-action="rectify"', blocked_cell)
+
+        retry_start = page.index("<tr><td>JOB-RETRY</td>")
+        retry_end = page.index("</tr>", retry_start)
+        retry_cell = page[retry_start:retry_end]
+        self.assertIn("retry scheduled", retry_cell)
+        self.assertNotIn('data-work-item-action="retry"', retry_cell)
+        self.assertNotIn('data-work-item-action="rectify"', retry_cell)
+
     def test_empty_filtered_result_renders_cleanly(self) -> None:
         page = render_page(self.database, "queue", {"q": "does-not-exist"})
         self.assertIn("No matching records.", page)
