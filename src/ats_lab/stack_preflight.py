@@ -103,6 +103,12 @@ class StackPreflight:
                 tables.validate,
                 "Jesse PostgreSQL missing expected public tables",
             ),
+            (
+                "jesse_candle_data",
+                self._psql_command("SELECT COUNT(*) FROM candle;"),
+                lambda output: output.strip().isdigit() and int(output) > 0,
+                "Jesse candle table contains no data",
+            ),
         )
         for name, command, validate, detail in postgres_checks:
             healthy = self._command_healthy(command, validate)
@@ -198,8 +204,10 @@ class StackPreflight:
         request = urllib.request.Request(url, data=data, headers=headers)
         with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
             body = response.read(65536)
-            if response.status >= 400:
-                raise ValueError(f"HTTP {response.status}")
+            session_id = response.headers.get("mcp-session-id")
+        if kind == "mcp":
+            self._teardown_probe_session(url, session_id)
+            self._require_jsonrpc_result(body.decode())
         if kind == "health":
             payload = json.loads(body.decode()) if body.strip() else {}
             if isinstance(payload, dict) and payload.get("status") in {
@@ -207,3 +215,41 @@ class StackPreflight:
             }:
                 raise ValueError("unhealthy response")
         return {"name": name, "status": "healthy", "url": url}
+
+    def _teardown_probe_session(self, url: str, session_id: str | None) -> None:
+        if not session_id:
+            return
+        request = urllib.request.Request(
+            url, headers={"mcp-session-id": session_id}, method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds):
+                pass
+        except (OSError, TimeoutError, urllib.error.URLError):
+            pass
+
+    @staticmethod
+    def _require_jsonrpc_body(text: str) -> dict[str, Any]:
+        frames = [
+            line[5:].strip() for line in text.splitlines()
+            if line.startswith("data:") and line[5:].strip()
+        ]
+        if not frames and text.strip():
+            frames.append(text)
+        for frame in frames:
+            try:
+                decoded = json.loads(frame)
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(decoded, dict)
+                and decoded.get("jsonrpc") == "2.0"
+                and ("result" in decoded or "error" in decoded)
+            ):
+                return decoded
+        raise ValueError("MCP probe response was not a JSON-RPC result envelope")
+
+    def _require_jsonrpc_result(self, text: str) -> None:
+        decoded = self._require_jsonrpc_body(text)
+        if "result" not in decoded:
+            raise ValueError(f"MCP initialize failed: {decoded.get('error')}")
