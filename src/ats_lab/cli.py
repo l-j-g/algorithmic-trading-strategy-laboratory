@@ -195,6 +195,26 @@ def build_stack_preflight(repo: Path) -> StackPreflight:
     )
 
 
+def _memory_adapter() -> MemoryResearchAdapter:
+    return MemoryResearchAdapter(MemoryProviderConfig(base_url=os.environ.get(
+        "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
+    )))
+
+
+def _add_memory_format_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--format", choices=("table", "json"), default="table")
+
+
+def _present_memory_result(
+    result: object, args_format: str,
+    renderer: Callable[[object], str],
+) -> None:
+    if args_format == "json":
+        emit(result)
+    else:
+        print(renderer(result))
+
+
 class CommandContext:
     """Shared dependencies for one dispatched CLI command."""
 
@@ -245,23 +265,17 @@ def build_parser() -> AtsLabArgumentParser:
     memory_init.add_argument("--dry-run", action="store_true")
     memory_init.add_argument("--batch-size", type=int, default=100)
     memory_init.add_argument("--delivery-limit", type=int, default=100)
-    memory_init.add_argument(
-        "--format", choices=("table", "json"), default="table",
-    )
+    _add_memory_format_argument(memory_init)
     memory_status_nested = memory_sub.add_parser(
         "status", help="Show research-memory readiness."
     )
-    memory_status_nested.add_argument(
-        "--format", choices=("table", "json"), default="table",
-    )
+    _add_memory_format_argument(memory_status_nested)
     memory_sync_nested = memory_sub.add_parser(
         "sync", help="Deliver currently queued research memory to Memory."
     )
     memory_sync_nested.add_argument("--dry-run", action="store_true")
     memory_sync_nested.add_argument("--limit", type=int, default=100)
-    memory_sync_nested.add_argument(
-        "--format", choices=("table", "json"), default="table",
-    )
+    _add_memory_format_argument(memory_sync_nested)
     memory_sync = sub.add_parser(
         "memory-sync", help="Preview or dispatch bounded research-memory outbox records."
     )
@@ -694,20 +708,13 @@ def _run_memory(context: CommandContext) -> int:
     database.initialize()
     if args.memory_command == "status":
         result = memory_status(database)
-        if args.format == "json":
-            emit(result)
-        else:
-            print(render_memory_status(result))
+        _present_memory_result(result, args.format, render_memory_status)
     elif args.memory_command == "init":
         if args.batch_size < 1 or args.batch_size > 1000:
             parser.error("memory init --batch-size must be between 1 and 1000")
         if args.delivery_limit < 1 or args.delivery_limit > 100:
             parser.error("memory init --delivery-limit must be between 1 and 100")
-        adapter = None if args.dry_run else MemoryResearchAdapter(
-            MemoryProviderConfig(base_url=os.environ.get(
-                "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
-            ))
-        )
+        adapter = None if args.dry_run else _memory_adapter()
 
         def memory_progress(item: dict) -> None:
             fields = " ".join(
@@ -725,25 +732,15 @@ def _run_memory(context: CommandContext) -> int:
                 else None
             ),
         )
-        if args.format == "json":
-            emit(result)
-        else:
-            print(render_memory_init(result))
+        _present_memory_result(result, args.format, render_memory_init)
     elif args.memory_command == "sync":
         if args.limit < 1 or args.limit > 100:
             parser.error("memory sync --limit must be between 1 and 100")
-        adapter = MemoryResearchAdapter(MemoryProviderConfig(
-            base_url=os.environ.get(
-                "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
-            )
-        ))
         result = sync_memory_outbox(
-            database, adapter, apply=not args.dry_run, limit=args.limit,
+            database, _memory_adapter(), apply=not args.dry_run,
+            limit=args.limit,
         )
-        if args.format == "json":
-            emit(result)
-        else:
-            print(render_memory_sync(result))
+        _present_memory_result(result, args.format, render_memory_sync)
     return 0
 
 
@@ -754,13 +751,8 @@ def _run_memory_sync(context: CommandContext) -> int:
     if args.limit < 1 or args.limit > 100:
         parser.error("memory-sync --limit must be between 1 and 100")
     database.initialize()
-    adapter = MemoryResearchAdapter(MemoryProviderConfig(
-        base_url=os.environ.get(
-            "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
-        )
-    ))
     emit(sync_memory_outbox(
-        database, adapter, apply=args.apply, limit=args.limit,
+        database, _memory_adapter(), apply=args.apply, limit=args.limit,
     ))
     return 0
 
@@ -1519,6 +1511,8 @@ def _run_recover_zombie_sessions(context: CommandContext) -> int:
     client.initialize()
     observations = {}
     for session_id in sorted(set(args.session_ids)):
+        # Recovery requires unchanged_observations=2: two identical reads are
+        # the minimum evidence that a session stopped executing.
         observations[session_id] = [
             DirectMcpDispatcher._session(client.call_tool(
                 "get_backtest_session", {"session_id": session_id},
@@ -1700,11 +1694,7 @@ def _run_supervisor(context: CommandContext) -> int:
             resource_policy=policy, retry_delay_seconds=args.retry_delay,
             max_attempts=args.max_attempts,
             preflight=stack_preflight.check,
-            memory_adapter=MemoryResearchAdapter(MemoryProviderConfig(
-                base_url=os.environ.get(
-                    "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
-                )
-            )),
+            memory_adapter=_memory_adapter(),
         ).run(
             continuous=args.continuous, idle_sleep=args.idle_sleep,
             max_rounds=args.max_rounds,
