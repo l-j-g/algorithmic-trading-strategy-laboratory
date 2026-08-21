@@ -3288,7 +3288,7 @@ class WorkflowDatabase:
             if p_value < 0.05:
                 target, decision = "ready", "significance_passed"
             elif p_value <= 0.10:
-                target, decision = "archived", "significance_inconclusive"
+                target, decision = "scheduled", "significance_inconclusive"
             else:
                 target, decision = "archived", "significance_failed"
             active = connection.execute(

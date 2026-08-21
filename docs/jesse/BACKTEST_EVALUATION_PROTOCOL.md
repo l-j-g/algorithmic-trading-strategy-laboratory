@@ -54,7 +54,9 @@ methodology rules are enforced in code:
    work item under `gate_findings` so every verdict remains explainable.
    Cohorts with unfinished members wait (`awaiting_cohort_fdr`) instead of
    releasing early. Significance tests outside a synthesis cohort keep the
-   single-test raw-p gates.
+   single-test raw-p gates. Inconclusive results (0.05 <= p <= 0.10) are
+   their own verdict on every path: dependent baselines stay scheduled
+   pending more evidence, and archiving remains a manual operator action.
 
 ## Evaluation Window Policy
 
