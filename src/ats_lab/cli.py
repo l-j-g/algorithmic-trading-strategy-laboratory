@@ -7,6 +7,7 @@ import os
 import shlex
 import sqlite3
 import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -194,7 +195,25 @@ def build_stack_preflight(repo: Path) -> StackPreflight:
     )
 
 
-def main() -> int:
+class CommandContext:
+    """Shared dependencies for one dispatched CLI command."""
+
+    def __init__(
+        self,
+        parser: AtsLabArgumentParser,
+        args: argparse.Namespace,
+        repo: Path,
+        database: WorkflowDatabase,
+        database_path: Path,
+    ) -> None:
+        self.parser = parser
+        self.args = args
+        self.repo = repo
+        self.database = database
+        self.database_path = database_path
+
+
+def build_parser() -> AtsLabArgumentParser:
     parser = AtsLabArgumentParser(prog="ats-lab", description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--database", type=Path, default=Path(".ats-lab/laboratory.sqlite3"))
@@ -568,674 +587,973 @@ def main() -> int:
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=8765)
     web.add_argument("--claim-timeout-seconds", type=int, default=7200)
-    args = parser.parse_args()
-    if args.command is None:
-        args.command = "home"
-    if args.command == "help":
-        print(ROOT_HELP, end="" if ROOT_HELP.endswith("\n") else "\n")
-        return 0
-    repo = args.repo.resolve()
-    if args.command in {
-        "worker", "supervisor", "dashboard", "backend", "web", "status", "monitor", "control",
-        "console", "recover-claims", "resolve-blocker", "requeue-evaluation",
-        "queue", "candidates", "evidence", "diagnostic-export",
-        "diagnostic-hpo-trial",
-        "hpo", "hpo-detail", "hpo-route-plan", "hpo-defaults", "timings", "telemetry", "analyzer",
-        "requeue-hpo-analysis", "requeue-hpo-execution",
-        "configure-hpo-validation-routes",
-        "memory-status", "memory-sync", "memory", "memory-backfill",
-        "home", "next", "doctor", "preflight", "recovery-audit", "tui", "loop",
-    } and repo == Path.cwd().resolve():
-        repo = discover_lab_repo(
-            repo, fallback=Path(__file__).resolve().parents[2],
-        )
-    database_path = args.database if args.database.is_absolute() else repo / args.database
-    database = WorkflowDatabase(database_path)
+    return parser
 
-    if args.command == "home":
-        database.initialize()
-        snapshot = monitor_snapshot(database)
-        print(render_home(snapshot, memory_status(database)))
-    elif args.command == "next":
-        database.initialize()
-        guidance = next_guidance(
-            monitor_snapshot(database), memory_status(database),
-        )
+
+def _run_home(context: CommandContext) -> int:
+    database = context.database
+    database.initialize()
+    snapshot = monitor_snapshot(database)
+    print(render_home(snapshot, memory_status(database)))
+    return 0
+
+
+def _run_next(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    guidance = next_guidance(
+        monitor_snapshot(database), memory_status(database),
+    )
+    if args.format == "json":
+        emit(guidance)
+    else:
+        print(render_guidance(guidance))
+    return 0
+
+
+def _run_doctor(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    preflight = build_stack_preflight(repo).check()
+    snapshot = monitor_snapshot(database)
+    memory = memory_status(database)
+    if args.format == "json":
+        emit({
+            "healthy": bool(preflight.get("healthy"))
+            and bool(snapshot.get("healthy")),
+            "preflight": preflight,
+            "workflow": operator_status(database),
+            "memory": memory,
+            "next": next_guidance(snapshot, memory),
+        })
+    else:
+        print(render_doctor(preflight, snapshot, memory))
+    return 0 if preflight.get("healthy") and snapshot.get("healthy") else 2
+
+
+def _run_init(context: CommandContext) -> int:
+    database = context.database
+    database.initialize()
+    emit({"database": str(context.database_path), "status": "initialized"})
+    return 0
+
+
+def _run_preflight(context: CommandContext) -> int:
+    result = build_stack_preflight(context.repo).check()
+    emit(result)
+    return 0 if result["healthy"] else 2
+
+
+def _run_backend(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    if not 0 <= args.port <= 65535:
+        parser.error("--port must be between 0 and 65535")
+    if args.claim_timeout_seconds <= 0:
+        parser.error("--claim-timeout-seconds must be positive")
+    serve_backend(
+        context.database,
+        host=args.host,
+        port=args.port,
+        claim_timeout_seconds=args.claim_timeout_seconds,
+    )
+    return 0
+
+
+def _run_web(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    if not 0 <= args.port <= 65535:
+        parser.error("--port must be between 0 and 65535")
+    if args.claim_timeout_seconds <= 0:
+        parser.error("--claim-timeout-seconds must be positive")
+    serve_web(
+        context.database,
+        context.repo,
+        host=args.host,
+        port=args.port,
+        claim_timeout_seconds=args.claim_timeout_seconds,
+    )
+    return 0
+
+
+def _run_memory_status(context: CommandContext) -> int:
+    database = context.database
+    database.initialize()
+    emit(memory_status(database))
+    return 0
+
+
+def _run_memory(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    database.initialize()
+    if args.memory_command == "status":
+        result = memory_status(database)
         if args.format == "json":
-            emit(guidance)
+            emit(result)
         else:
-            print(render_guidance(guidance))
-    elif args.command == "doctor":
-        database.initialize()
-        preflight = build_stack_preflight(repo).check()
-        snapshot = monitor_snapshot(database)
-        memory = memory_status(database)
-        if args.format == "json":
-            emit({
-                "healthy": bool(preflight.get("healthy"))
-                and bool(snapshot.get("healthy")),
-                "preflight": preflight,
-                "workflow": operator_status(database),
-                "memory": memory,
-                "next": next_guidance(snapshot, memory),
-            })
-        else:
-            print(render_doctor(preflight, snapshot, memory))
-        return 0 if preflight.get("healthy") and snapshot.get("healthy") else 2
-    elif args.command == "init":
-        database.initialize()
-        emit({"database": str(database_path), "status": "initialized"})
-    elif args.command == "preflight":
-        result = build_stack_preflight(repo).check()
-        emit(result)
-        return 0 if result["healthy"] else 2
-    elif args.command == "backend":
-        if not 0 <= args.port <= 65535:
-            parser.error("--port must be between 0 and 65535")
-        if args.claim_timeout_seconds <= 0:
-            parser.error("--claim-timeout-seconds must be positive")
-        serve_backend(
-            database,
-            host=args.host,
-            port=args.port,
-            claim_timeout_seconds=args.claim_timeout_seconds,
-        )
-    elif args.command == "web":
-        if not 0 <= args.port <= 65535:
-            parser.error("--port must be between 0 and 65535")
-        if args.claim_timeout_seconds <= 0:
-            parser.error("--claim-timeout-seconds must be positive")
-        serve_web(
-            database,
-            repo,
-            host=args.host,
-            port=args.port,
-            claim_timeout_seconds=args.claim_timeout_seconds,
-        )
-    elif args.command == "memory-status":
-        database.initialize()
-        emit(memory_status(database))
-    elif args.command == "memory":
-        database.initialize()
-        if args.memory_command == "status":
-            result = memory_status(database)
-            if args.format == "json":
-                emit(result)
-            else:
-                print(render_memory_status(result))
-        elif args.memory_command == "init":
-            if args.batch_size < 1 or args.batch_size > 1000:
-                parser.error("memory init --batch-size must be between 1 and 1000")
-            if args.delivery_limit < 1 or args.delivery_limit > 100:
-                parser.error("memory init --delivery-limit must be between 1 and 100")
-            adapter = None if args.dry_run else MemoryResearchAdapter(
-                MemoryProviderConfig(base_url=os.environ.get(
-                    "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
-                ))
-            )
-
-            def memory_progress(item: dict) -> None:
-                fields = " ".join(
-                    f"{key}={value}" for key, value in item.items()
-                    if key != "phase"
-                )
-                print(f"MEMORY {item['phase']} {fields}", flush=True)
-
-            result = initialize_research_memory(
-                database, adapter, apply=not args.dry_run,
-                batch_size=args.batch_size, sync_limit=args.delivery_limit,
-                progress=(
-                    memory_progress
-                    if not args.dry_run and args.format == "table"
-                    else None
-                ),
-            )
-            if args.format == "json":
-                emit(result)
-            else:
-                print(render_memory_init(result))
-        elif args.memory_command == "sync":
-            if args.limit < 1 or args.limit > 100:
-                parser.error("memory sync --limit must be between 1 and 100")
-            adapter = MemoryResearchAdapter(MemoryProviderConfig(
-                base_url=os.environ.get(
-                    "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
-                )
+            print(render_memory_status(result))
+    elif args.memory_command == "init":
+        if args.batch_size < 1 or args.batch_size > 1000:
+            parser.error("memory init --batch-size must be between 1 and 1000")
+        if args.delivery_limit < 1 or args.delivery_limit > 100:
+            parser.error("memory init --delivery-limit must be between 1 and 100")
+        adapter = None if args.dry_run else MemoryResearchAdapter(
+            MemoryProviderConfig(base_url=os.environ.get(
+                "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
             ))
-            result = sync_memory_outbox(
-                database, adapter, apply=not args.dry_run, limit=args.limit,
+        )
+
+        def memory_progress(item: dict) -> None:
+            fields = " ".join(
+                f"{key}={value}" for key, value in item.items()
+                if key != "phase"
             )
-            if args.format == "json":
-                emit(result)
-            else:
-                print(render_memory_sync(result))
-    elif args.command == "memory-sync":
+            print(f"MEMORY {item['phase']} {fields}", flush=True)
+
+        result = initialize_research_memory(
+            database, adapter, apply=not args.dry_run,
+            batch_size=args.batch_size, sync_limit=args.delivery_limit,
+            progress=(
+                memory_progress
+                if not args.dry_run and args.format == "table"
+                else None
+            ),
+        )
+        if args.format == "json":
+            emit(result)
+        else:
+            print(render_memory_init(result))
+    elif args.memory_command == "sync":
         if args.limit < 1 or args.limit > 100:
-            parser.error("memory-sync --limit must be between 1 and 100")
-        database.initialize()
+            parser.error("memory sync --limit must be between 1 and 100")
         adapter = MemoryResearchAdapter(MemoryProviderConfig(
             base_url=os.environ.get(
                 "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
             )
         ))
-        emit(sync_memory_outbox(
-            database, adapter, apply=args.apply, limit=args.limit,
-        ))
-    elif args.command == "memory-backfill":
-        if args.batch_size < 1 or args.batch_size > 1000:
-            parser.error("memory-backfill --batch-size must be between 1 and 1000")
-        database.initialize()
-        emit(backfill_memory_outbox(
-            database, apply=args.apply, batch_size=args.batch_size,
-        ))
-    elif args.command == "migrate-legacy":
-        emit(LegacyImporter(repo, database).import_all())
-    elif args.command == "audit":
-        database.initialize()
-        result = build_audit(database)
-        if args.markdown:
-            output = args.markdown if args.markdown.is_absolute() else repo / args.markdown
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(render_markdown(result))
-            result["markdown"] = str(output)
-        emit(result)
-    elif args.command == "queue":
-        database.initialize()
-        query = "SELECT * FROM active_queue"
-        parameters: tuple = ()
-        if args.state:
-            query += " WHERE state = ?"
-            parameters = (args.state,)
-        query += " ORDER BY priority, created_at, id"
-        rows = database.rows(query, parameters)
-        if args.format == "json":
-            emit(rows)
-        else:
-            print(render_table(rows, (
-                ("state", "state", 15),
-                ("priority", "prio", 5),
-                ("strategy", "strategy", 26),
-                ("id", "job", 31),
-                ("attempts", "tries", 5),
-                ("blocker_code", "blocker", 24),
-                ("retry_after", "retry after", 20),
-                ("blocker_detail", "detail", 36),
-            )))
-    elif args.command == "synthesis-status":
-        database.initialize()
-        emit(database.synthesis_status())
-    elif args.command == "status":
-        database.initialize()
-        if args.format == "json":
-            emit(operator_status(database))
-        else:
-            print(render_monitor(
-                monitor_snapshot(database), color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"),
-            ))
-    elif args.command == "monitor":
-        if args.interval <= 0:
-            parser.error("--interval must be positive")
-        database.initialize()
-        if not args.watch:
-            print(render_monitor(
-                monitor_snapshot(database), color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"),
-            ))
-        else:
-            try:
-                watch_monitor(database, interval=args.interval)
-            except KeyboardInterrupt:
-                return 130
-    elif args.command == "tui":
-        if args.interval <= 0:
-            parser.error("tui --interval must be positive")
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            parser.error("tui requires an interactive terminal; use ats-lab monitor")
-        database.initialize()
-        try:
-            return run_tui(database, repo=repo, interval=args.interval)
-        except KeyboardInterrupt:
-            return 130
-    elif args.command == "loop":
-        database.initialize()
-        idle_sleep = getattr(args, "idle_sleep", 30.0)
-        retry_delay = getattr(args, "retry_delay", 60.0)
-        if idle_sleep < 0 or retry_delay < 0:
-            parser.error("loop sleep values must be non-negative")
-        lifecycle = SupervisorLoopControl(
-            database, repo,
-            idle_sleep=idle_sleep,
-            retry_delay=retry_delay,
+        result = sync_memory_outbox(
+            database, adapter, apply=not args.dry_run, limit=args.limit,
         )
-        result = {
-            "start": lifecycle.start,
-            "status": lifecycle.status,
-            "pause": lifecycle.pause,
-            "stop": lifecycle.stop,
-        }[args.loop_command]().to_dict()
         if args.format == "json":
             emit(result)
         else:
-            print(
-                f"LOOP {str(result['state']).upper()}  "
-                f"pid={result['process_id'] or '—'}  "
-                f"phase={result['phase']}  control={result['control']}"
-            )
-            if result["repaired_retry_schedules"]:
-                print(
-                    "REPAIRED retry_schedules="
-                    f"{result['repaired_retry_schedules']}"
-                )
-    elif args.command == "control":
-        database.initialize()
-        if args.action == "status":
-            state = database.control_status()
-        else:
-            desired_state = {
-                "pause": "paused",
-                "resume": "running",
-                "stop": "stop_requested",
-            }[args.action]
-            state = database.set_control_state(
-                desired_state, updated_by=f"cli:{args.action}",
-            )
-        runtime = database.supervisor_runtime_status()
-        if args.format == "json":
-            emit({"control": state, "supervisor": runtime})
-        else:
-            print(render_control(state, runtime))
-    elif args.command == "console":
-        if args.interval <= 0:
-            parser.error("--interval must be positive")
-        database.initialize()
+            print(render_memory_sync(result))
+    return 0
+
+
+def _run_memory_sync(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    if args.limit < 1 or args.limit > 100:
+        parser.error("memory-sync --limit must be between 1 and 100")
+    database.initialize()
+    adapter = MemoryResearchAdapter(MemoryProviderConfig(
+        base_url=os.environ.get(
+            "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
+        )
+    ))
+    emit(sync_memory_outbox(
+        database, adapter, apply=args.apply, limit=args.limit,
+    ))
+    return 0
+
+
+def _run_memory_backfill(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    if args.batch_size < 1 or args.batch_size > 1000:
+        parser.error("memory-backfill --batch-size must be between 1 and 1000")
+    database.initialize()
+    emit(backfill_memory_outbox(
+        database, apply=args.apply, batch_size=args.batch_size,
+    ))
+    return 0
+
+
+def _run_migrate_legacy(context: CommandContext) -> int:
+    emit(LegacyImporter(context.repo, context.database).import_all())
+    return 0
+
+
+def _run_audit(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    result = build_audit(database)
+    if args.markdown:
+        output = args.markdown if args.markdown.is_absolute() else repo / args.markdown
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(render_markdown(result))
+        result["markdown"] = str(output)
+    emit(result)
+    return 0
+
+
+def _run_queue(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    query = "SELECT * FROM active_queue"
+    parameters: tuple = ()
+    if args.state:
+        query += " WHERE state = ?"
+        parameters = (args.state,)
+    query += " ORDER BY priority, created_at, id"
+    rows = database.rows(query, parameters)
+    if args.format == "json":
+        emit(rows)
+    else:
+        print(render_table(rows, (
+            ("state", "state", 15),
+            ("priority", "prio", 5),
+            ("strategy", "strategy", 26),
+            ("id", "job", 31),
+            ("attempts", "tries", 5),
+            ("blocker_code", "blocker", 24),
+            ("retry_after", "retry after", 20),
+            ("blocker_detail", "detail", 36),
+        )))
+    return 0
+
+
+def _run_synthesis_status(context: CommandContext) -> int:
+    database = context.database
+    database.initialize()
+    emit(database.synthesis_status())
+    return 0
+
+
+def _run_status(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    if args.format == "json":
+        emit(operator_status(database))
+    else:
+        print(render_monitor(
+            monitor_snapshot(database), color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"),
+        ))
+    return 0
+
+
+def _run_monitor(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    if args.interval <= 0:
+        parser.error("--interval must be positive")
+    database.initialize()
+    if not args.watch:
+        print(render_monitor(
+            monitor_snapshot(database), color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"),
+        ))
+    else:
         try:
-            return run_console(database, interval=args.interval)
+            watch_monitor(database, interval=args.interval)
         except KeyboardInterrupt:
-            print("\nconsole stopped")
             return 130
-    elif args.command == "recover-claims":
-        if args.stale_after_hours <= 0:
-            parser.error("--stale-after-hours must be positive")
-        database.initialize()
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(hours=args.stale_after_hours)
-        ).isoformat().replace("+00:00", "Z")
-        emit(database.recover_stale_unexecuted_claims(cutoff, apply=args.apply))
-    elif args.command == "resolve-blocker":
-        database.initialize()
-        emit(database.resolve_blocked_work_item(
-            args.work_item_id,
-            resolution_code=args.code,
-            detail=args.detail,
-            evidence_ids=args.evidence,
-        ))
-    elif args.command == "requeue-evaluation":
-        database.initialize()
-        emit(database.requeue_finished_evaluation(
-            args.work_item_id,
-            worker_id=args.worker,
-            reason=args.reason,
-            batch_id=args.batch,
-        ))
-    elif args.command == "candidates":
-        database.initialize()
-        filters = {}
-        if args.verdict:
-            filters["verdict"] = args.verdict.replace("-", "_")
-        evidence_rows = database.query_normalized_evidence(
-            filters=filters, limit=500,
+    return 0
+
+
+def _run_tui(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    repo = context.repo
+    database = context.database
+    if args.interval <= 0:
+        parser.error("tui --interval must be positive")
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        parser.error("tui requires an interactive terminal; use ats-lab monitor")
+    database.initialize()
+    try:
+        return run_tui(database, repo=repo, interval=args.interval)
+    except KeyboardInterrupt:
+        return 130
+
+
+def _run_loop(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    idle_sleep = getattr(args, "idle_sleep", 30.0)
+    retry_delay = getattr(args, "retry_delay", 60.0)
+    if idle_sleep < 0 or retry_delay < 0:
+        parser.error("loop sleep values must be non-negative")
+    lifecycle = SupervisorLoopControl(
+        database, repo,
+        idle_sleep=idle_sleep,
+        retry_delay=retry_delay,
+    )
+    result = {
+        "start": lifecycle.start,
+        "status": lifecycle.status,
+        "pause": lifecycle.pause,
+        "stop": lifecycle.stop,
+    }[args.loop_command]().to_dict()
+    if args.format == "json":
+        emit(result)
+    else:
+        print(
+            f"LOOP {str(result['state']).upper()}  "
+            f"pid={result['process_id'] or '—'}  "
+            f"phase={result['phase']}  control={result['control']}"
         )
-        evidence_rows = distinct_candidate_evidence(evidence_rows)
-        if args.format == "json":
-            emit([item.to_dict() for item in evidence_rows])
-        else:
-            print(render_evidence(evidence_rows))
-    elif args.command == "evidence":
-        if args.limit < 1 or args.limit > 5000:
-            parser.error("--limit must be between 1 and 5000")
-        database.initialize()
-        names = {
-            "strategy": "strategy", "stage": "lifecycle_stage",
-            "verdict": "verdict", "symbol": "symbol",
-            "timeframe": "timeframe", "split": "evidence_split",
-        }
-        filters = {
-            field: getattr(args, argument)
-            for argument, field in names.items()
-            if getattr(args, argument)
-        }
-        evidence_rows = database.query_normalized_evidence(
-            filters=filters, limit=args.limit,
-        )
-        if args.rank:
-            reverse = args.rank != "max_drawdown_percentage"
-            present = [
-                item for item in evidence_rows
-                if getattr(item, args.rank) is not None
-            ]
-            missing = [
-                item for item in evidence_rows
-                if getattr(item, args.rank) is None
-            ]
-            present.sort(
-                key=lambda item: (
-                    abs(getattr(item, args.rank))
-                    if args.rank == "max_drawdown_percentage"
-                    else getattr(item, args.rank)
-                ),
-                reverse=reverse,
+        if result["repaired_retry_schedules"]:
+            print(
+                "REPAIRED retry_schedules="
+                f"{result['repaired_retry_schedules']}"
             )
-            evidence_rows = present + missing
-        if args.format == "json":
-            emit([item.to_dict() for item in evidence_rows])
-        else:
-            print(render_evidence(evidence_rows))
-    elif args.command == "diagnostic-export":
-        database.initialize()
-        raw = database.diagnostic_raw_evidence(args.run_id)
-        if raw is None:
-            parser.error(f"unknown run: {args.run_id}")
-        emit(raw)
-    elif args.command == "diagnostic-hpo-trial":
-        database.initialize()
-        query = getattr(database, "diagnostic_hpo_trial_details", None)
-        detail = (
-            query(args.study_id, args.trial_number) if query else None
+    return 0
+
+
+def _run_control(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    if args.action == "status":
+        state = database.control_status()
+    else:
+        desired_state = {
+            "pause": "paused",
+            "resume": "running",
+            "stop": "stop_requested",
+        }[args.action]
+        state = database.set_control_state(
+            desired_state, updated_by=f"cli:{args.action}",
         )
-        if detail is None:
-            parser.error(
-                f"unknown HPO trial: {args.study_id}/{args.trial_number}"
-            )
-        emit(detail)
-    elif args.command == "hpo":
-        if args.limit < 1 or args.limit > 5000:
-            parser.error("--limit must be between 1 and 5000")
-        database.initialize()
-        filters = {
-            key: value for key, value in (
-                ("lifecycle_state", args.state),
-                ("strategy", args.strategy),
-            ) if value
-        }
-        query = getattr(database, "hpo_studies", None)
-        rows = query(filters=filters, limit=args.limit) if query else []
-        if args.doctor:
-            readiness = operator_status(database)["hpo"]
-            if args.format == "json":
-                emit(readiness.get("route_readiness", {}))
-            else:
-                print(render_hpo_readiness(readiness))
-        elif args.format == "json":
-            emit(rows)
-        else:
-            print(render_hpo_studies(rows))
-    elif args.command == "hpo-detail":
-        database.initialize()
-        detail = hpo_detail_snapshot(database, args.study_id)
-        if detail is None:
-            parser.error(f"unknown HPO study: {args.study_id}")
-        if args.format == "json":
-            emit(detail)
-        else:
-            print(render_hpo_detail(detail))
-    elif args.command == "hpo-route-plan":
-        database.initialize()
-        try:
-            plan = HpoRoutePlanner(database).build(args.study_id)
-        except (KeyError, ValueError) as error:
-            parser.error(str(error))
-        if args.format == "json":
-            emit(plan.to_dict())
-        else:
-            print(render_hpo_route_plan(plan))
-    elif args.command == "hpo-defaults":
-        database.initialize()
-        routes = default_hpo_routes(load_resource_policy(repo / ".ats-lab" / "config.toml"))
-        eligible = database.hpo_studies_needing_default_routes()
-        if args.study_id:
-            eligible = [
-                item for item in eligible
-                if item.get("study_id") == args.study_id
-            ]
-            if not eligible:
-                parser.error(
-                    "study is not a scheduled HPO study with empty routes: "
-                    f"{args.study_id}"
-                )
-        applied = []
-        if args.apply:
-            for item in eligible:
-                applied.append(database.configure_default_hpo_routes(
-                    str(item["study_id"]), routes,
-                ))
-        payload = {
-            "policy": routes,
-            "eligible": eligible,
-            "applied": [item.get("study_id") for item in applied],
-            "next_action": (
-                "ats-lab hpo --doctor" if applied
-                else "ats-lab hpo-defaults --apply"
+    runtime = database.supervisor_runtime_status()
+    if args.format == "json":
+        emit({"control": state, "supervisor": runtime})
+    else:
+        print(render_control(state, runtime))
+    return 0
+
+
+def _run_console(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    if args.interval <= 0:
+        parser.error("--interval must be positive")
+    database.initialize()
+    try:
+        return run_console(database, interval=args.interval)
+    except KeyboardInterrupt:
+        print("\nconsole stopped")
+        return 130
+
+
+def _run_recover_claims(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    if args.stale_after_hours <= 0:
+        parser.error("--stale-after-hours must be positive")
+    database.initialize()
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=args.stale_after_hours)
+    ).isoformat().replace("+00:00", "Z")
+    emit(database.recover_stale_unexecuted_claims(cutoff, apply=args.apply))
+    return 0
+
+
+def _run_resolve_blocker(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    emit(database.resolve_blocked_work_item(
+        args.work_item_id,
+        resolution_code=args.code,
+        detail=args.detail,
+        evidence_ids=args.evidence,
+    ))
+    return 0
+
+
+def _run_requeue_evaluation(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    emit(database.requeue_finished_evaluation(
+        args.work_item_id,
+        worker_id=args.worker,
+        reason=args.reason,
+        batch_id=args.batch,
+    ))
+    return 0
+
+
+def _run_candidates(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    filters = {}
+    if args.verdict:
+        filters["verdict"] = args.verdict.replace("-", "_")
+    evidence_rows = database.query_normalized_evidence(
+        filters=filters, limit=500,
+    )
+    evidence_rows = distinct_candidate_evidence(evidence_rows)
+    if args.format == "json":
+        emit([item.to_dict() for item in evidence_rows])
+    else:
+        print(render_evidence(evidence_rows))
+    return 0
+
+
+def _run_evidence(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    if args.limit < 1 or args.limit > 5000:
+        parser.error("--limit must be between 1 and 5000")
+    database.initialize()
+    names = {
+        "strategy": "strategy", "stage": "lifecycle_stage",
+        "verdict": "verdict", "symbol": "symbol",
+        "timeframe": "timeframe", "split": "evidence_split",
+    }
+    filters = {
+        field: getattr(args, argument)
+        for argument, field in names.items()
+        if getattr(args, argument)
+    }
+    evidence_rows = database.query_normalized_evidence(
+        filters=filters, limit=args.limit,
+    )
+    if args.rank:
+        reverse = args.rank != "max_drawdown_percentage"
+        present = [
+            item for item in evidence_rows
+            if getattr(item, args.rank) is not None
+        ]
+        missing = [
+            item for item in evidence_rows
+            if getattr(item, args.rank) is None
+        ]
+        present.sort(
+            key=lambda item: (
+                abs(getattr(item, args.rank))
+                if args.rank == "max_drawdown_percentage"
+                else getattr(item, args.rank)
             ),
-        }
-        if args.format == "json":
-            emit(payload)
-        else:
-            print("HPO DEFAULT ROUTES  disjoint historical bootstrap policy")
-            for split, route_list in routes.items():
-                route = route_list[0]
-                print(
-                    f"{split:<8} {route['symbol']:<9} {route['timeframe']:<4} "
-                    f"{route['start_date']} -> {route['finish_date']}"
-                )
-            print(f"ELIGIBLE  {len(eligible)}")
-            if args.apply:
-                print(f"APPLIED   {len(applied)}")
-            else:
-                print("NEXT      ats-lab hpo-defaults --apply")
-    elif args.command == "timings":
-        if args.limit < 1 or args.limit > 5000:
-            parser.error("--limit must be between 1 and 5000")
-        database.initialize()
-        query = getattr(database, "work_item_stage_timings", None)
-        rows = query(
-            work_item_id=args.job, limit=args.limit,
-        ) if query else []
-        if args.format == "json":
-            emit(rows)
-        else:
-            print(render_stage_timings(rows))
-    elif args.command == "telemetry":
-        if args.since_hours <= 0:
-            parser.error("--since-hours must be positive")
-        path = args.path or (repo / ".ats-lab" / "agent-transport.jsonl")
-        result = TelemetryRollup(path).summarize(
-            since_hours=args.since_hours,
+            reverse=reverse,
         )
-        if args.format == "json":
-            emit(result)
-        else:
-            print(f"TELEMETRY  since={args.since_hours:g}h  path={path}")
-            for item in result["task_types"]:
-                input_stats = item["input_tokens"]
-                output_stats = item["output_tokens"]
-                cache_stats = item["cache_read_tokens"]
-                print(
-                    f"{item['task_type']:<18} records={item['records']:<5} "
-                    f"input={input_stats['total']:.0f} "
-                    f"output={output_stats['total']:.0f} "
-                    f"cache={cache_stats['total']:.0f}"
-                )
-            for alarm in result["alarms"]:
-                print(
-                    f"ALARM {alarm['code']} task={alarm['task_type']} "
-                    f"value={alarm['value']} detail={alarm['detail']}"
-                )
-    elif args.command == "analyzer":
-        database.initialize()
-        query = getattr(database, "current_analyzer_status", None)
-        state = query() if query else None
-        if args.format == "json":
-            emit(state)
-        else:
-            print(render_analyzer(state))
-    elif args.command == "requeue-hpo-analysis":
-        database.initialize()
-        try:
-            emit(database.requeue_terminal_hpo_analysis(
-                args.job_id,
-                reason=args.reason,
-                updated_by=args.operator,
-            ))
-        except (KeyError, ValueError) as error:
-            parser.error(str(error))
-    elif args.command == "requeue-hpo-execution":
-        database.initialize()
-        try:
-            emit(database.requeue_hpo_execution(
-                args.study_id,
-                reason=args.reason,
-                updated_by=args.operator,
-            ))
-        except (KeyError, ValueError) as error:
-            parser.error(str(error))
-    elif args.command == "configure-hpo-validation-routes":
-        database.initialize()
-        route_path = (
-            args.file if args.file.is_absolute() else repo / args.file
+        evidence_rows = present + missing
+    if args.format == "json":
+        emit([item.to_dict() for item in evidence_rows])
+    else:
+        print(render_evidence(evidence_rows))
+    return 0
+
+
+def _run_diagnostic_export(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    database.initialize()
+    raw = database.diagnostic_raw_evidence(args.run_id)
+    if raw is None:
+        parser.error(f"unknown run: {args.run_id}")
+    emit(raw)
+    return 0
+
+
+def _run_diagnostic_hpo_trial(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    database.initialize()
+    query = getattr(database, "diagnostic_hpo_trial_details", None)
+    detail = (
+        query(args.study_id, args.trial_number) if query else None
+    )
+    if detail is None:
+        parser.error(
+            f"unknown HPO trial: {args.study_id}/{args.trial_number}"
         )
-        try:
-            routes = json.loads(route_path.read_text())
-            if not isinstance(routes, dict):
-                raise ValueError("route file must contain an object by split")
-            emit(database.configure_hpo_validation_routes(
-                args.study_id, routes, updated_by=args.operator,
+    emit(detail)
+    return 0
+
+
+def _run_hpo(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    if args.limit < 1 or args.limit > 5000:
+        parser.error("--limit must be between 1 and 5000")
+    database.initialize()
+    filters = {
+        key: value for key, value in (
+            ("lifecycle_state", args.state),
+            ("strategy", args.strategy),
+        ) if value
+    }
+    query = getattr(database, "hpo_studies", None)
+    rows = query(filters=filters, limit=args.limit) if query else []
+    if args.doctor:
+        readiness = operator_status(database)["hpo"]
+        if args.format == "json":
+            emit(readiness.get("route_readiness", {}))
+        else:
+            print(render_hpo_readiness(readiness))
+    elif args.format == "json":
+        emit(rows)
+    else:
+        print(render_hpo_studies(rows))
+    return 0
+
+
+def _run_hpo_detail(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    database.initialize()
+    detail = hpo_detail_snapshot(database, args.study_id)
+    if detail is None:
+        parser.error(f"unknown HPO study: {args.study_id}")
+    if args.format == "json":
+        emit(detail)
+    else:
+        print(render_hpo_detail(detail))
+    return 0
+
+
+def _run_hpo_route_plan(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    database.initialize()
+    try:
+        plan = HpoRoutePlanner(database).build(args.study_id)
+    except (KeyError, ValueError) as error:
+        parser.error(str(error))
+    if args.format == "json":
+        emit(plan.to_dict())
+    else:
+        print(render_hpo_route_plan(plan))
+    return 0
+
+
+def _run_hpo_defaults(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    routes = default_hpo_routes(load_resource_policy(repo / ".ats-lab" / "config.toml"))
+    eligible = database.hpo_studies_needing_default_routes()
+    if args.study_id:
+        eligible = [
+            item for item in eligible
+            if item.get("study_id") == args.study_id
+        ]
+        if not eligible:
+            parser.error(
+                "study is not a scheduled HPO study with empty routes: "
+                f"{args.study_id}"
+            )
+    applied = []
+    if args.apply:
+        for item in eligible:
+            applied.append(database.configure_default_hpo_routes(
+                str(item["study_id"]), routes,
             ))
-        except (KeyError, OSError, ValueError, json.JSONDecodeError) as error:
-            parser.error(str(error))
-    elif args.command == "hpo-import":
-        database.initialize()
-        source_path = args.file if args.file.is_absolute() else repo / args.file
-        try:
-            classifications = _read_hpo_classifications(
-                repo, args.classifications,
-            )
-            result = import_optuna_study(
-                database,
-                source_path,
-                study_name=args.study_name,
-                target_study_id=args.study_id,
-                classifications=classifications,
-            )
-        except (KeyError, OSError, ValueError, json.JSONDecodeError,
-                sqlite3.Error) as error:
-            parser.error(str(error))
-        if args.format == "json":
-            emit(result)
-        else:
+    payload = {
+        "policy": routes,
+        "eligible": eligible,
+        "applied": [item.get("study_id") for item in applied],
+        "next_action": (
+            "ats-lab hpo --doctor" if applied
+            else "ats-lab hpo-defaults --apply"
+        ),
+    }
+    if args.format == "json":
+        emit(payload)
+    else:
+        print("HPO DEFAULT ROUTES  disjoint historical bootstrap policy")
+        for split, route_list in routes.items():
+            route = route_list[0]
             print(
-                f"HPO IMPORTED  study={result['study_id']} "
-                f"trials={result['trials_imported']} "
-                f"evidence={result['normalized_evidence_rows']} "
-                f"job={result['analysis_job_id']} state={result['lifecycle_state']}"
+                f"{split:<8} {route['symbol']:<9} {route['timeframe']:<4} "
+                f"{route['start_date']} -> {route['finish_date']}"
             )
-    elif args.command == "hpo-import-jesse-session":
-        database.initialize()
-        source_path = args.file if args.file.is_absolute() else repo / args.file
-        try:
-            result = import_jesse_session_export(
-                database,
-                source_path,
-                target_study_id=args.study_id,
-                classifications=_read_hpo_classifications(
-                    repo, args.classifications,
-                ),
-            )
-        except (KeyError, OSError, ValueError, json.JSONDecodeError,
-                sqlite3.Error) as error:
-            parser.error(str(error))
-        if args.format == "json":
-            emit(result)
+        print(f"ELIGIBLE  {len(eligible)}")
+        if args.apply:
+            print(f"APPLIED   {len(applied)}")
         else:
-            print(
-                f"JESSE HPO IMPORTED  study={result['study_id']} "
-                f"session={result['source_session_id']} "
-                f"trials={result['trials_imported']} "
-                f"evidence={result['normalized_evidence_rows']} "
-                f"job={result['analysis_job_id']} state={result['lifecycle_state']}"
-            )
-    elif args.command == "claim":
-        database.initialize()
-        emit(database.claim_next(args.worker))
-    elif args.command == "inventory":
-        result = build_inventory(repo)
-        if args.markdown:
-            output = args.markdown if args.markdown.is_absolute() else repo / args.markdown
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(render_inventory(result))
-        emit({category: len(items) for category, items in result.items()})
-    elif args.command == "enqueue":
-        database.initialize()
-        contract_path = args.file if args.file.is_absolute() else repo / args.file
-        payload = load_json(contract_path)
-        experiment = experiment_from_payload(payload["experiment"], str(contract_path.relative_to(repo)))
-        work_item = work_item_from_payload(payload["work_item"])
-        if work_item.experiment_id != experiment.id:
-            raise ValueError("work_item.experiment_id must equal experiment.id")
-        database.upsert_experiment(experiment)
-        stored = database.upsert_work_item(work_item)
-        emit({"experiment_id": experiment.id, "work_item_id": work_item.id, "state": stored["state"]})
-    elif args.command == "evaluate":
-        database.initialize()
-        contract_path = args.file if args.file.is_absolute() else repo / args.file
-        evaluation = evaluation_from_payload(load_json(contract_path))
-        database.add_evaluation(evaluation)
-        emit({"experiment_id": evaluation.experiment_id, "verdict": evaluation.verdict.value})
-    elif args.command == "finish":
-        database.initialize()
-        emit(database.transition_work_item(args.work_item_id, WorkState.FINISHED, allowed_from=(WorkState.RUNNING,)))
-    elif args.command == "block":
-        database.initialize()
-        emit(database.transition_work_item(args.work_item_id, WorkState.BLOCKED,
-             allowed_from=(WorkState.SCHEDULED, WorkState.READY, WorkState.RUNNING, WorkState.WAITING_RETRY),
-             blocker_code=args.code, blocker_detail=args.detail))
-    elif args.command == "retry":
-        database.initialize()
-        emit(database.transition_work_item(args.work_item_id, WorkState.WAITING_RETRY,
-             allowed_from=(WorkState.RUNNING, WorkState.BLOCKED), retry_after=args.after))
-    elif args.command == "reconcile":
-        database.initialize()
-        result = build_reconciliation(database, stale_after_hours=args.stale_after_hours)
-        result["applied"] = apply_reconciliation(database, result) if args.apply else False
+            print("NEXT      ats-lab hpo-defaults --apply")
+    return 0
+
+
+def _run_timings(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    if args.limit < 1 or args.limit > 5000:
+        parser.error("--limit must be between 1 and 5000")
+    database.initialize()
+    query = getattr(database, "work_item_stage_timings", None)
+    rows = query(
+        work_item_id=args.job, limit=args.limit,
+    ) if query else []
+    if args.format == "json":
+        emit(rows)
+    else:
+        print(render_stage_timings(rows))
+    return 0
+
+
+def _run_telemetry(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    repo = context.repo
+    if args.since_hours <= 0:
+        parser.error("--since-hours must be positive")
+    path = args.path or (repo / ".ats-lab" / "agent-transport.jsonl")
+    result = TelemetryRollup(path).summarize(
+        since_hours=args.since_hours,
+    )
+    if args.format == "json":
         emit(result)
-    elif args.command == "normalize-blockers":
-        database.initialize()
-        emit(normalize_unattempted_blockers(database, apply=args.apply))
-    elif args.command == "backfill-route-coverage":
-        database.initialize()
-        emit(backfill_aggregate_route_coverage(
-            database, apply=args.apply,
-            policy=load_resource_policy(repo / ".ats-lab" / "config.toml"),
+    else:
+        print(f"TELEMETRY  since={args.since_hours:g}h  path={path}")
+        for item in result["task_types"]:
+            input_stats = item["input_tokens"]
+            output_stats = item["output_tokens"]
+            cache_stats = item["cache_read_tokens"]
+            print(
+                f"{item['task_type']:<18} records={item['records']:<5} "
+                f"input={input_stats['total']:.0f} "
+                f"output={output_stats['total']:.0f} "
+                f"cache={cache_stats['total']:.0f}"
+            )
+        for alarm in result["alarms"]:
+            print(
+                f"ALARM {alarm['code']} task={alarm['task_type']} "
+                f"value={alarm['value']} detail={alarm['detail']}"
+            )
+    return 0
+
+
+def _run_analyzer(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    query = getattr(database, "current_analyzer_status", None)
+    state = query() if query else None
+    if args.format == "json":
+        emit(state)
+    else:
+        print(render_analyzer(state))
+    return 0
+
+
+def _run_requeue_hpo_analysis(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    database.initialize()
+    try:
+        emit(database.requeue_terminal_hpo_analysis(
+            args.job_id,
+            reason=args.reason,
+            updated_by=args.operator,
         ))
-    elif args.command == "recover-partial-batch-retries":
-        database.initialize()
-        policy = load_resource_policy(repo / ".ats-lab" / "config.toml")
-        emit(recover_partial_batch_retries(
-            database, args.work_items, apply=args.apply,
-            active_limit=policy.active_ready_limit,
+    except (KeyError, ValueError) as error:
+        parser.error(str(error))
+    return 0
+
+
+def _run_requeue_hpo_execution(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    database.initialize()
+    try:
+        emit(database.requeue_hpo_execution(
+            args.study_id,
+            reason=args.reason,
+            updated_by=args.operator,
         ))
-    elif args.command == "recover-executor-infrastructure":
-        database.initialize()
-        policy = load_resource_policy(repo / ".ats-lab" / "config.toml")
-        emit(recover_executor_infrastructure_failures(
-            database, apply=args.apply, worker_id=args.worker,
-            active_limit=policy.active_ready_limit,
+    except (KeyError, ValueError) as error:
+        parser.error(str(error))
+    return 0
+
+
+def _run_configure_hpo_validation_routes(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    route_path = (
+        args.file if args.file.is_absolute() else repo / args.file
+    )
+    try:
+        routes = json.loads(route_path.read_text())
+        if not isinstance(routes, dict):
+            raise ValueError("route file must contain an object by split")
+        emit(database.configure_hpo_validation_routes(
+            args.study_id, routes, updated_by=args.operator,
         ))
-    elif args.command == "recover-zombie-sessions":
-        database.initialize()
-        config = load_direct_execution_config(repo / ".ats-lab" / "config.toml")
+    except (KeyError, OSError, ValueError, json.JSONDecodeError) as error:
+        parser.error(str(error))
+    return 0
+
+
+def _run_hpo_import(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    source_path = args.file if args.file.is_absolute() else repo / args.file
+    try:
+        classifications = _read_hpo_classifications(
+            repo, args.classifications,
+        )
+        result = import_optuna_study(
+            database,
+            source_path,
+            study_name=args.study_name,
+            target_study_id=args.study_id,
+            classifications=classifications,
+        )
+    except (KeyError, OSError, ValueError, json.JSONDecodeError,
+            sqlite3.Error) as error:
+        parser.error(str(error))
+    if args.format == "json":
+        emit(result)
+    else:
+        print(
+            f"HPO IMPORTED  study={result['study_id']} "
+            f"trials={result['trials_imported']} "
+            f"evidence={result['normalized_evidence_rows']} "
+            f"job={result['analysis_job_id']} state={result['lifecycle_state']}"
+        )
+    return 0
+
+
+def _run_hpo_import_jesse_session(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    source_path = args.file if args.file.is_absolute() else repo / args.file
+    try:
+        result = import_jesse_session_export(
+            database,
+            source_path,
+            target_study_id=args.study_id,
+            classifications=_read_hpo_classifications(
+                repo, args.classifications,
+            ),
+        )
+    except (KeyError, OSError, ValueError, json.JSONDecodeError,
+            sqlite3.Error) as error:
+        parser.error(str(error))
+    if args.format == "json":
+        emit(result)
+    else:
+        print(
+            f"JESSE HPO IMPORTED  study={result['study_id']} "
+            f"session={result['source_session_id']} "
+            f"trials={result['trials_imported']} "
+            f"evidence={result['normalized_evidence_rows']} "
+            f"job={result['analysis_job_id']} state={result['lifecycle_state']}"
+        )
+    return 0
+
+
+def _run_claim(context: CommandContext) -> int:
+    database = context.database
+    database.initialize()
+    emit(database.claim_next(context.args.worker))
+    return 0
+
+
+def _run_inventory(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    result = build_inventory(repo)
+    if args.markdown:
+        output = args.markdown if args.markdown.is_absolute() else repo / args.markdown
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(render_inventory(result))
+    emit({category: len(items) for category, items in result.items()})
+    return 0
+
+
+def _run_enqueue(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    contract_path = args.file if args.file.is_absolute() else repo / args.file
+    payload = load_json(contract_path)
+    experiment = experiment_from_payload(payload["experiment"], str(contract_path.relative_to(repo)))
+    work_item = work_item_from_payload(payload["work_item"])
+    if work_item.experiment_id != experiment.id:
+        raise ValueError("work_item.experiment_id must equal experiment.id")
+    database.upsert_experiment(experiment)
+    stored = database.upsert_work_item(work_item)
+    emit({"experiment_id": experiment.id, "work_item_id": work_item.id, "state": stored["state"]})
+    return 0
+
+
+def _run_evaluate(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    contract_path = args.file if args.file.is_absolute() else repo / args.file
+    evaluation = evaluation_from_payload(load_json(contract_path))
+    database.add_evaluation(evaluation)
+    emit({"experiment_id": evaluation.experiment_id, "verdict": evaluation.verdict.value})
+    return 0
+
+
+def _run_finish(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    emit(database.transition_work_item(args.work_item_id, WorkState.FINISHED, allowed_from=(WorkState.RUNNING,)))
+    return 0
+
+
+def _run_block(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    emit(database.transition_work_item(args.work_item_id, WorkState.BLOCKED,
+         allowed_from=(WorkState.SCHEDULED, WorkState.READY, WorkState.RUNNING, WorkState.WAITING_RETRY),
+         blocker_code=args.code, blocker_detail=args.detail))
+    return 0
+
+
+def _run_retry(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    emit(database.transition_work_item(args.work_item_id, WorkState.WAITING_RETRY,
+         allowed_from=(WorkState.RUNNING, WorkState.BLOCKED), retry_after=args.after))
+    return 0
+
+
+def _run_reconcile(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    result = build_reconciliation(database, stale_after_hours=args.stale_after_hours)
+    result["applied"] = apply_reconciliation(database, result) if args.apply else False
+    emit(result)
+    return 0
+
+
+def _run_normalize_blockers(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    emit(normalize_unattempted_blockers(database, apply=args.apply))
+    return 0
+
+
+def _run_backfill_route_coverage(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    emit(backfill_aggregate_route_coverage(
+        database, apply=args.apply,
+        policy=load_resource_policy(repo / ".ats-lab" / "config.toml"),
+    ))
+    return 0
+
+
+def _run_recover_partial_batch_retries(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    policy = load_resource_policy(repo / ".ats-lab" / "config.toml")
+    emit(recover_partial_batch_retries(
+        database, args.work_items, apply=args.apply,
+        active_limit=policy.active_ready_limit,
+    ))
+    return 0
+
+
+def _run_recover_executor_infrastructure(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    policy = load_resource_policy(repo / ".ats-lab" / "config.toml")
+    emit(recover_executor_infrastructure_failures(
+        database, apply=args.apply, worker_id=args.worker,
+        active_limit=policy.active_ready_limit,
+    ))
+    return 0
+
+
+def _run_recover_zombie_sessions(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    config = load_direct_execution_config(repo / ".ats-lab" / "config.toml")
+    client = McpClient(config.mcp_url, config.timeout_seconds)
+    client.initialize()
+    observations = {}
+    for session_id in sorted(set(args.session_ids)):
+        observations[session_id] = [
+            DirectMcpDispatcher._session(client.call_tool(
+                "get_backtest_session", {"session_id": session_id},
+            )),
+            DirectMcpDispatcher._session(client.call_tool(
+                "get_backtest_session", {"session_id": session_id},
+            )),
+        ]
+    policy = load_resource_policy(repo / ".ats-lab" / "config.toml")
+    emit(recover_zombie_execution_sessions(
+        database, observations, apply=args.apply,
+        grace_seconds=config.zombie_grace_seconds,
+        active_limit=policy.active_ready_limit,
+    ))
+    return 0
+
+
+def _run_recovery_audit(context: CommandContext) -> int:
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    config = load_direct_execution_config(repo / ".ats-lab" / "config.toml")
+    session_ids = [
+        row["session_id"] for row in database.rows(
+            """SELECT DISTINCT d.session_id FROM direct_execution_sessions d
+               JOIN work_items w ON w.id=d.work_item_id
+               WHERE w.state IN ('waiting_retry','blocked')"""
+        )
+    ]
+    observations = {}
+    observation_degraded = False
+    try:
         client = McpClient(config.mcp_url, config.timeout_seconds)
         client.initialize()
-        observations = {}
-        for session_id in sorted(set(args.session_ids)):
+        for session_id in session_ids:
             observations[session_id] = [
                 DirectMcpDispatcher._session(client.call_tool(
                     "get_backtest_session", {"session_id": session_id},
@@ -1244,170 +1562,274 @@ def main() -> int:
                     "get_backtest_session", {"session_id": session_id},
                 )),
             ]
-        policy = load_resource_policy(repo / ".ats-lab" / "config.toml")
-        emit(recover_zombie_execution_sessions(
-            database, observations, apply=args.apply,
-            grace_seconds=config.zombie_grace_seconds,
-            active_limit=policy.active_ready_limit,
-        ))
-    elif args.command == "recovery-audit":
-        database.initialize()
-        config = load_direct_execution_config(repo / ".ats-lab" / "config.toml")
-        session_ids = [
-            row["session_id"] for row in database.rows(
-                """SELECT DISTINCT d.session_id FROM direct_execution_sessions d
-                   JOIN work_items w ON w.id=d.work_item_id
-                   WHERE w.state IN ('waiting_retry','blocked')"""
-            )
-        ]
-        observations = {}
-        observation_degraded = False
-        try:
-            client = McpClient(config.mcp_url, config.timeout_seconds)
-            client.initialize()
-            for session_id in session_ids:
-                observations[session_id] = [
-                    DirectMcpDispatcher._session(client.call_tool(
-                        "get_backtest_session", {"session_id": session_id},
-                    )),
-                    DirectMcpDispatcher._session(client.call_tool(
-                        "get_backtest_session", {"session_id": session_id},
-                    )),
-                ]
-        except Exception:
-            observation_degraded = True
-        result = classify_recovery_candidates(database, observations)
-        emit({
-            "session_observation_degraded": observation_degraded,
-            "counts": {key: len(value) for key, value in result.items()},
-            "categories": result,
-        })
-    elif args.command == "sanitize":
-        database.initialize()
-        plan = build_sanitize_plan(database)
-        plan["applied"] = apply_sanitize_plan(database, plan) if args.apply else False
-        for item in plan["evaluate_finished"]:
-            item.pop("metrics", None)
-        emit(plan)
-    elif args.command == "synthesize":
-        contract_path = args.file if args.file.is_absolute() else repo / args.file
-        request = synthesis_request_from_file(contract_path)
-        try:
-            source_path = str(contract_path.relative_to(repo))
-        except ValueError:
-            source_path = str(contract_path)
-        emit(synthesize(database, request, source_path=source_path))
-    elif args.command == "worker":
-        launcher_config = repo / ".ats-lab" / "config.toml"
-        dispatch_command = args.dispatch_command
-        if not dispatch_command:
-            if launcher_config.is_file():
-                dispatch_command = " ".join((
-                    shlex.quote(sys.executable), "-m", "ats_lab.agent_launcher",
-                    shlex.quote(str(launcher_config)),
-                ))
-            else:
-                parser.error(
-                    "worker requires --dispatch-command, ATS_LAB_DISPATCH_COMMAND, "
-                    "or .ats-lab/config.toml"
-                )
-        if args.idle_sleep < 0 or args.retry_delay < 0:
-            parser.error("worker sleep values must be non-negative")
-        if args.max_items is not None and args.max_items < 1:
-            parser.error("--max-items must be at least 1")
-        database.initialize()
-        try:
-            results = Worker(
-                database, CommandDispatcher(dispatch_command), args.worker,
-                retry_delay_seconds=args.retry_delay,
-                max_attempts=args.max_attempts,
-                synthesize_when_idle=not args.no_idle_synthesis,
-                resource_policy=load_resource_policy(launcher_config),
-            ).run(
-                continuous=args.continuous, idle_sleep=args.idle_sleep, max_items=args.max_items,
-                on_result=emit_progress if args.continuous else None,
-            )
-        except KeyboardInterrupt:
-            emit({"status": "stopped", "reason": "keyboard_interrupt"})
-            return 130
-        if not args.continuous:
-            emit(results)
-    elif args.command == "supervisor":
-        launcher_config = repo / ".ats-lab" / "config.toml"
-        dispatch_command = args.dispatch_command
-        if not dispatch_command:
-            if launcher_config.is_file():
-                dispatch_command = " ".join((
-                    shlex.quote(sys.executable), "-m", "ats_lab.agent_launcher",
-                    shlex.quote(str(launcher_config)),
-                ))
-            elif not args.plan:
-                parser.error(
-                    "supervisor requires --dispatch-command, ATS_LAB_DISPATCH_COMMAND, "
-                    "or .ats-lab/config.toml"
-                )
-        if args.idle_sleep < 0 or args.retry_delay < 0:
-            parser.error("supervisor sleep values must be non-negative")
-        if args.max_rounds is not None and args.max_rounds < 1:
-            parser.error("--max-rounds must be at least 1")
-        database.initialize()
-        policy = load_resource_policy(launcher_config)
-        if args.plan:
-            emit(BatchSupervisor(
-                database, CommandDispatcher(dispatch_command or "true"), args.worker,
-                resource_policy=policy,
-            ).plan())
-            return 0
-        try:
-            execution_config = load_direct_execution_config(launcher_config)
-            stack_preflight = StackPreflight(
-                dashboard_url=execution_config.dashboard_api_base_url,
-                mcp_url=execution_config.mcp_url,
-                postgres_container=os.environ.get(
-                    "ATS_LAB_JESSE_POSTGRES_CONTAINER", "postgres",
-                ),
-                postgres_user=os.environ.get(
-                    "ATS_LAB_JESSE_POSTGRES_USER", "jesse_user",
-                ),
-                postgres_database=os.environ.get(
-                    "ATS_LAB_JESSE_POSTGRES_DATABASE", "jesse_db",
-                ),
-                memory_health_url=os.environ.get(
-                    "ATS_LAB_MEMORY_HEALTH_URL",
-                    "http://127.0.0.1:18000/health",
-                ),
-            )
-            fallback_dispatcher = CommandDispatcher(dispatch_command)
-            dispatcher = DirectMcpDispatcher(
-                database, execution_config,
-                fallback=fallback_dispatcher,
-            )
-            results = BatchSupervisor(
-                database, dispatcher, args.worker,
-                resource_policy=policy, retry_delay_seconds=args.retry_delay,
-                max_attempts=args.max_attempts,
-                preflight=stack_preflight.check,
-                memory_adapter=MemoryResearchAdapter(MemoryProviderConfig(
-                    base_url=os.environ.get(
-                        "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
-                    )
-                )),
-            ).run(
-                continuous=args.continuous, idle_sleep=args.idle_sleep,
-                max_rounds=args.max_rounds,
-                on_result=emit_progress if args.continuous else None,
-            )
-        except KeyboardInterrupt:
-            emit({"status": "stopped", "reason": "keyboard_interrupt"})
-            return 130
-        if not args.continuous:
-            emit(results)
-    elif args.command == "dashboard":
-        if not 0 <= args.port <= 65535:
-            parser.error("dashboard port must be between 0 and 65535")
-        database.initialize()
-        serve_dashboard(database, args.host, args.port)
+    except Exception:
+        observation_degraded = True
+    result = classify_recovery_candidates(database, observations)
+    emit({
+        "session_observation_degraded": observation_degraded,
+        "counts": {key: len(value) for key, value in result.items()},
+        "categories": result,
+    })
     return 0
+
+
+def _run_sanitize(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    plan = build_sanitize_plan(database)
+    plan["applied"] = apply_sanitize_plan(database, plan) if args.apply else False
+    for item in plan["evaluate_finished"]:
+        item.pop("metrics", None)
+    emit(plan)
+    return 0
+
+
+def _run_synthesize(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    database = context.database
+    contract_path = args.file if args.file.is_absolute() else repo / args.file
+    request = synthesis_request_from_file(contract_path)
+    try:
+        source_path = str(contract_path.relative_to(repo))
+    except ValueError:
+        source_path = str(contract_path)
+    emit(synthesize(database, request, source_path=source_path))
+    return 0
+
+
+def _run_worker(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    repo = context.repo
+    database = context.database
+    launcher_config = repo / ".ats-lab" / "config.toml"
+    dispatch_command = args.dispatch_command
+    if not dispatch_command:
+        if launcher_config.is_file():
+            dispatch_command = " ".join((
+                shlex.quote(sys.executable), "-m", "ats_lab.agent_launcher",
+                shlex.quote(str(launcher_config)),
+            ))
+        else:
+            parser.error(
+                "worker requires --dispatch-command, ATS_LAB_DISPATCH_COMMAND, "
+                "or .ats-lab/config.toml"
+            )
+    if args.idle_sleep < 0 or args.retry_delay < 0:
+        parser.error("worker sleep values must be non-negative")
+    if args.max_items is not None and args.max_items < 1:
+        parser.error("--max-items must be at least 1")
+    database.initialize()
+    try:
+        results = Worker(
+            database, CommandDispatcher(dispatch_command), args.worker,
+            retry_delay_seconds=args.retry_delay,
+            max_attempts=args.max_attempts,
+            synthesize_when_idle=not args.no_idle_synthesis,
+            resource_policy=load_resource_policy(launcher_config),
+        ).run(
+            continuous=args.continuous, idle_sleep=args.idle_sleep, max_items=args.max_items,
+            on_result=emit_progress if args.continuous else None,
+        )
+    except KeyboardInterrupt:
+        emit({"status": "stopped", "reason": "keyboard_interrupt"})
+        return 130
+    if not args.continuous:
+        emit(results)
+    return 0
+
+
+def _run_supervisor(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    repo = context.repo
+    database = context.database
+    launcher_config = repo / ".ats-lab" / "config.toml"
+    dispatch_command = args.dispatch_command
+    if not dispatch_command:
+        if launcher_config.is_file():
+            dispatch_command = " ".join((
+                shlex.quote(sys.executable), "-m", "ats_lab.agent_launcher",
+                shlex.quote(str(launcher_config)),
+            ))
+        elif not args.plan:
+            parser.error(
+                "supervisor requires --dispatch-command, ATS_LAB_DISPATCH_COMMAND, "
+                "or .ats-lab/config.toml"
+            )
+    if args.idle_sleep < 0 or args.retry_delay < 0:
+        parser.error("supervisor sleep values must be non-negative")
+    if args.max_rounds is not None and args.max_rounds < 1:
+        parser.error("--max-rounds must be at least 1")
+    database.initialize()
+    policy = load_resource_policy(launcher_config)
+    if args.plan:
+        emit(BatchSupervisor(
+            database, CommandDispatcher(dispatch_command or "true"), args.worker,
+            resource_policy=policy,
+        ).plan())
+        return 0
+    try:
+        execution_config = load_direct_execution_config(launcher_config)
+        stack_preflight = StackPreflight(
+            dashboard_url=execution_config.dashboard_api_base_url,
+            mcp_url=execution_config.mcp_url,
+            postgres_container=os.environ.get(
+                "ATS_LAB_JESSE_POSTGRES_CONTAINER", "postgres",
+            ),
+            postgres_user=os.environ.get(
+                "ATS_LAB_JESSE_POSTGRES_USER", "jesse_user",
+            ),
+            postgres_database=os.environ.get(
+                "ATS_LAB_JESSE_POSTGRES_DATABASE", "jesse_db",
+            ),
+            memory_health_url=os.environ.get(
+                "ATS_LAB_MEMORY_HEALTH_URL",
+                "http://127.0.0.1:18000/health",
+            ),
+        )
+        fallback_dispatcher = CommandDispatcher(dispatch_command)
+        dispatcher = DirectMcpDispatcher(
+            database, execution_config,
+            fallback=fallback_dispatcher,
+        )
+        results = BatchSupervisor(
+            database, dispatcher, args.worker,
+            resource_policy=policy, retry_delay_seconds=args.retry_delay,
+            max_attempts=args.max_attempts,
+            preflight=stack_preflight.check,
+            memory_adapter=MemoryResearchAdapter(MemoryProviderConfig(
+                base_url=os.environ.get(
+                    "ATS_LAB_MEMORY_URL", "http://127.0.0.1:18000",
+                )
+            )),
+        ).run(
+            continuous=args.continuous, idle_sleep=args.idle_sleep,
+            max_rounds=args.max_rounds,
+            on_result=emit_progress if args.continuous else None,
+        )
+    except KeyboardInterrupt:
+        emit({"status": "stopped", "reason": "keyboard_interrupt"})
+        return 130
+    if not args.continuous:
+        emit(results)
+    return 0
+
+
+def _run_dashboard(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    database = context.database
+    if not 0 <= args.port <= 65535:
+        parser.error("dashboard port must be between 0 and 65535")
+    database.initialize()
+    serve_dashboard(database, args.host, args.port)
+    return 0
+
+
+REPO_DISCOVERY_COMMANDS = frozenset({
+    "worker", "supervisor", "dashboard", "backend", "web", "status", "monitor", "control",
+    "console", "recover-claims", "resolve-blocker", "requeue-evaluation",
+    "queue", "candidates", "evidence", "diagnostic-export",
+    "diagnostic-hpo-trial",
+    "hpo", "hpo-detail", "hpo-route-plan", "hpo-defaults", "timings", "telemetry", "analyzer",
+    "requeue-hpo-analysis", "requeue-hpo-execution",
+    "configure-hpo-validation-routes",
+    "memory-status", "memory-sync", "memory", "memory-backfill",
+    "home", "next", "doctor", "preflight", "recovery-audit", "tui", "loop",
+})
+
+CONTRACT_ERRORS = (OSError, ValueError, KeyError, sqlite3.Error)
+
+COMMAND_HANDLERS: dict[str, Callable[[CommandContext], int]] = {
+    "home": _run_home,
+    "next": _run_next,
+    "doctor": _run_doctor,
+    "init": _run_init,
+    "preflight": _run_preflight,
+    "backend": _run_backend,
+    "web": _run_web,
+    "memory-status": _run_memory_status,
+    "memory": _run_memory,
+    "memory-sync": _run_memory_sync,
+    "memory-backfill": _run_memory_backfill,
+    "migrate-legacy": _run_migrate_legacy,
+    "audit": _run_audit,
+    "queue": _run_queue,
+    "synthesis-status": _run_synthesis_status,
+    "status": _run_status,
+    "monitor": _run_monitor,
+    "tui": _run_tui,
+    "loop": _run_loop,
+    "control": _run_control,
+    "console": _run_console,
+    "recover-claims": _run_recover_claims,
+    "resolve-blocker": _run_resolve_blocker,
+    "requeue-evaluation": _run_requeue_evaluation,
+    "candidates": _run_candidates,
+    "evidence": _run_evidence,
+    "diagnostic-export": _run_diagnostic_export,
+    "diagnostic-hpo-trial": _run_diagnostic_hpo_trial,
+    "hpo": _run_hpo,
+    "hpo-detail": _run_hpo_detail,
+    "hpo-route-plan": _run_hpo_route_plan,
+    "hpo-defaults": _run_hpo_defaults,
+    "timings": _run_timings,
+    "telemetry": _run_telemetry,
+    "analyzer": _run_analyzer,
+    "requeue-hpo-analysis": _run_requeue_hpo_analysis,
+    "requeue-hpo-execution": _run_requeue_hpo_execution,
+    "configure-hpo-validation-routes": _run_configure_hpo_validation_routes,
+    "hpo-import": _run_hpo_import,
+    "hpo-import-jesse-session": _run_hpo_import_jesse_session,
+    "claim": _run_claim,
+    "inventory": _run_inventory,
+    "enqueue": _run_enqueue,
+    "evaluate": _run_evaluate,
+    "finish": _run_finish,
+    "block": _run_block,
+    "retry": _run_retry,
+    "reconcile": _run_reconcile,
+    "normalize-blockers": _run_normalize_blockers,
+    "backfill-route-coverage": _run_backfill_route_coverage,
+    "recover-partial-batch-retries": _run_recover_partial_batch_retries,
+    "recover-executor-infrastructure": _run_recover_executor_infrastructure,
+    "recover-zombie-sessions": _run_recover_zombie_sessions,
+    "recovery-audit": _run_recovery_audit,
+    "sanitize": _run_sanitize,
+    "synthesize": _run_synthesize,
+    "worker": _run_worker,
+    "supervisor": _run_supervisor,
+    "dashboard": _run_dashboard,
+}
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.command is None:
+        args.command = "home"
+    if args.command == "help":
+        print(ROOT_HELP, end="" if ROOT_HELP.endswith("\n") else "\n")
+        return 0
+    repo = args.repo.resolve()
+    if args.command in REPO_DISCOVERY_COMMANDS and repo == Path.cwd().resolve():
+        repo = discover_lab_repo(
+            repo, fallback=Path(__file__).resolve().parents[2],
+        )
+    database_path = args.database if args.database.is_absolute() else repo / args.database
+    database = WorkflowDatabase(database_path)
+    context = CommandContext(
+        parser=parser, args=args, repo=repo,
+        database=database, database_path=database_path,
+    )
+    try:
+        return COMMAND_HANDLERS[args.command](context)
+    except CONTRACT_ERRORS as error:
+        print(f"ats-lab: error: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -1,12 +1,13 @@
+import argparse
 import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from ats_lab.cli import discover_lab_repo, emit_progress, main
+from ats_lab.cli import COMMAND_HANDLERS, build_parser, discover_lab_repo, emit_progress, main
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import (
     Evaluation,
@@ -440,6 +441,101 @@ class CliEvidenceTests(unittest.TestCase):
             payload["policy"]["rolling"][0]["finish_date"],
             payload["policy"]["oos"][0]["start_date"],
         )
+
+
+class CliDispatchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.path = self.root / "lab.sqlite3"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def invoke_raw(self, *arguments: str) -> tuple[int, str, str]:
+        output = io.StringIO()
+        errors = io.StringIO()
+        argv = [
+            "ats-lab", "--repo", str(self.root), "--database", str(self.path),
+            *arguments,
+        ]
+        with (
+            patch("sys.argv", argv),
+            redirect_stdout(output),
+            redirect_stderr(errors),
+        ):
+            code = main()
+        return code if code is not None else 0, output.getvalue(), errors.getvalue()
+
+    def test_every_registered_command_has_exactly_one_handler(self) -> None:
+        parser = build_parser()
+        subparsers = next(
+            action for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+
+        self.assertEqual(
+            set(subparsers.choices) - {"help"},
+            set(COMMAND_HANDLERS) - {"home"},
+        )
+
+    def test_enqueue_persists_matching_contract(self) -> None:
+        contract = self.root / "contract.json"
+        contract.write_text(json.dumps({
+            "schema_version": 1,
+            "experiment": {
+                "id": "EXP-A", "strategy_name": "Dispatch",
+                "experiment_type": "baseline",
+            },
+            "work_item": {"id": "JOB-A", "experiment_id": "EXP-A"},
+        }))
+
+        code, output, errors = self.invoke_raw("enqueue", "--file", str(contract.resolve()))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(errors, "")
+        self.assertEqual(json.loads(output), {
+            "experiment_id": "EXP-A", "work_item_id": "JOB-A",
+            "state": "scheduled",
+        })
+
+    def test_enqueue_contract_violation_reports_clean_error(self) -> None:
+        contract = self.root / "contract.json"
+        contract.write_text(json.dumps({
+            "schema_version": 1,
+            "experiment": {
+                "id": "EXP-A", "strategy_name": "Dispatch",
+                "experiment_type": "baseline",
+            },
+            "work_item": {"id": "JOB-A", "experiment_id": "EXP-B"},
+        }))
+
+        code, output, errors = self.invoke_raw("enqueue", "--file", str(contract.resolve()))
+
+        self.assertEqual(code, 2)
+        self.assertIn(
+            "work_item.experiment_id must equal experiment.id", errors,
+        )
+        self.assertNotIn("Traceback", errors)
+        self.assertNotIn("Traceback", output)
+
+    def test_synthesize_missing_file_reports_clean_error(self) -> None:
+        code, _, errors = self.invoke_raw(
+            "synthesize", "--file", str(self.root / "absent.json"),
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("No such file or directory", errors)
+        self.assertNotIn("Traceback", errors)
+
+    def test_synthesize_invalid_payload_reports_clean_error(self) -> None:
+        proposal = self.root / "proposal.json"
+        proposal.write_text("{ not json")
+
+        code, _, errors = self.invoke_raw("synthesize", "--file", str(proposal))
+
+        self.assertEqual(code, 2)
+        self.assertNotIn("Traceback", errors)
 
 
 if __name__ == "__main__":
