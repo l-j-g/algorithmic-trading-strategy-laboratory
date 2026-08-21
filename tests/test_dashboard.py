@@ -670,6 +670,17 @@ class HostHeaderGateTests(unittest.TestCase):
             self._get(base, "other.example:9999")
         self.assertEqual(error.exception.code, 403)
 
+    def test_per_request_access_logging_is_silenced(self) -> None:
+        base = self._serve()
+        buffer = io.StringIO()
+
+        with redirect_stdout(buffer):
+            with urllib.request.urlopen(f"{base}/api/summary"):
+                pass
+
+        self.assertNotIn("GET", buffer.getvalue())
+        self.assertNotIn("dashboard:", buffer.getvalue())
+
     def test_host_header_parsing_variants(self) -> None:
         self.assertTrue(host_header_allowed("localhost:8123", "127.0.0.1"))
         self.assertTrue(host_header_allowed("[::1]:8123", "127.0.0.1"))

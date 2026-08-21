@@ -5,14 +5,15 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import (
-    ExperimentSpec, ExperimentType, RouteSpec, RunResult, RunStatus,
-    WorkItem, WorkState,
+    Evaluation, ExperimentSpec, ExperimentType, RouteSpec, RunResult,
+    RunStatus, Verdict, WorkItem, WorkState,
 )
 from ats_lab.local_commands import LocalCommandError
 from ats_lab.web_api import ControlService, ReadOnlyApi, make_handler
@@ -307,6 +308,29 @@ class WebApiTests(unittest.TestCase):
                 urllib.request.urlopen(request)
             context.exception.close()
             self.assertEqual(context.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+
+    def test_hpo_study_detail_route_decodes_percent_encoded_ids(self) -> None:
+        self.database.add_evaluation(Evaluation(
+            experiment_id="EXP-1", verdict=Verdict.HPO_CANDIDATE,
+            summary="promising", next_step="run OOS", evaluator="test",
+        ))
+        study_id = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")["id"]
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.database))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            encoded = urllib.parse.quote(study_id, safe="")
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/v1/hpo/studies/{encoded}"
+            ) as response:
+                payload = json.load(response)
+
+            self.assertEqual(payload["study_id"], study_id)
         finally:
             server.shutdown()
             server.server_close()

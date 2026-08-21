@@ -5,6 +5,9 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+.DS_Store
+.coverage
+htmlcov/
 .ats-lab/*
 !.ats-lab/config.toml.example
 *.sqlite3

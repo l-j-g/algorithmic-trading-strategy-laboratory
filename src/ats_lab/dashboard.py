@@ -1219,8 +1219,8 @@ def make_handler(
             self.end_headers()
             self.wfile.write(payload)
 
-        def log_message(self, format: str, *args: object) -> None:
-            print(f"dashboard: {format % args}")
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
 
     return DashboardHandler
 

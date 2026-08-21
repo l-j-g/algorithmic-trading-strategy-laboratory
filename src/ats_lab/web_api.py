@@ -772,7 +772,9 @@ def make_handler(
                     else:
                         self._send_json(detail)
                 elif request.path.startswith("/api/v1/hpo/studies/"):
-                    study_id = request.path.removeprefix("/api/v1/hpo/studies/")
+                    study_id = unquote(
+                        request.path.removeprefix("/api/v1/hpo/studies/")
+                    )
                     detail = api.hpo_detail(study_id)
                     if detail is None or "/" in study_id:
                         self._error(404, "not_found", "HPO study not found")

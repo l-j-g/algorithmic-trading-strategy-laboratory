@@ -155,6 +155,20 @@ class TerminalConsoleTests(unittest.TestCase):
             self.assertIn("\033[", colored)
             self.assertIn("ATS LAB LIVE", colored)
 
+    def test_console_watch_rejects_non_numeric_interval_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            output = io.StringIO()
+
+            code = run_console(
+                database,
+                input_stream=io.StringIO("watch abc\nquit\n"),
+                output=output,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("invalid interval: abc", output.getvalue())
+
     def test_console_pause_status_resume_and_quit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
