@@ -384,6 +384,7 @@ class DirectMcpExecutorTests(unittest.TestCase):
         work_id: str = "JOB-1",
         experiment_id: str = "EXP-1",
         specification: dict | None = None,
+        poll_initial_seconds: float = 0,
     ) -> tuple[DirectMcpDispatcher, WorkflowDatabase]:
         database = WorkflowDatabase(Path(root) / "lab.sqlite3")
         database.initialize()
@@ -400,7 +401,7 @@ class DirectMcpExecutorTests(unittest.TestCase):
             DirectExecutionConfig(
                 enabled=True,
                 mcp_url=server.url,
-                poll_initial_seconds=0,
+                poll_initial_seconds=poll_initial_seconds,
                 poll_max_seconds=0,
                 max_polls=max_polls,
             ),
@@ -693,6 +694,19 @@ class DirectMcpExecutorTests(unittest.TestCase):
             result = dispatcher.dispatch(batch_request()).payload["results"][0]
             self.assertEqual(result["outcome"], "finished")
             self.assertEqual(dashboard.started, ["jesse-session-1"])
+            self.assertEqual(server.http.run_calls, 1)
+
+    def test_asynchronous_start_landing_prevents_double_dashboard_start(self) -> None:
+        dashboard = FakeDashboard()
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["draft", "running", "finished"]
+        ) as server:
+            dispatcher, _ = self.make_dispatcher(
+                tmp, server, dashboard=dashboard, poll_initial_seconds=0.01,
+            )
+            result = dispatcher.dispatch(batch_request()).payload["results"][0]
+            self.assertEqual(result["outcome"], "finished")
+            self.assertEqual(dashboard.started, [])
             self.assertEqual(server.http.run_calls, 1)
 
     def test_dashboard_unavailable_returns_prompt_start_retry(self) -> None:

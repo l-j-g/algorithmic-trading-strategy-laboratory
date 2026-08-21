@@ -940,6 +940,9 @@ class DirectMcpDispatcher:
         session = self._fetch_session(client, plan, session_id)
         if self._has_started(session):
             return session
+        tolerated = self._await_asynchronous_start(client, plan, session_id)
+        if tolerated is not None:
+            return tolerated
         if not plan.dashboard_supported:
             raise McpError(
                 f"session {session_id} remained draft after MCP start and "
@@ -952,11 +955,30 @@ class DirectMcpDispatcher:
             )
         self.dashboard_client.run_backtest(session_id)
         session = self._fetch_session(client, plan, session_id)
-        if not self._has_started(session):
-            raise McpError(
-                f"session {session_id} remained draft after dashboard start fallback"
-            )
-        return session
+        if self._has_started(session):
+            return session
+        tolerated = self._await_asynchronous_start(client, plan, session_id)
+        if tolerated is not None:
+            return tolerated
+        raise McpError(
+            f"session {session_id} remained draft after dashboard start fallback"
+        )
+
+    def _await_asynchronous_start(
+        self, client: McpClient, plan: ExecutionPlan, session_id: str,
+    ) -> dict[str, Any] | None:
+        """Tolerate a start landing after run_* accepted but before it shows.
+
+        The dashboard fallback must not restart a session whose MCP start is
+        still landing asynchronously, so a draft observation is re-checked
+        once after one poll interval before any second start is issued.
+        """
+        grace = self.config.poll_initial_seconds
+        if grace <= 0:
+            return None
+        self.sleep(grace)
+        session = self._fetch_session(client, plan, session_id)
+        return session if self._has_started(session) else None
 
     @classmethod
     def _has_started(cls, session: dict[str, Any]) -> bool:
