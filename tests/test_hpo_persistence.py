@@ -41,6 +41,21 @@ class HpoPersistenceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def test_candidate_filters_use_explicit_none_aware_predicates(self) -> None:
+        by_id = self.database.hpo_studies({"id": "candidate:EXP-1"})
+        self.assertEqual(len(by_id), 1)
+        self.assertEqual(by_id[0]["study_id"], "candidate:EXP-1")
+
+        by_name = self.database.hpo_studies({"study_name": "Trend candidate"})
+        self.assertEqual([s["study_id"] for s in by_name], ["candidate:EXP-1"])
+
+        null_target = self.database.hpo_studies({"hpo_work_item_id": None})
+        self.assertEqual(
+            [s["study_id"] for s in null_target], ["candidate:EXP-1"],
+        )
+
+        self.assertEqual(self.database.hpo_studies({"id": "candidate:OTHER"}), [])
+
     def test_candidate_schedule_completion_retry_and_terminal_disposition(self) -> None:
         candidates = self.database.hpo_studies(
             {"lifecycle_state": "hpo_candidate"},

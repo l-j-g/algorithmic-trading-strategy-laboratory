@@ -280,6 +280,31 @@ def _ensure_matching_work_item(row: sqlite3.Row, item: WorkItem) -> None:
         )
 
 
+_HPO_STUDY_FILTER_ALIASES = {
+    "id": "study_id",
+    "study_name": "name",
+}
+
+
+def _matches_hpo_study_filters(
+    row: Mapping[str, object],
+    filters: Mapping[str, object],
+) -> bool:
+    """Python-side twin of the SQL WHERE clause built for hpo_studies.
+
+    A None filter means IS NULL (the row key must be present and None);
+    any other filter is plain equality.
+    """
+    for field, value in filters.items():
+        actual = row.get(_HPO_STUDY_FILTER_ALIASES.get(field, field))
+        if value is None:
+            if actual is not None:
+                return False
+        elif actual != value:
+            return False
+    return True
+
+
 class WorkflowDatabase:
     def __init__(self, path: Path):
         self.path = path
@@ -798,15 +823,8 @@ class WorkflowDatabase:
                      )"""
             )
             for candidate in candidates:
-                if any(
-                    candidate.get({
-                        "id": "study_id",
-                        "study_name": "name",
-                    }.get(field, field)) != value
-                    for field, value in filters.items()
-                ):
-                    continue
-                studies.append(candidate)
+                if _matches_hpo_study_filters(candidate, filters):
+                    studies.append(candidate)
         studies.sort(
             key=lambda item: item.get("updated_at") or "", reverse=True,
         )
