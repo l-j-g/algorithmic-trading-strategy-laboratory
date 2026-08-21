@@ -150,6 +150,10 @@ Only consider HPO if:
 - no single route dominates all performance
 - fee sensitivity does not destroy the edge
 
+These criteria are enforced deterministically in code (`evaluate_hpo_candidate`):
+missing evidence yields an inconclusive verdict and never unlocks an
+optimization cycle, regardless of any agent-assigned `hpo_candidate` label.
+
 ### Paper-trade candidate
 
 Only after:

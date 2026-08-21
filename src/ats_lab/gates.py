@@ -160,6 +160,117 @@ def evaluate_promotion(
     )
 
 
+@dataclass(frozen=True)
+class HpoCandidateDecision:
+    """Deterministic gate for claims that a baseline justifies an HPO cycle.
+
+    Mirrors the documented protocol criteria: positive baseline after fees,
+    activity floor per window, multi-window positivity, no single dominant
+    route, and fee sensitivity that does not destroy the edge. Missing
+    evidence is inconclusive and never unlocks optimization.
+    """
+
+    allowed: bool
+    failed: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+
+    @property
+    def finding(self) -> str:
+        parts = []
+        if self.failed:
+            parts.append("failed=" + ",".join(self.failed))
+        if self.missing:
+            parts.append("missing=" + ",".join(self.missing))
+        if not parts:
+            parts.append("hpo-candidate criteria passed")
+        return "HPO-candidate evidence: " + "; ".join(parts) + "."
+
+
+def evaluate_hpo_candidate(
+    evidence: Iterable[NormalizedEvidence],
+    *,
+    policy: ResourcePolicy,
+) -> HpoCandidateDecision:
+    """Enforce the documented HPO-candidate criteria over canonical evidence."""
+    rows = tuple(evidence)
+    failed: list[str] = []
+    missing: list[str] = []
+
+    profit_rows = [
+        row for row in rows if row.net_profit_percentage is not None
+    ]
+    if not profit_rows or any(row.fees is None for row in rows):
+        missing.append("hpo_baseline_positive_after_fees")
+    elif not any(row.net_profit_percentage > 0 for row in profit_rows):
+        failed.append("hpo_baseline_positive_after_fees")
+
+    if not rows or any(row.trade_count is None for row in rows):
+        missing.append("hpo_activity_floor")
+    elif any(
+        int(row.trade_count) < required_trade_count(row, policy)
+        for row in rows
+    ):
+        failed.append("hpo_activity_floor")
+
+    window_groups: dict[tuple[str, str], list[float]] = {}
+    for row in rows:
+        if (
+            row.start_date and row.finish_date
+            and row.net_profit_percentage is not None
+        ):
+            window_groups.setdefault(
+                (str(row.start_date), str(row.finish_date)), [],
+            ).append(float(row.net_profit_percentage))
+    positive_windows = [
+        window for window, values in window_groups.items()
+        if sum(values) / len(values) >= 0
+    ]
+    if len(window_groups) < 2:
+        missing.append("hpo_multi_window_positivity")
+    elif len(positive_windows) < 2:
+        failed.append("hpo_multi_window_positivity")
+
+    route_groups: dict[tuple[str, str], float] = {}
+    for row in profit_rows:
+        key = (str(row.symbol or ""), str(row.timeframe or ""))
+        route_groups[key] = (
+            route_groups.get(key, 0.0) + float(row.net_profit_percentage)
+        )
+    if len(route_groups) < 2:
+        missing.append("hpo_single_route_dominance")
+    else:
+        positive_total = sum(
+            value for value in route_groups.values() if value > 0
+        )
+        best_route = max(route_groups.values())
+        if (
+            positive_total > 0
+            and best_route / positive_total * 100
+            > policy.hpo_route_dominance_percentage
+        ):
+            failed.append("hpo_single_route_dominance")
+
+    cost_rows = tuple(
+        row for row in rows
+        if row.lifecycle_stage == "cost_sensitivity"
+        or row.cost_stress_status is not None
+    )
+    if not cost_rows:
+        missing.append("fees_cost_sensitivity")
+    elif any(row.cost_stress_status == "fail" for row in cost_rows):
+        failed.append("fees_cost_sensitivity")
+    elif any(row.cost_stress_status is None for row in cost_rows):
+        missing.append("fees_cost_sensitivity")
+
+    failed = list(dict.fromkeys(failed))
+    missing = list(dict.fromkeys(missing))
+    return HpoCandidateDecision(
+        allowed=not failed and not missing,
+        failed=tuple(failed),
+        missing=tuple(missing),
+    )
+
+
 def _value(row: object, name: str, default: Any = None) -> Any:
     if isinstance(row, Mapping):
         return row.get(name, default)

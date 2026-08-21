@@ -79,6 +79,7 @@ class ResourcePolicy:
     significance_fdr_level: float = 0.05
     hpo_trials_per_parameter: int = 100
     hpo_best_candidates: int = 20
+    hpo_route_dominance_percentage: float = 50.0
     monte_carlo_scenarios: int = 500
     synthesis_inspect_limit: int = 25
     synthesis_generate_limit: int = 25
@@ -159,6 +160,10 @@ class ResourcePolicy:
         ):
             if float(getattr(self, name)) < 0:
                 raise ValueError(f"resources.{name} must be non-negative")
+        if not 0 < float(self.hpo_route_dominance_percentage) <= 100:
+            raise ValueError(
+                "resources.hpo_route_dominance_percentage must be in (0, 100]"
+            )
         if not 0 < float(self.portfolio_correlation_threshold) <= 1:
             raise ValueError("resources.portfolio_correlation_threshold must be in (0, 1]")
         if not 0 < float(self.portfolio_capacity_utilization_limit) <= 1:
