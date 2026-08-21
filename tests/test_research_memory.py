@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import math
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
@@ -19,6 +21,7 @@ from ats_lab.models import (
     WorkState,
 )
 from ats_lab.research_memory import (
+    MemoryProviderConfig,
     MemoryResearchAdapter,
     backfill_memory_outbox,
     compact_advisory_memory,
@@ -413,6 +416,73 @@ class ResearchMemoryTests(unittest.TestCase):
             method == "POST" and path.endswith(("/workspaces", "/peers", "/sessions"))
             for method, path in adapter.paths[paths_before_recall:]
         ))
+
+class MemoryRedirectCredentialTests(unittest.TestCase):
+    def _start_server(self, handler_class: type[BaseHTTPRequestHandler]):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def _peer(self, seen: list[str | None]):
+        class PeerHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                seen.append(self.headers.get("Authorization"))
+                body = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args: object) -> None:
+                return
+
+        return self._start_server(PeerHandler)
+
+    def _origin(self, location: str):
+        class OriginHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.end_headers()
+
+            def log_message(self, *_args: object) -> None:
+                return
+
+        return self._start_server(OriginHandler)
+
+    def _adapter(self, base_url: str) -> MemoryResearchAdapter:
+        return MemoryResearchAdapter(
+            MemoryProviderConfig(base_url=base_url, timeout_seconds=5),
+            api_key="secret-key",
+        )
+
+    def test_cross_host_redirect_strips_authorization(self) -> None:
+        seen: list[str | None] = []
+        peer = self._peer(seen)
+        origin = self._origin(f"http://localhost:{peer.server_port}/health")
+
+        adapter = self._adapter(f"http://127.0.0.1:{origin.server_port}")
+
+        self.assertTrue(adapter.health())
+        self.assertEqual(seen, [None])
+
+    def test_same_host_redirect_keeps_authorization(self) -> None:
+        seen: list[str | None] = []
+        peer = self._peer(seen)
+        origin = self._origin(
+            f"http://127.0.0.1:{peer.server_port}/health",
+        )
+
+        adapter = self._adapter(f"http://127.0.0.1:{origin.server_port}")
+
+        self.assertTrue(adapter.health())
+        self.assertEqual(seen, ["Bearer secret-key"])
+
 
 class BatchFinalizationTargetingTests(unittest.TestCase):
     def setUp(self) -> None:

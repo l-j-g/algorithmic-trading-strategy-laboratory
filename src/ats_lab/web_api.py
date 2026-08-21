@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .dashboard import hpo_detail_snapshot, query_page
+from .dashboard import LOOPBACK_HOSTS, hpo_detail_snapshot, host_header_allowed, query_page
 from .database import WorkflowDatabase
 from .local_commands import LocalCommandError, LocalCommandRunner
 from .loop_control import SupervisorLoopControl
@@ -639,6 +639,7 @@ def make_handler(
     static_dir: Path | None = None,
     control_service: ControlService | None = None,
     command_runner: LocalCommandRunner | None = None,
+    bound_host: str = "127.0.0.1",
 ) -> type[BaseHTTPRequestHandler]:
     """Build GET-only API handler, optionally serving the Control Room shell."""
 
@@ -650,6 +651,15 @@ def make_handler(
 
         def log_message(self, _format: str, *_args: object) -> None:
             return
+
+        def _reject_host(self) -> bool:
+            if host_header_allowed(self.headers.get("Host", ""), bound_host):
+                return False
+            self._error(
+                403, "forbidden_host",
+                "backend accepts loopback Host headers only",
+            )
+            return True
 
         def _send_json(self, payload: object, status: int = 200) -> None:
             body = _json_bytes(payload)
@@ -690,6 +700,8 @@ def make_handler(
             self._send_json({"error": {"code": code, "detail": detail}}, status)
 
         def do_GET(self) -> None:  # noqa: N802
+            if self._reject_host():
+                return
             request = urlsplit(self.path)
             params = {
                 key: values[-1]
@@ -807,6 +819,8 @@ def make_handler(
             return payload
 
         def do_POST(self) -> None:  # noqa: N802
+            if self._reject_host():
+                return
             request = urlsplit(self.path)
             command_prefix = "/api/v1/commands/"
             if command_runner is not None and request.path.startswith(command_prefix):
@@ -911,7 +925,9 @@ def serve(
     """
     database.initialize()
     api = ReadOnlyApi(database, claim_timeout_seconds=claim_timeout_seconds)
-    server = ThreadingHTTPServer((host, port), make_handler(api))
+    server = ThreadingHTTPServer(
+        (host, port), make_handler(api, bound_host=host),
+    )
     print(f"ATS Lab backend API: http://{host}:{server.server_port}")
     try:
         server.serve_forever()
@@ -935,12 +951,11 @@ def serve_web(
         raise FileNotFoundError(f"frontend directory missing: {frontend_dir}")
     database.initialize()
     api = ReadOnlyApi(database, claim_timeout_seconds=claim_timeout_seconds)
-    loopback_hosts = {"127.0.0.1", "localhost", "::1"}
     control_service = (
-        ControlService(database, repo) if host in loopback_hosts else None
+        ControlService(database, repo) if host in LOOPBACK_HOSTS else None
     )
     command_runner = (
-        LocalCommandRunner(repo) if host in loopback_hosts else None
+        LocalCommandRunner(repo) if host in LOOPBACK_HOSTS else None
     )
     server = ThreadingHTTPServer(
         (host, port),
@@ -949,6 +964,7 @@ def serve_web(
             static_dir=frontend_dir,
             control_service=control_service,
             command_runner=command_runner,
+            bound_host=host,
         ),
     )
     print(f"ATS Lab Control Room: http://{host}:{server.server_port}")

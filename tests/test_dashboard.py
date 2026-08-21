@@ -13,8 +13,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ats_lab.dashboard import (
-    DASHBOARD_JS, dashboard_counts, host_allows_mutations, make_handler,
-    query_page, render_overview, render_page, serve, top_backtests,
+    DASHBOARD_JS, dashboard_counts, host_allows_mutations, host_header_allowed,
+    make_handler, query_page, render_overview, render_page, serve,
+    top_backtests,
 )
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import (
@@ -599,6 +600,86 @@ class DashboardTests(unittest.TestCase):
                 )[0]["state"],
                 "blocked",
             )
+
+
+class HostHeaderGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.database = WorkflowDatabase(Path(self.temporary.name) / "lab.sqlite3")
+        self.database.initialize()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _serve(self, **kwargs: object) -> str:
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), make_handler(self.database, **kwargs),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def _get(self, base: str, host: str | None = None):
+        headers = {"Host": host} if host else {}
+        request = urllib.request.Request(f"{base}/api/summary", headers=headers)
+        return urllib.request.urlopen(request)
+
+    def test_loopback_host_headers_with_ports_are_accepted(self) -> None:
+        base = self._serve()
+        port = base.rsplit(":", 1)[-1]
+
+        with urllib.request.urlopen(f"{base}/api/summary") as response:
+            self.assertEqual(response.status, 200)
+        with self._get(base, f"localhost:{port}") as response:
+            self.assertEqual(response.status, 200)
+        with self._get(base, f"[::1]:{port}") as response:
+            self.assertEqual(response.status, 200)
+
+    def test_foreign_host_header_is_rejected_with_403(self) -> None:
+        base = self._serve()
+
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self._get(base, "attacker.example")
+        self.assertEqual(error.exception.code, 403)
+        self.assertEqual(
+            json.load(error.exception)["error"]["code"], "forbidden_host",
+        )
+
+    def test_post_rejects_foreign_host_before_confirmation_gate(self) -> None:
+        base = self._serve()
+
+        request = urllib.request.Request(
+            f"{base}/api/work-items/JOB-1/retry",
+            data=b"{}", method="POST", headers={"Host": "attacker.example"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        self.assertEqual(error.exception.code, 403)
+
+    def test_explicit_non_loopback_bind_accepts_literal_host_only(self) -> None:
+        base = self._serve(bound_host="192.168.10.10")
+
+        with self._get(base, "192.168.10.10") as response:
+            self.assertEqual(response.status, 200)
+        with self._get(base, "192.168.10.10:8765") as response:
+            self.assertEqual(response.status, 200)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self._get(base, "other.example:9999")
+        self.assertEqual(error.exception.code, 403)
+
+    def test_host_header_parsing_variants(self) -> None:
+        self.assertTrue(host_header_allowed("localhost:8123", "127.0.0.1"))
+        self.assertTrue(host_header_allowed("[::1]:8123", "127.0.0.1"))
+        self.assertTrue(host_header_allowed("::1", "127.0.0.1"))
+        self.assertTrue(host_header_allowed(" 127.0.0.1 ", "127.0.0.1"))
+        self.assertFalse(host_header_allowed("", "127.0.0.1"))
+        self.assertFalse(host_header_allowed("attacker.example", "127.0.0.1"))
+        self.assertFalse(host_header_allowed("127.0.0.1.evil.example", "127.0.0.1"))
+        self.assertTrue(host_header_allowed("localhost:8123", "192.168.10.10"))
+        self.assertFalse(host_header_allowed("attacker.example", "192.168.10.10"))
 
 
 if __name__ == "__main__":

@@ -26,6 +26,25 @@ def host_allows_mutations(host: str) -> bool:
     return host in LOOPBACK_HOSTS
 
 
+def _host_header_name(value: str) -> str:
+    header = value.strip().lower()
+    if header.startswith("["):
+        return header[1:].split("]", 1)[0]
+    if header.count(":") == 1:
+        return header.split(":", 1)[0]
+    return header
+
+
+def host_header_allowed(header: str, bound_host: str) -> bool:
+    """Accept loopback Host headers plus an explicitly non-loopback bind."""
+    allowed = (
+        LOOPBACK_HOSTS
+        if bound_host in LOOPBACK_HOSTS
+        else LOOPBACK_HOSTS | {bound_host.strip().lower()}
+    )
+    return _host_header_name(header) in allowed
+
+
 PAGE_SPECS = {
     "queue": {
         "title": "Active queue",
@@ -949,10 +968,26 @@ def _integer_text(value: object) -> str:
 
 
 def make_handler(
-    database: WorkflowDatabase, *, allow_mutations: bool = True,
+    database: WorkflowDatabase,
+    *,
+    allow_mutations: bool = True,
+    bound_host: str = "127.0.0.1",
 ) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
+        def _reject_host(self) -> bool:
+            if host_header_allowed(self.headers.get("Host", ""), bound_host):
+                return False
+            self._send(_json_bytes({
+                "error": {
+                    "code": "forbidden_host",
+                    "detail": "dashboard accepts loopback Host headers only",
+                },
+            }), "application/json", status=403)
+            return True
+
         def do_GET(self) -> None:  # noqa: N802
+            if self._reject_host():
+                return
             request = urlsplit(self.path)
             page = request.path.strip("/") or "queue"
             raw = parse_qs(request.query, keep_blank_values=False)
@@ -1090,6 +1125,8 @@ def make_handler(
             self._send(payload, "text/html; charset=utf-8")
 
         def do_POST(self) -> None:  # noqa: N802
+            if self._reject_host():
+                return
             if not allow_mutations:
                 self._send(_json_bytes({
                     "error": {
@@ -1192,7 +1229,11 @@ def serve(database: WorkflowDatabase, host: str = "127.0.0.1", port: int = 8765)
     database.initialize()
     server = ThreadingHTTPServer(
         (host, port),
-        make_handler(database, allow_mutations=host_allows_mutations(host)),
+        make_handler(
+            database,
+            allow_mutations=host_allows_mutations(host),
+            bound_host=host,
+        ),
     )
     print(f"ATS Lab dashboard: http://{host}:{server.server_port}")
     try:
