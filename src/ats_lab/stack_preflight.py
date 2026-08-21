@@ -13,6 +13,20 @@ EXPECTED_PUBLIC_TABLES = frozenset({
 })
 
 
+class PublicTablesCheck:
+    """Required-tables subset validation that records unknown extras."""
+
+    def __init__(self) -> None:
+        self.observed: set[str] = set()
+
+    def validate(self, output: str) -> bool:
+        self.observed.update(line for line in output.splitlines() if line)
+        return EXPECTED_PUBLIC_TABLES <= self.observed
+
+    def unexpected(self) -> list[str]:
+        return sorted(self.observed - EXPECTED_PUBLIC_TABLES)
+
+
 class StackPreflightError(RuntimeError):
     def __init__(self, result: dict[str, Any]) -> None:
         super().__init__(str(result.get("detail") or "infrastructure preflight failed"))
@@ -58,6 +72,7 @@ class StackPreflight:
                 checks, "docker_daemon",
                 "Docker daemon unavailable; start Docker Desktop before ATS supervisor",
             )
+        tables = PublicTablesCheck()
         postgres_checks = (
             (
                 "jesse_postgres_container",
@@ -83,17 +98,25 @@ class StackPreflight:
                 "jesse_postgres_tables",
                 self._psql_command(
                     "SELECT tablename FROM pg_catalog.pg_tables "
-                    "WHERE schemaname='public' AND tablename IN "
-                    "('candle','backtestsession','significancetestsession') "
-                    "ORDER BY tablename;"
+                    "WHERE schemaname='public' ORDER BY tablename;"
                 ),
-                lambda output: set(output.splitlines()) == EXPECTED_PUBLIC_TABLES,
+                tables.validate,
                 "Jesse PostgreSQL missing expected public tables",
             ),
         )
         for name, command, validate, detail in postgres_checks:
             healthy = self._command_healthy(command, validate)
-            checks.append({"name": name, "status": "healthy" if healthy else "failed"})
+            entry: dict[str, Any] = {
+                "name": name, "status": "healthy" if healthy else "failed",
+            }
+            if name == "jesse_postgres_tables" and healthy:
+                extras = tables.unexpected()
+                if extras:
+                    entry["detail"] = (
+                        "warning: unexpected public tables (advisory): "
+                        + ", ".join(extras)
+                    )
+            checks.append(entry)
             if not healthy:
                 return self._failure(checks, name, detail)
         for name, url, kind in (

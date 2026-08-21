@@ -119,6 +119,56 @@ class StackPreflightTests(unittest.TestCase):
         self.assertIn("jesse_readonly", flattened)
         self.assertFalse(any("shell" in key for key in flattened))
 
+    def test_extra_public_tables_warn_without_failing_preflight(self) -> None:
+        def run(command, **kwargs):
+            stdout = "ok"
+            if "inspect" in command:
+                stdout = "true"
+            elif "pg_isready" in command:
+                stdout = "accepting connections"
+            elif "SELECT 1" in command[-1]:
+                stdout = "1"
+            elif "pg_catalog.pg_tables" in command[-1]:
+                stdout = (
+                    "backtestsession\ncandle\nsignificancetestsession\n"
+                    "strategy_notes\n"
+                )
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        result = StackPreflight(
+            command_runner=run,
+            endpoint_probe=lambda name, url, kind: {
+                "name": name, "status": "healthy", "url": url,
+            },
+        ).check()
+
+        self.assertTrue(result["healthy"])
+        tables = next(
+            check for check in result["checks"]
+            if check["name"] == "jesse_postgres_tables"
+        )
+        self.assertEqual(tables["status"], "healthy")
+        self.assertIn("strategy_notes", tables["detail"])
+        self.assertIn("advisory", tables["detail"])
+
+    def test_missing_required_table_still_fails_preflight(self) -> None:
+        def run(command, **kwargs):
+            stdout = "ok"
+            if "inspect" in command:
+                stdout = "true"
+            elif "pg_isready" in command:
+                stdout = "accepting connections"
+            elif "SELECT 1" in command[-1]:
+                stdout = "1"
+            elif "pg_catalog.pg_tables" in command[-1]:
+                stdout = "candle\nsignificancetestsession\nextra_table\n"
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        result = StackPreflight(command_runner=run).check()
+
+        self.assertFalse(result["healthy"])
+        self.assertEqual(result["failed_check"], "jesse_postgres_tables")
+
     def test_memory_outage_is_reported_but_does_not_block_canonical_work(self) -> None:
         def run(command, **_kwargs):
             stdout = "ok"
