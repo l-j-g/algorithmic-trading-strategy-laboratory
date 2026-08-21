@@ -252,6 +252,54 @@ class GateTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertIn("fees_cost_sensitivity", decision.failed)
 
+    def test_promotion_rejects_oos_overlapping_training_dates(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(evidence_split=EvidenceSplit.TRAIN),
+                self.row(
+                    evidence_split=EvidenceSplit.OOS,
+                    start_date="2024-07-01", finish_date="2025-07-01",
+                    cost_stress_status=CostStressStatus.PASS,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("oos_training_overlap", decision.failed)
+
+    def test_promotion_accepts_adjacent_oos_window_after_training(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(
+                    evidence_split=EvidenceSplit.TRAIN,
+                    finish_date="2024-12-31",
+                ),
+                self.row(
+                    evidence_split=EvidenceSplit.OOS,
+                    start_date="2024-12-31", finish_date="2025-06-30",
+                    cost_stress_status=CostStressStatus.PASS,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertNotIn("oos_training_overlap", decision.failed)
+        self.assertNotIn("oos_validation", decision.missing)
+        self.assertFalse(decision.allowed)
+
+    def test_promotion_oos_overlap_only_matches_same_route(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(evidence_split=EvidenceSplit.TRAIN),
+                self.row(
+                    evidence_split=EvidenceSplit.OOS,
+                    symbol="ETH-USDT",
+                    cost_stress_status=CostStressStatus.PASS,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertNotIn("oos_training_overlap", decision.failed)
+
 
 if __name__ == "__main__":
     unittest.main()

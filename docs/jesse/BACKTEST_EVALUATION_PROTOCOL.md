@@ -158,7 +158,10 @@ optimization cycle, regardless of any agent-assigned `hpo_candidate` label.
 
 Only after:
 
-- passing OOS evidence with complete explicit candle route and metrics
+- passing OOS evidence with complete explicit candle route and metrics;
+  OOS eligibility is verified at gate time by date disjointness (half-open
+  windows) from the training routes of the same symbol and timeframe — an
+  overlapping or mislabelled OOS window is rejected, never trusted
 - passing rolling walk-forward evidence with complete explicit candle route
   and metrics
 - passing candles-based Monte Carlo/path robustness with route dates and

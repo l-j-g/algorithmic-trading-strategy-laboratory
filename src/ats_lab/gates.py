@@ -84,8 +84,18 @@ def evaluate_promotion(
     rolling = tuple(
         row for row in rows if _value(row, "evidence_split") == "rolling"
     )
+    training = tuple(
+        row for row in rows
+        if _value(row, "evidence_split") in {"train", "holdout"}
+    )
+    overlapping = tuple(
+        row for row in oos if _overlaps_training(row, training)
+    )
+    if overlapping:
+        failed.append("oos_training_overlap")
+    eligible_oos = tuple(row for row in oos if row not in overlapping)
     _evaluate_validation_lane(
-        "oos_validation", oos, policy, failed, missing,
+        "oos_validation", eligible_oos, policy, failed, missing,
     )
     _evaluate_validation_lane(
         "walk_forward", rolling, policy, failed, missing,
@@ -269,6 +279,42 @@ def evaluate_hpo_candidate(
         failed=tuple(failed),
         missing=tuple(missing),
     )
+
+
+def _overlaps_training(row: object, training_rows: Iterable[object]) -> bool:
+    """Return whether one OOS row's date range intersects a training route.
+
+    Windows are half-open [start, finish) per instrument and timeframe, so
+    adjacent splits share no candle days. Undated rows cannot prove
+    disjointness and are handled by the lane's route-completeness gate.
+    """
+    start = _value(row, "start_date")
+    finish = _value(row, "finish_date")
+    if not start or not finish:
+        return False
+    try:
+        oos_start = date.fromisoformat(str(start))
+        oos_finish = date.fromisoformat(str(finish))
+    except ValueError:
+        return False
+    identity = (_value(row, "symbol"), _value(row, "timeframe"))
+    for other in training_rows:
+        if (
+            (_value(other, "symbol"), _value(other, "timeframe")) != identity
+        ):
+            continue
+        other_start = _value(other, "start_date")
+        other_finish = _value(other, "finish_date")
+        if not other_start or not other_finish:
+            continue
+        try:
+            train_start = date.fromisoformat(str(other_start))
+            train_finish = date.fromisoformat(str(other_finish))
+        except ValueError:
+            continue
+        if oos_start < train_finish and train_start < oos_finish:
+            return True
+    return False
 
 
 def _value(row: object, name: str, default: Any = None) -> Any:
