@@ -16,6 +16,8 @@ from ats_lab.direct_mcp_executor import (
     McpClient,
     McpError,
     classify_jesse_session,
+    execution_request_violations,
+    execution_result_violations,
     load_direct_execution_config,
 )
 from ats_lab.models import ExperimentSpec, WorkItem, WorkState
@@ -509,6 +511,154 @@ class DirectMcpExecutorTests(unittest.TestCase):
             self.assertEqual(telemetry["model_call_count"], 0)
             self.assertGreater(telemetry["request_bytes"], 0)
             self.assertGreater(telemetry["mcp_call_count"], 0)
+
+    def test_execution_request_validator_accepts_canonical_item(self) -> None:
+        self.assertEqual(execution_request_violations(
+            batch_request()["requests"][0],
+        ), [])
+        self.assertEqual(execution_request_violations(
+            significance_request()["requests"][0],
+        ), [])
+
+    def test_execution_request_validator_reports_schema_violations(self) -> None:
+        item = batch_request()["requests"][0]
+        item["schema_version"] = 2
+        item["work_item_id"] = ""
+        del item["experiment_id"]
+        item["experiment"]["strategy_name"] = 7
+        item["experiment"]["routes"] = [{
+            "exchange": "Binance Perpetual Futures", "symbol": "BTC-USDT",
+            "timeframe": "1h", "start_date": "2024-01-01",
+        }]
+        item["work_item"]["operation"] = "voodoo"
+        item["work_item"]["parameters"] = "n=5"
+        violations = execution_request_violations(item)
+        self.assertIn("schema_version must be 1", violations)
+        self.assertIn("work_item_id must be non-empty text", violations)
+        self.assertIn("experiment_id must be non-empty text", violations)
+        self.assertIn("experiment.strategy_name must be non-empty text", violations)
+        self.assertIn(
+            "experiment.routes[0].finish_date must be non-empty text", violations,
+        )
+        self.assertIn(
+            "work_item.operation must be one of backtest, hpo, monte_carlo, "
+            "significance",
+            violations,
+        )
+        self.assertIn("work_item.parameters must be an object", violations)
+
+    def test_execution_request_validator_checks_gate_shapes(self) -> None:
+        item = batch_request()["requests"][0]
+        item["experiment"]["success_gates"] = [
+            {"name": "sharpe", "operator": ">=", "threshold": 0.0, "required": True},
+            {"name": "", "operator": ">="},
+            {"operator": ">="},
+            {"name": "x", "operator": ">=", "required": "yes"},
+            "sharpe >= 0",
+        ]
+        item["experiment"]["failure_gates"] = {"name": "dd"}
+        violations = execution_request_violations(item)
+        self.assertIn("experiment.success_gates[1].name must be non-empty text", violations)
+        self.assertIn("experiment.success_gates[2].name must be non-empty text", violations)
+        self.assertIn(
+            "experiment.success_gates[3].required must be boolean", violations,
+        )
+        self.assertIn("experiment.success_gates[4] must be an object", violations)
+        self.assertIn("experiment.failure_gates must be an array", violations)
+
+    def test_dispatch_retries_schema_invalid_request_without_mcp_traffic(self) -> None:
+        request = batch_request()
+        route = dict(request["requests"][0]["experiment"]["routes"][0])
+        del route["finish_date"]
+        request["requests"][0]["experiment"]["routes"] = [route]
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, _ = self.make_dispatcher(tmp, server)
+            result = dispatcher.dispatch(request)
+        item_result = result.payload["results"][0]
+        self.assertEqual(item_result["outcome"], "retry")
+        self.assertEqual(item_result["blocker_code"], "direct_mcp_error")
+        self.assertIn(
+            "jesse-execution-request schema violation", item_result["detail"],
+        )
+        self.assertEqual(server.http.requests, [])
+
+    def test_execution_result_validator_enforces_exact_raw_result_keys(self) -> None:
+        view = {
+            "schema_version": 1, "transport": "jesse_mcp",
+            "work_item_id": "JOB-1", "status": "finished",
+            "session_id": "s-1", "dashboard_url": None,
+            "metrics": {"total": 10}, "error": None,
+            "raw_result": {
+                "session_id": "s-1", "status": "finished",
+                "metrics": {"total": 10},
+            },
+        }
+        self.assertEqual(execution_result_violations(view), [])
+        view["raw_result"]["extra"] = True
+        self.assertIn(
+            "raw_result must contain exactly session_id, status, and metrics",
+            execution_result_violations(view),
+        )
+        view["raw_result"] = {
+            "session_id": "other", "status": "finished", "metrics": {},
+        }
+        violations = execution_result_violations(view)
+        self.assertIn("raw_result.session_id must equal session_id", violations)
+        self.assertIn("raw_result.metrics must equal metrics", violations)
+        view["raw_result"] = {
+            "session_id": "s-1", "status": "stopped", "metrics": {"total": 10},
+        }
+        self.assertIn(
+            "raw_result.status must equal status",
+            execution_result_violations(view),
+        )
+
+    def test_execution_result_validator_reports_envelope_violations(self) -> None:
+        violations = execution_result_violations({
+            "schema_version": 2, "transport": "agent",
+            "work_item_id": "", "status": "wrapped",
+            "session_id": None, "dashboard_url": 5,
+            "metrics": [], "error": {"code": "x"},
+            "raw_result": {},
+        })
+        self.assertIn("schema_version must be 1", violations)
+        self.assertIn("transport must be jesse_mcp", violations)
+        self.assertIn("work_item_id must be non-empty text", violations)
+        self.assertIn(
+            "status must be one of draft, finished, running, stopped, "
+            "terminated, unknown",
+            violations,
+        )
+        self.assertIn("session_id must be non-empty text", violations)
+        self.assertIn("dashboard_url must be text or null", violations)
+        self.assertIn("metrics must be an object", violations)
+        self.assertIn("finished result cannot contain an error", violations)
+        self.assertEqual(execution_result_violations("nope"), [
+            "execution result must be an object",
+        ])
+
+    def test_finished_persist_boundary_blocks_invalid_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server, patch(
+            "ats_lab.direct_mcp_executor.execution_result_violations",
+            return_value=["metrics must be an object"],
+        ):
+            dispatcher, database = self.make_dispatcher(tmp, server)
+            result = dispatcher.dispatch(batch_request())
+            item_result = result.payload["results"][0]
+            self.assertEqual(item_result["outcome"], "blocked")
+            self.assertEqual(item_result["blocker_code"], "invalid_execution_result")
+            self.assertIn(
+                "jesse-execution-result schema violation", item_result["detail"],
+            )
+            telemetry = database.rows(
+                "SELECT outcome FROM direct_execution_telemetry "
+                "ORDER BY id DESC LIMIT 1"
+            )[0]
+            self.assertEqual(telemetry["outcome"], "blocked")
 
     def test_backtest_forwards_work_item_data_routes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
