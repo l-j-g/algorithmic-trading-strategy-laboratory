@@ -94,6 +94,19 @@ def _route_count(specification: dict[str, Any], split: str) -> int:
     return len(routes) if isinstance(routes, list) else 0
 
 
+def _is_relative_seconds(value: object) -> bool:
+    """True when a retry schedule is a bare number instead of a timestamp."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    try:
+        float(str(value).strip())
+    except ValueError:
+        return False
+    return True
+
+
 def _hpo_route_readiness(
     database: WorkflowDatabase, studies: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -112,6 +125,16 @@ def _hpo_route_readiness(
            ORDER BY s.updated_at DESC,s.id"""
     )
     by_id = {str(row["study_id"]): row for row in rows}
+    validation_by_study: dict[str, list[dict[str, Any]]] = {}
+    for job in database.rows(
+        """SELECT v.study_id,v.evidence_split,w.state,w.blocker_code,
+                  json_extract(w.specification_json,'$.readiness.status')
+                  AS readiness_status
+           FROM hpo_validation_jobs v
+           JOIN work_items w ON w.id=v.work_item_id
+           ORDER BY v.study_id,v.evidence_split,v.id"""
+    ):
+        validation_by_study.setdefault(str(job.pop("study_id")), []).append(job)
     entries: list[dict[str, Any]] = []
     missing_counts = {split: 0 for split in ("hpo", "oos", "rolling")}
     validation_counts = {"total": 0, "ready": 0, "pending": 0, "running": 0,
@@ -131,15 +154,7 @@ def _hpo_route_readiness(
             split: _route_count(specification, split)
             for split in ("hpo", "oos", "rolling")
         }
-        validation_jobs = database.rows(
-            """SELECT v.evidence_split,w.state,w.blocker_code,
-                      json_extract(w.specification_json,'$.readiness.status')
-                      AS readiness_status
-               FROM hpo_validation_jobs v
-               JOIN work_items w ON w.id=v.work_item_id
-               WHERE v.study_id=? ORDER BY v.evidence_split,v.id""",
-            (study_id,),
-        )
+        validation_jobs = validation_by_study.get(study_id, [])
         study_pending_jobs = 0
         for job in validation_jobs:
             validation_counts["total"] += 1
@@ -302,7 +317,7 @@ def operator_status(
     )
     invalid_retry_schedules = sum(
         1 for row in retry_rows
-        if str(row["retry_after"]).strip().replace(".", "", 1).isdigit()
+        if _is_relative_seconds(row["retry_after"])
     )
     latest_event = database.rows("SELECT MAX(occurred_at) AS at FROM events")[0]["at"]
     synthesis = database.synthesis_status()

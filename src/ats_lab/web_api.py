@@ -460,8 +460,8 @@ class ReadOnlyApi:
         if not rows:
             return None
         item = dict(rows[0])
-        status = self._status()
         if item.get("state") == "running":
+            status = self._status()
             if work_item_id in set(status.get("stale_execution_claim_ids", ())):
                 item["canonical_state"] = "running"
                 item["state"] = "stale_claim"

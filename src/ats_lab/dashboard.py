@@ -160,13 +160,14 @@ def _newest_complete_evidence(
     evidence = database.query_normalized_evidence(
         filters=dict(filters or {}), limit=2000,
     )
-    complete = [item for item in evidence if _complete_compatibility(_evidence_dict(item))]
+    complete = [
+        (item, row) for item, row in (
+            (item, _evidence_dict(item)) for item in evidence
+        ) if _complete_compatibility(row)
+    ]
     if not complete:
         return None
-    return max(
-        complete,
-        key=lambda item: _evidence_dict(item).get("completed_at") or "",
-    )
+    return max(complete, key=lambda pair: pair[1].get("completed_at") or "")[0]
 
 
 def top_backtests(database: WorkflowDatabase, metric: str = "sharpe", limit: int = 20,
@@ -197,14 +198,14 @@ def top_backtests(database: WorkflowDatabase, metric: str = "sharpe", limit: int
             "start_date": start_date, "finish_date": finish_date,
         })
     if comparison_filters:
-        evidence = [
-            _evidence_dict(item)
-            for item in database.query_normalized_evidence(limit=5000)
-            if _complete_compatibility(_evidence_dict(item))
-            and _matches_comparison_filters(
-                _evidence_dict(item), comparison_filters,
-            )
-        ]
+        evidence = []
+        for item in database.query_normalized_evidence(limit=5000):
+            row = _evidence_dict(item)
+            if (
+                _complete_compatibility(row)
+                and _matches_comparison_filters(row, comparison_filters)
+            ):
+                evidence.append(row)
     else:
         anchor = _newest_complete_evidence(database, filters)
         if anchor is None:
@@ -394,13 +395,15 @@ def dashboard_counts(database: WorkflowDatabase) -> dict[str, object]:
         SUM(CASE WHEN state='blocked' THEN 1 ELSE 0 END) AS blocked,
         SUM(CASE WHEN state='waiting_retry' THEN 1 ELSE 0 END) AS retry
         FROM work_items""")[0]
-    candidates = len({
-        item.experiment_id
-        for item in database.query_normalized_evidence(limit=5000)
-        if item.verdict in {
-            "hpo_candidate", "paper_trade_candidate", "revise",
-        }
-    })
+    candidates = database.rows(
+        """SELECT COUNT(DISTINCT experiment_id) AS count FROM (
+               SELECT experiment_id FROM normalized_evidence
+               WHERE verdict IN ('hpo_candidate','paper_trade_candidate','revise')
+               ORDER BY COALESCE(completed_at,'') DESC,
+                        experiment_id,run_id,session_id,evidence_key
+               LIMIT 5000
+           )"""
+    )[0]["count"]
     awaiting = database.rows(
         """SELECT COUNT(*) AS count FROM work_items
            WHERE state='running' AND blocker_code='awaiting_batch_evaluation'"""
