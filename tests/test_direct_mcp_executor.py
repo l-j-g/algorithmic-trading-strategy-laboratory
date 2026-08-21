@@ -703,6 +703,47 @@ class DirectMcpExecutorTests(unittest.TestCase):
             ]
             self.assertEqual(outcomes, ["retry", "blocked", "finished"])
 
+    def test_failed_replacement_draft_creation_releases_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, database = self.make_dispatcher(tmp, server)
+            with database.connect() as connection:
+                connection.execute(
+                    """INSERT INTO direct_execution_recoveries(
+                           work_item_id,old_session_id,old_state,reason,
+                           replacement_allowed,replacement_reserved,
+                           created_at,updated_at
+                       ) VALUES (
+                           'JOB-1','old-session','zombie_nonexecuting',
+                           'zombie recovery',1,0,?,?)""",
+                    ("2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z"),
+                )
+            with patch.object(
+                dispatcher, "_create",
+                side_effect=McpError("draft create failed"),
+            ):
+                failed = dispatcher.dispatch(batch_request())
+            self.assertEqual(
+                failed.payload["results"][0]["blocker_code"], "direct_mcp_error",
+            )
+            row = database.rows(
+                """SELECT replacement_reserved,replacement_session_id
+                   FROM direct_execution_recoveries WHERE work_item_id='JOB-1'""",
+            )[0]
+            self.assertEqual(row["replacement_reserved"], 0)
+            self.assertIsNone(row["replacement_session_id"])
+            recovered = dispatcher.dispatch(batch_request())
+            self.assertEqual(
+                recovered.payload["results"][0]["outcome"], "finished",
+            )
+            row = database.rows(
+                """SELECT replacement_reserved,replacement_session_id
+                   FROM direct_execution_recoveries WHERE work_item_id='JOB-1'""",
+            )[0]
+            self.assertEqual(row["replacement_reserved"], 1)
+            self.assertEqual(row["replacement_session_id"], "jesse-session-1")
+
     def test_backtest_forwards_work_item_data_routes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["running", "finished"]

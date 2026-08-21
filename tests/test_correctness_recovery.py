@@ -9,6 +9,7 @@ from ats_lab.correctness_recovery import (
     backfill_aggregate_route_coverage,
     classify_recovery_candidates,
     recover_executor_infrastructure_failures,
+    recover_orphaned_replacement_reservations,
     recover_partial_batch_retries,
     recover_zombie_execution_sessions,
     recover_verified_margin_sizing_blocker,
@@ -36,6 +37,94 @@ class CorrectnessRecoveryTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def _seed_research_work_item(
+        self, work_item_id: str = "JOB-1", experiment_id: str = "EXP-1",
+        state: WorkState = WorkState.WAITING_RETRY,
+    ) -> None:
+        self.database.upsert_experiment(ExperimentSpec(
+            id=experiment_id, strategy_name="Trend",
+        ))
+        self.database.upsert_work_item(WorkItem(
+            id=work_item_id, experiment_id=experiment_id, priority=1, state=state,
+        ))
+
+    def _insert_recovery_row(
+        self, work_item_id: str, old_session_id: str, *, reserved: int,
+    ) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                """INSERT INTO direct_execution_recoveries(
+                       work_item_id,old_session_id,old_state,reason,
+                       replacement_allowed,replacement_reserved,
+                       created_at,updated_at
+                   ) VALUES (?,?,?,?,1,?,?,?)""",
+                (
+                    work_item_id, old_session_id, "zombie_nonexecuting",
+                    "zombie recovery", reserved,
+                    "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z",
+                ),
+            )
+
+    def test_orphaned_replacement_reservation_preview_and_apply(self) -> None:
+        self._seed_research_work_item()
+        self._insert_recovery_row("JOB-1", "old-session", reserved=1)
+        preview = recover_orphaned_replacement_reservations(self.database)
+        self.assertEqual(
+            [item["work_item_id"] for item in preview["planned"]], ["JOB-1"],
+        )
+        applied = recover_orphaned_replacement_reservations(
+            self.database, apply=True,
+        )
+        self.assertEqual(applied["changed"], ["JOB-1"])
+        row = self.database.rows(
+            """SELECT replacement_reserved,replacement_session_id
+               FROM direct_execution_recoveries WHERE work_item_id='JOB-1'""",
+        )[0]
+        self.assertEqual(row["replacement_reserved"], 0)
+        self.assertIsNone(row["replacement_session_id"])
+        events = self.database.rows(
+            """SELECT event_type FROM events WHERE aggregate_id='JOB-1'
+               AND event_type='orphaned_replacement_reservation_cleared'""",
+        )
+        self.assertEqual(len(events), 1)
+        again = recover_orphaned_replacement_reservations(
+            self.database, apply=True,
+        )
+        self.assertEqual(again["planned"], [])
+        self.assertEqual(again["changed"], [])
+
+    def test_orphaned_replacement_reservation_guards(self) -> None:
+        self._seed_research_work_item("JOB-EXISTS")
+        self._insert_recovery_row("JOB-EXISTS", "old-session", reserved=1)
+        with self.database.connect() as connection:
+            connection.execute(
+                """INSERT INTO direct_execution_sessions(
+                       work_item_id,experiment_id,session_id,request_fingerprint,
+                       state,created_at,updated_at
+                   ) VALUES (
+                       'JOB-EXISTS','EXP-1','newer-session','fp','draft',?,?)""",
+                ("2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z"),
+            )
+        self._seed_research_work_item("JOB-RUN", state=WorkState.BLOCKED)
+        self._insert_recovery_row("JOB-RUN", "run-old-session", reserved=1)
+        self.database.add_run(RunResult(
+            id="RUN-JOB-RUN", experiment_id="EXP-1", work_item_id="JOB-RUN",
+            session_id="run-old-session", status=RunStatus.FINISHED,
+            metrics={"total": 1}, raw_result={
+                "session_id": "run-old-session", "status": "finished",
+                "metrics": {"total": 1},
+            },
+        ))
+        self._seed_research_work_item("JOB-RUNNING", state=WorkState.RUNNING)
+        self._insert_recovery_row("JOB-RUNNING", "running-old-session", reserved=1)
+
+        result = recover_orphaned_replacement_reservations(self.database)
+
+        self.assertEqual(result["planned"], [])
+        self.assertEqual(result["rejected"]["JOB-EXISTS"], "replacement_session_exists")
+        self.assertEqual(result["rejected"]["JOB-RUN"], "durable_run_exists")
+        self.assertEqual(result["rejected"]["JOB-RUNNING"], "work_item_not_recoverable")
 
     def test_backfill_requires_finished_session_evidence_and_preserves_raw_metrics(self) -> None:
         routes = tuple(

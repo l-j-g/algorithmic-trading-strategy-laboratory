@@ -253,6 +253,97 @@ def recover_zombie_execution_sessions(
     }
 
 
+def recover_orphaned_replacement_reservations(
+    database: WorkflowDatabase, *, apply: bool = False, active_limit: int = 5,
+) -> dict:
+    """Clear replacement reservations that never persisted a session id.
+
+    A crash between reserving a replacement session and persisting its id
+    leaves ``replacement_reserved=1`` with ``replacement_session_id IS NULL``,
+    which the executor rejects forever as requiring manual reconciliation.
+    This repair clears the reservation only when no local evidence of an
+    actual replacement session exists (checkpoint still points at the old
+    session or is absent) and no durable run was persisted.
+    """
+    planned: list[dict] = []
+    rejected: dict[str, str] = {}
+    rows = database.rows(
+        """SELECT work_item_id,old_session_id,replacement_allowed
+           FROM direct_execution_recoveries
+           WHERE replacement_reserved=1 AND replacement_session_id IS NULL""",
+    )
+    for row in rows:
+        work_item_id = row["work_item_id"]
+        if not row["replacement_allowed"]:
+            rejected[work_item_id] = "replacement_not_allowed"
+            continue
+        sessions = database.rows(
+            "SELECT session_id FROM direct_execution_sessions WHERE work_item_id=?",
+            (work_item_id,),
+        )
+        if any(
+            session["session_id"] != row["old_session_id"] for session in sessions
+        ):
+            rejected[work_item_id] = "replacement_session_exists"
+            continue
+        if database.rows(
+            "SELECT 1 FROM runs WHERE work_item_id=? LIMIT 1",
+            (work_item_id,),
+        ):
+            rejected[work_item_id] = "durable_run_exists"
+            continue
+        states = database.rows(
+            "SELECT state FROM work_items WHERE id=?", (work_item_id,),
+        )
+        if not states or states[0]["state"] not in {"blocked", "waiting_retry"}:
+            rejected[work_item_id] = "work_item_not_recoverable"
+            continue
+        planned.append({
+            "work_item_id": work_item_id,
+            "old_session_id": row["old_session_id"],
+            "reason": (
+                "replacement reservation never persisted a session id; "
+                "no replacement session evidence exists"
+            ),
+        })
+    changed: list[str] = []
+    if apply and planned:
+        now = utc_now()
+        with database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for item in planned:
+                work_item_id = item["work_item_id"]
+                cleared = connection.execute(
+                    """UPDATE direct_execution_recoveries
+                       SET replacement_reserved=0,updated_at=?
+                       WHERE work_item_id=? AND replacement_reserved=1
+                         AND replacement_session_id IS NULL""",
+                    (now, work_item_id),
+                )
+                if cleared.rowcount != 1:
+                    raise RuntimeError(
+                        f"concurrent replacement reservation change: {work_item_id}"
+                    )
+                connection.execute(
+                    """INSERT INTO events(aggregate_type,aggregate_id,event_type,
+                           payload_json,occurred_at) VALUES(
+                           'work_item',?,
+                           'orphaned_replacement_reservation_cleared',?,?)""",
+                    (work_item_id, json.dumps({
+                        "old_session_id": item["old_session_id"],
+                        "reason": item["reason"],
+                    }, sort_keys=True), now),
+                )
+                changed.append(work_item_id)
+        promoted = database.promote_scheduled_runnable(active_limit)
+    else:
+        promoted = 0
+    return {
+        "apply": apply, "planned": planned, "changed": changed,
+        "rejected": rejected, "promoted": promoted,
+    }
+
+
 def recover_executor_infrastructure_failures(
     database: WorkflowDatabase, *, apply: bool = False,
     worker_id: str = "ats-lab-supervisor", active_limit: int = 5,

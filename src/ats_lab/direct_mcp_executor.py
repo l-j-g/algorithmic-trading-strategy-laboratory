@@ -1304,7 +1304,11 @@ class DirectMcpDispatcher:
             )
             if reserved.rowcount != 1:
                 raise McpError("replacement session reservation changed")
-        session_id = self._create(client, request, plan)
+        try:
+            session_id = self._create(client, request, plan)
+        except Exception:
+            self._release_replacement_reservation(work_item_id)
+            raise
         with self.database.connect() as connection:
             saved = connection.execute(
                 """UPDATE direct_execution_recoveries
@@ -1316,6 +1320,21 @@ class DirectMcpDispatcher:
             if saved.rowcount != 1:
                 raise McpError("replacement session id persistence failed")
         return session_id, True, True
+
+    def _release_replacement_reservation(self, work_item_id: str) -> None:
+        """Undo a reservation whose replacement draft never got created.
+
+        A crash between reservation and session-id persist still wedges the
+        row; :mod:`ats_lab.correctness_recovery` clears those orphans.
+        """
+        with self.database.connect() as connection:
+            connection.execute(
+                """UPDATE direct_execution_recoveries
+                   SET replacement_reserved=0,updated_at=?
+                   WHERE work_item_id=? AND replacement_reserved=1
+                     AND replacement_session_id IS NULL""",
+                (utc_now(), work_item_id),
+            )
 
     def _adopt_replacement_checkpoint(
         self, work_item_id: str, session_id: str,
