@@ -213,6 +213,42 @@ class OptunaImportTests(unittest.TestCase):
         )
         self.assertEqual(details["params"], {"period": 12})
 
+    def test_study_name_prefix_never_implies_classifications(self) -> None:
+        source = sqlite3.connect(self.source)
+        source.execute(
+            "INSERT INTO studies VALUES (2,'EmaConvictionTrendV7_2026')",
+        )
+        source.execute(
+            "INSERT INTO study_directions VALUES (2,'MAXIMIZE',2,0)",
+        )
+        source.execute(
+            """INSERT INTO trials VALUES (
+                   2,7,2,'COMPLETE','2026-01-01 00:00:00','2026-01-01 00:00:01'
+               )""",
+        )
+        source.execute("INSERT INTO trial_values VALUES (2,2,0,0.4,'FINITE')")
+        source.commit()
+        source.close()
+
+        result = import_optuna_study(
+            self.database,
+            self.source,
+            study_name="EmaConvictionTrendV7_2026",
+            parent_experiment_id="EXP-HPO",
+            parent_work_item_id="JOB-HPO",
+            strategy="Trend",
+        )
+
+        self.assertEqual(result["classifications"], {})
+        self.assertEqual(self.database.rows(
+            "SELECT COUNT(*) AS count FROM hpo_selected_trials WHERE study_id=?",
+            (result["study_id"],),
+        )[0]["count"], 0)
+        self.assertEqual(self.database.rows(
+            "SELECT COUNT(*) AS count FROM hpo_proposed_defaults WHERE study_id=?",
+            (result["study_id"],),
+        )[0]["count"], 0)
+
     def test_selected_trial_schedules_validation_by_reference(self) -> None:
         result = import_optuna_study(
             self.database,

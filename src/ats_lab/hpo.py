@@ -42,41 +42,6 @@ class JesseSessionExport:
     study: OptunaStudy
 
 
-EMA_V7_CLASSIFICATIONS = {
-    66: {
-        "classification": "likely_overfit",
-        "rank": None,
-        "reason": (
-            "Likely overfit: training Sharpe 1.914 and +25.50% net collapsed "
-            "to holdout Sharpe 0.109 and +0.86% net."
-        ),
-    },
-    332: {
-        "classification": "validation_candidate",
-        "rank": 1,
-        "reason": (
-            "Validation candidate: balanced train/holdout profitability, "
-            "holdout Sharpe 1.218, and 2.17% holdout drawdown."
-        ),
-    },
-    207: {
-        "classification": "validation_candidate",
-        "rank": 2,
-        "reason": (
-            "Validation candidate: train/holdout net profit remained close, "
-            "with holdout Sharpe 1.157."
-        ),
-    },
-    394: {
-        "classification": "validation_candidate",
-        "rank": 3,
-        "reason": (
-            "Validation candidate: positive holdout return but weaker Sharpe "
-            "and wider train/holdout stability gap than trials 332 and 207."
-        ),
-    },
-}
-
 _OPTUNA_STATES = frozenset({"RUNNING", "COMPLETE", "PRUNED", "FAIL", "WAITING"})
 
 
@@ -363,14 +328,7 @@ def import_optuna_study(
         parent_work_item_id=parent_work_item_id,
         strategy=strategy,
         objective_name=objective_name,
-        classifications=(
-            classifications
-            if classifications is not None
-            else (
-                EMA_V7_CLASSIFICATIONS
-                if study_name.startswith("EmaConvictionTrendV7_") else {}
-            )
-        ),
+        classifications=classifications,
         target_study_id=target_study_id,
     )
 
