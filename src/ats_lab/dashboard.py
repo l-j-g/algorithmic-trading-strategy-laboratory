@@ -1,4 +1,8 @@
-"""Read-only local operator dashboard backed by the laboratory database."""
+"""Local operator dashboard backed by the laboratory database.
+
+Read-only views plus two audited queue actions (retry/rectify) that are
+served only on loopback binds and require an explicit confirmation header.
+"""
 from __future__ import annotations
 
 import argparse
@@ -12,6 +16,14 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from .console import distinct_candidate_evidence
 from .database import WorkflowDatabase
 from .status import hpo_detail_snapshot, hpo_lifecycle_snapshot
+
+
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def host_allows_mutations(host: str) -> bool:
+    """State-mutating endpoints stay loopback-only, matching serve_web."""
+    return host in LOOPBACK_HOSTS
 
 
 PAGE_SPECS = {
@@ -936,7 +948,9 @@ def _integer_text(value: object) -> str:
     return "—" if value is None else f"{int(value):,}"
 
 
-def make_handler(database: WorkflowDatabase) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    database: WorkflowDatabase, *, allow_mutations: bool = True,
+) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             request = urlsplit(self.path)
@@ -1076,6 +1090,16 @@ def make_handler(database: WorkflowDatabase) -> type[BaseHTTPRequestHandler]:
             self._send(payload, "text/html; charset=utf-8")
 
         def do_POST(self) -> None:  # noqa: N802
+            if not allow_mutations:
+                self._send(_json_bytes({
+                    "error": {
+                        "code": "mutations_disabled",
+                        "detail": (
+                            "state-mutating actions require a loopback bind"
+                        ),
+                    },
+                }), "application/json", status=403)
+                return
             request = urlsplit(self.path)
             prefix = "/api/work-items/"
             if not request.path.startswith(prefix):
@@ -1166,7 +1190,10 @@ def make_handler(database: WorkflowDatabase) -> type[BaseHTTPRequestHandler]:
 
 def serve(database: WorkflowDatabase, host: str = "127.0.0.1", port: int = 8765) -> None:
     database.initialize()
-    server = ThreadingHTTPServer((host, port), make_handler(database))
+    server = ThreadingHTTPServer(
+        (host, port),
+        make_handler(database, allow_mutations=host_allows_mutations(host)),
+    )
     print(f"ATS Lab dashboard: http://{host}:{server.server_port}")
     try:
         server.serve_forever()
