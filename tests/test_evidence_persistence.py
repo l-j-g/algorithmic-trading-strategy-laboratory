@@ -90,7 +90,7 @@ class EvidencePersistenceTests(unittest.TestCase):
 
         rows = self.database.normalized_evidence_for_run("RUN-1")
 
-        self.assertEqual(SCHEMA_VERSION, 6)
+        self.assertEqual(SCHEMA_VERSION, 7)
         self.assertEqual(len(rows), 2)
         self.assertEqual(
             {row.evidence_split for row in rows},
@@ -101,7 +101,7 @@ class EvidencePersistenceTests(unittest.TestCase):
             self.database.rows(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )[-1]["version"],
-            6,
+            7,
         )
 
     def test_new_leverage_evidence_fields_persist(self) -> None:

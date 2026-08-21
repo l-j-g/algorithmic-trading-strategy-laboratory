@@ -296,6 +296,43 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in result["historical_blockers"]], ["OLD"])
 
 
+class EvaluationHistoryTests(unittest.TestCase):
+    def test_evaluations_append_revisions_and_readers_take_latest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(id="EXP-1", strategy_name="Test"))
+            database.add_evaluation(Evaluation(
+                experiment_id="EXP-1", verdict=Verdict.REJECT,
+                evaluator="analyzer", evaluated_at="2026-01-01T00:00:00Z",
+            ))
+            database.add_evaluation(Evaluation(
+                experiment_id="EXP-1", verdict=Verdict.PASS,
+                evaluator="analyzer", evaluated_at="2026-01-02T00:00:00Z",
+            ))
+            database.add_evaluation(Evaluation(
+                experiment_id="EXP-1", verdict=Verdict.INCONCLUSIVE,
+                evaluator="operator", evaluated_at="2026-01-03T00:00:00Z",
+            ))
+
+            history = database.rows(
+                """SELECT evaluator,verdict,sequence,superseded_at
+                   FROM evaluation_history ORDER BY id"""
+            )
+            self.assertEqual(len(history), 3)
+            self.assertEqual(
+                [(row["evaluator"], row["verdict"]) for row in history],
+                [("analyzer", "reject"), ("analyzer", "pass"), ("operator", "inconclusive")],
+            )
+            self.assertIsNotNone(history[0]["superseded_at"])
+            visible = database.rows(
+                "SELECT verdict FROM evaluations ORDER BY evaluator"
+            )
+            self.assertEqual(
+                [row["verdict"] for row in visible], ["pass", "inconclusive"],
+            )
+
+
 class LegacyImporterTests(unittest.TestCase):
     def make_repo(self, root: Path) -> None:
         research = root / "research"

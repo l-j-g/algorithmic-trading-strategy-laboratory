@@ -203,6 +203,48 @@ def _migrate_normalized_evidence_backfill(connection: sqlite3.Connection) -> Non
         )
 
 
+def _migrate_evaluations_append_only(connection: sqlite3.Connection) -> None:
+    """Rebuild evaluations as append-only evaluation_history plus a view.
+
+    Verdict revisions are preserved with a per-(experiment_id, evaluator)
+    sequence; every revision except the newest per group is marked superseded
+    so the ``evaluations`` view keeps exposing exactly the rows all existing
+    readers expect. The candidate_summary view is dropped here because it
+    referenced the old table; the baseline schema recreates it against the
+    new view right after migrations run.
+    """
+    if not _table_exists(connection, "evaluations") or _table_exists(
+        connection, "evaluation_history",
+    ):
+        return
+    now = utc_now()
+    connection.execute(_schema_statement("evaluation_history"))
+    connection.execute(
+        """INSERT INTO evaluation_history(
+               id,experiment_id,verdict,summary,metrics_summary,next_step,
+               gate_results_json,evaluator,evaluated_at,sequence,superseded_at)
+           SELECT id,experiment_id,verdict,summary,metrics_summary,next_step,
+                  gate_results_json,evaluator,evaluated_at,
+                  (
+                      SELECT COUNT(*) FROM evaluations older
+                      WHERE older.experiment_id=e.experiment_id
+                        AND older.evaluator=e.evaluator
+                        AND older.id<=e.id
+                  ) - 1,
+                  CASE WHEN EXISTS (
+                      SELECT 1 FROM evaluations newer
+                      WHERE newer.experiment_id=e.experiment_id
+                        AND newer.evaluator=e.evaluator
+                        AND newer.id>e.id
+                  ) THEN ? ELSE NULL END
+           FROM evaluations e""",
+        (now,),
+    )
+    connection.execute("DROP TABLE evaluations")
+    connection.execute("DROP VIEW IF EXISTS candidate_summary")
+    connection.execute(_schema_statement("evaluations"))
+
+
 # Ordered migrations are the single versioning mechanism. Each entry must be
 # idempotent and tolerate a fresh database where baseline tables do not exist
 # yet; initialize() applies the baseline schema.sql after pending migrations.
@@ -212,6 +254,7 @@ _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (4, _migrate_evidence_protocol_columns),
     (5, _migrate_evidence_leverage_columns),
     (6, _migrate_normalized_evidence_backfill),
+    (7, _migrate_evaluations_append_only),
 )
 
 if SCHEMA_VERSION != _MIGRATIONS[-1][0]:
@@ -2143,18 +2186,49 @@ class WorkflowDatabase:
                 ),
             )
 
+    @staticmethod
+    def _append_evaluation(
+        connection: sqlite3.Connection,
+        evaluation: Evaluation,
+    ) -> None:
+        """Append one verdict revision, superseding the evaluator's latest.
+
+        Callers must hold an open BEGIN IMMEDIATE transaction so the
+        supersede and sequence allocation stay atomic.
+        """
+        now = utc_now()
+        superseded = connection.execute(
+            """SELECT id FROM evaluation_history
+               WHERE experiment_id=? AND evaluator=? AND superseded_at IS NULL""",
+            (evaluation.experiment_id, evaluation.evaluator),
+        ).fetchall()
+        if superseded:
+            placeholders = ",".join("?" for _ in superseded)
+            connection.execute(
+                f"""UPDATE evaluation_history SET superseded_at=?
+                    WHERE id IN ({placeholders})""",
+                (now, *(row["id"] for row in superseded)),
+            )
+        sequence = connection.execute(
+            """SELECT COALESCE(MAX(sequence)+1, 0) FROM evaluation_history
+               WHERE experiment_id=? AND evaluator=?""",
+            (evaluation.experiment_id, evaluation.evaluator),
+        ).fetchone()[0]
+        connection.execute(
+            """INSERT INTO evaluation_history(experiment_id, verdict, summary,
+               metrics_summary, next_step, evaluator, evaluated_at, sequence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (evaluation.experiment_id, evaluation.verdict.value, evaluation.summary,
+             evaluation.metrics_summary, evaluation.next_step, evaluation.evaluator,
+             evaluation.evaluated_at, sequence),
+        )
+
     def add_evaluation(self, evaluation: Evaluation) -> None:
         from .research_memory import enqueue_learning_safely
 
         with self.connect() as connection:
-            connection.execute("DELETE FROM evaluations WHERE experiment_id = ? AND evaluator = ?", (evaluation.experiment_id, evaluation.evaluator))
-            connection.execute(
-                """INSERT INTO evaluations(experiment_id, verdict, summary, metrics_summary,
-                   next_step, evaluator, evaluated_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (evaluation.experiment_id, evaluation.verdict.value, evaluation.summary,
-                 evaluation.metrics_summary, evaluation.next_step, evaluation.evaluator,
-                 evaluation.evaluated_at),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            self._append_evaluation(connection, evaluation)
             self._refresh_experiment_evidence(
                 connection, evaluation.experiment_id,
             )
@@ -2171,35 +2245,8 @@ class WorkflowDatabase:
         if run.experiment_id != evaluation.experiment_id:
             raise ValueError("run and evaluation experiment_id must match")
         with self.connect() as connection:
-            connection.execute(
-                """INSERT INTO runs(id, experiment_id, work_item_id, session_id, status, route_json,
-                   dashboard_url, metrics_json, raw_result_json, error_json, started_at, finished_at, source_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id,
-                   status=excluded.status,route_json=excluded.route_json,
-                   dashboard_url=excluded.dashboard_url,
-                   metrics_json=excluded.metrics_json,
-                   raw_result_json=excluded.raw_result_json, error_json=excluded.error_json,
-                   started_at=excluded.started_at,finished_at=excluded.finished_at,
-                   source_path=excluded.source_path""",
-                (run.id, run.experiment_id, run.work_item_id, run.session_id or None, run.status.value,
-                 json.dumps(_route_payload(run.route)) if run.route else None, run.dashboard_url,
-                 json.dumps(run.metrics) if run.metrics is not None else None,
-                 json.dumps(run.raw_result) if run.raw_result is not None else None,
-                 json.dumps(run.error) if run.error is not None else None,
-                 run.started_at, run.finished_at, source_path),
-            )
-            connection.execute(
-                "DELETE FROM evaluations WHERE experiment_id=? AND evaluator=?",
-                (evaluation.experiment_id, evaluation.evaluator),
-            )
-            connection.execute(
-                """INSERT INTO evaluations(experiment_id, verdict, summary, metrics_summary,
-                   next_step, evaluator, evaluated_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (evaluation.experiment_id, evaluation.verdict.value, evaluation.summary,
-                 evaluation.metrics_summary, evaluation.next_step, evaluation.evaluator,
-                 evaluation.evaluated_at),
-            )
+            self._upsert_run(connection, run, source_path)
+            self._append_evaluation(connection, evaluation)
             self._refresh_run_evidence(connection, run.id)
             enqueue_learning_safely(connection, evaluation)
 
@@ -2411,17 +2458,7 @@ class WorkflowDatabase:
             ).fetchone()
             if row is None:
                 raise ValueError(f"no awaiting execution for {evaluation.experiment_id}")
-            connection.execute(
-                "DELETE FROM evaluations WHERE experiment_id=? AND evaluator=?",
-                (evaluation.experiment_id, evaluation.evaluator),
-            )
-            connection.execute(
-                """INSERT INTO evaluations(experiment_id,verdict,summary,metrics_summary,
-                   next_step,evaluator,evaluated_at) VALUES (?,?,?,?,?,?,?)""",
-                (evaluation.experiment_id, evaluation.verdict.value, evaluation.summary,
-                 evaluation.metrics_summary, evaluation.next_step, evaluation.evaluator,
-                 evaluation.evaluated_at),
-            )
+            self._append_evaluation(connection, evaluation)
             self._refresh_experiment_evidence(
                 connection, evaluation.experiment_id,
             )

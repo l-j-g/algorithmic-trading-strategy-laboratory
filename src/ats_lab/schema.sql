@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS normalized_evidence (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS evaluations (
+CREATE TABLE IF NOT EXISTS evaluation_history (
     id INTEGER PRIMARY KEY,
     experiment_id TEXT NOT NULL REFERENCES experiments(id),
     verdict TEXT NOT NULL CHECK (verdict IN ('reject','revise','hpo_candidate','paper_trade_candidate','inconclusive','infrastructure_failure','pass')),
@@ -167,8 +167,16 @@ CREATE TABLE IF NOT EXISTS evaluations (
     gate_results_json TEXT NOT NULL DEFAULT '[]',
     evaluator TEXT NOT NULL,
     evaluated_at TEXT NOT NULL,
-    UNIQUE(experiment_id, evaluator, evaluated_at)
+    sequence INTEGER NOT NULL,
+    superseded_at TEXT,
+    UNIQUE(experiment_id, evaluator, sequence)
 );
+
+CREATE VIEW IF NOT EXISTS evaluations AS
+SELECT id,experiment_id,verdict,summary,metrics_summary,next_step,
+       gate_results_json,evaluator,evaluated_at
+FROM evaluation_history
+WHERE superseded_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS artifacts (
     id INTEGER PRIMARY KEY,
@@ -390,7 +398,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_runs_work_item ON runs(work_item_id);
 CREATE INDEX IF NOT EXISTS idx_events_aggregate
 ON events(aggregate_type, aggregate_id, occurred_at);
-CREATE INDEX IF NOT EXISTS idx_evaluations_verdict ON evaluations(verdict, evaluated_at);
+CREATE INDEX IF NOT EXISTS idx_evaluation_history_verdict ON evaluation_history(verdict, evaluated_at);
 CREATE INDEX IF NOT EXISTS idx_synthesis_cohorts_status ON synthesis_cohorts(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_normalized_evidence_experiment
 ON normalized_evidence(experiment_id);

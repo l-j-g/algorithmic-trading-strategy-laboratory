@@ -53,6 +53,27 @@ def _degrade_to_pre_migration_layout(path: Path) -> None:
             ALTER TABLE normalized_evidence DROP COLUMN effective_leverage_p95;
             ALTER TABLE normalized_evidence DROP COLUMN effective_leverage_max;
             ALTER TABLE normalized_evidence DROP COLUMN liquidation_count;
+            DROP VIEW candidate_summary;
+            DROP VIEW evaluations;
+            ALTER TABLE evaluation_history RENAME TO legacy_history;
+            CREATE TABLE evaluations (
+                id INTEGER PRIMARY KEY,
+                experiment_id TEXT NOT NULL REFERENCES experiments(id),
+                verdict TEXT NOT NULL CHECK (verdict IN ('reject','revise','hpo_candidate','paper_trade_candidate','inconclusive','infrastructure_failure','pass')),
+                summary TEXT NOT NULL DEFAULT '',
+                metrics_summary TEXT NOT NULL DEFAULT '',
+                next_step TEXT NOT NULL DEFAULT '',
+                gate_results_json TEXT NOT NULL DEFAULT '[]',
+                evaluator TEXT NOT NULL,
+                evaluated_at TEXT NOT NULL,
+                UNIQUE(experiment_id, evaluator, evaluated_at)
+            );
+            INSERT INTO evaluations(id,experiment_id,verdict,summary,metrics_summary,
+               next_step,gate_results_json,evaluator,evaluated_at)
+               SELECT id,experiment_id,verdict,summary,metrics_summary,
+                      next_step,gate_results_json,evaluator,evaluated_at
+               FROM legacy_history;
+            DROP TABLE legacy_history;
             DELETE FROM schema_migrations;
         """)
         connection.commit()
@@ -108,6 +129,72 @@ class SchemaMigrationTests(unittest.TestCase):
                 list(range(2, SCHEMA_VERSION + 1)),
             )
             self.assertEqual(first, second)
+
+    def test_append_only_migration_preserves_verdict_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.executescript("""
+                    CREATE TABLE experiments (
+                        id TEXT PRIMARY KEY,
+                        experiment_type TEXT NOT NULL,
+                        specification_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        applied_at TEXT NOT NULL
+                    );
+                    CREATE TABLE evaluations (
+                        id INTEGER PRIMARY KEY,
+                        experiment_id TEXT NOT NULL REFERENCES experiments(id),
+                        verdict TEXT NOT NULL CHECK (verdict IN ('reject','revise','hpo_candidate','paper_trade_candidate','inconclusive','infrastructure_failure','pass')),
+                        summary TEXT NOT NULL DEFAULT '',
+                        metrics_summary TEXT NOT NULL DEFAULT '',
+                        next_step TEXT NOT NULL DEFAULT '',
+                        gate_results_json TEXT NOT NULL DEFAULT '[]',
+                        evaluator TEXT NOT NULL,
+                        evaluated_at TEXT NOT NULL,
+                        UNIQUE(experiment_id, evaluator, evaluated_at)
+                    );
+                    INSERT INTO experiments(id,experiment_type,specification_json,created_at,updated_at)
+                        VALUES ('EXP-1','baseline','{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                    INSERT INTO schema_migrations(version,applied_at) VALUES (6,'2026-01-01T00:00:00Z');
+                    INSERT INTO evaluations(experiment_id,verdict,summary,evaluator,evaluated_at) VALUES
+                        ('EXP-1','reject','first revision','analyzer','2026-01-02T00:00:00Z'),
+                        ('EXP-1','pass','second revision','analyzer','2026-01-03T00:00:00Z'),
+                        ('EXP-1','inconclusive','other evaluator','operator','2026-01-04T00:00:00Z');
+                """)
+                connection.commit()
+            finally:
+                connection.close()
+
+            database = WorkflowDatabase(path)
+            database.initialize()
+
+            history = database.rows(
+                """SELECT evaluator,verdict,sequence,superseded_at
+                   FROM evaluation_history ORDER BY id"""
+            )
+            self.assertEqual(
+                [(row["evaluator"], row["verdict"], row["sequence"]) for row in history],
+                [
+                    ("analyzer", "reject", 0),
+                    ("analyzer", "pass", 1),
+                    ("operator", "inconclusive", 0),
+                ],
+            )
+            self.assertIsNotNone(history[0]["superseded_at"])
+            self.assertIsNone(history[1]["superseded_at"])
+            self.assertIsNone(history[2]["superseded_at"])
+            visible = database.rows(
+                "SELECT verdict FROM evaluations ORDER BY evaluator"
+            )
+            self.assertEqual(
+                [row["verdict"] for row in visible], ["pass", "inconclusive"],
+            )
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from typing import Iterable, Mapping
 from .database import WorkflowDatabase
 from .direct_mcp_executor import DirectMcpDispatcher, classify_jesse_session
 from .gates import evaluate_gates
-from .models import utc_now
+from .models import Evaluation, utc_now
 from .resources import ResourcePolicy
 
 
@@ -762,24 +762,23 @@ def _reevaluate_route_failure(
     )
     with database.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            """UPDATE evaluations SET verdict=?,summary=?,metrics_summary=?,
-                      next_step=?,evaluated_at=?
-               WHERE id=?""",
-            (
-                gates.verdict.value,
-                summary,
-                json.dumps(
+        database._append_evaluation(
+            connection,
+            Evaluation(
+                experiment_id=str(evaluation["experiment_id"]),
+                verdict=gates.verdict,
+                summary=summary,
+                metrics_summary=json.dumps(
                     [item.to_compact_dict() for item in corrected],
                     separators=(",", ":"), sort_keys=True,
                 ),
-                (
+                next_step=(
                     "Continue controlled research validation."
                     if gates.verdict.value == "pass"
                     else "Resolve remaining deterministic gate findings."
                 ),
-                utc_now(),
-                evaluation["id"],
+                evaluator=str(evaluation["evaluator"]),
+                evaluated_at=utc_now(),
             ),
         )
         database._refresh_run_evidence(connection, run_id)
