@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
-from ats_lab.models import RouteSpec, RunResult, RunStatus
+from ats_lab.models import ExperimentSpec, RouteSpec, RunResult, RunStatus
 from ats_lab.synthesis import (
     SynthesisRequest,
     synthesis_request_from_payload,
@@ -126,7 +126,86 @@ class SynthesisTests(unittest.TestCase):
             self.assertEqual(second["decision"], "significance_passed")
             self.assertEqual(second["baseline_state"], "ready")
             self.assertEqual(second, third)
+            self.assertEqual(second["binding_significance_test"], {
+                "run_id": "rst-run", "p_value": 0.03,
+                "decided_at": "2026-01-01T00:00:00Z",
+            })
             self.assertEqual(database.rows("SELECT COUNT(*) count FROM experiments")[0]["count"], 2)
+
+    def revise_request(self) -> SynthesisRequest:
+        return SynthesisRequest(
+            strategy_name="TrendPullback", hypothesis="Trend pullbacks continue.",
+            entry_rule="EMA trend AND RSI pullback reclaim", change_scope="entry_changed",
+            routes=(ROUTE,), action="revise", source_experiment_id="EXP-SRC",
+            controlled_change="Widen the pullback reclaim window.",
+        )
+
+    def test_first_finished_significance_test_is_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-SRC", strategy_name="TrendPullback",
+            ))
+            request = self.make_request()
+            first = synthesize(database, request)
+            database.add_run(RunResult(
+                id="rst-first", experiment_id=first["significance_job"],
+                work_item_id=first["significance_job"], session_id="rst-first",
+                status=RunStatus.FINISHED, metrics={"p_value": 0.2},
+                finished_at="2026-01-01T00:00:00Z",
+            ))
+            retest = synthesize(database, self.revise_request())
+            self.assertNotEqual(retest["significance_job"], first["significance_job"])
+            database.add_run(RunResult(
+                id="rst-retest", experiment_id=retest["significance_job"],
+                work_item_id=retest["significance_job"], session_id="rst-retest",
+                status=RunStatus.FINISHED, metrics={"p_value": 0.01},
+                finished_at="2026-01-02T00:00:00Z",
+            ))
+
+            result = synthesize(database, request)
+
+            self.assertEqual(result["decision"], "significance_failed")
+            self.assertEqual(result["baseline_state"], "archived")
+            self.assertEqual(result["binding_significance_test"], {
+                "run_id": "rst-first", "p_value": 0.2,
+                "decided_at": "2026-01-01T00:00:00Z",
+            })
+
+    def test_reconcile_gate_ignores_later_tests_for_same_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-SRC", strategy_name="TrendPullback",
+            ))
+            first = synthesize(database, self.make_request())
+            database.add_run(RunResult(
+                id="rst-first", experiment_id=first["significance_job"],
+                work_item_id=first["significance_job"], session_id="rst-first",
+                status=RunStatus.FINISHED, metrics={"p_value": 0.03},
+                finished_at="2026-01-01T00:00:00Z",
+            ))
+            retest = synthesize(database, self.revise_request())
+            database.add_run(RunResult(
+                id="rst-retest", experiment_id=retest["significance_job"],
+                work_item_id=retest["significance_job"], session_id="rst-retest",
+                status=RunStatus.FINISHED, metrics={"p_value": 0.2},
+                finished_at="2026-01-02T00:00:00Z",
+            ))
+            states = {row["id"]: row["state"] for row in database.rows("SELECT id,state FROM work_items")}
+            self.assertEqual(states[retest["baseline_job"]], "ready")
+
+            outcome = database.reconcile_significance_gate(
+                retest["significance_job"], 0.2, active_limit=4,
+            )
+
+            self.assertEqual(
+                outcome, {"decision": "superseded_by_first_test", "dependents": []},
+            )
+            states = {row["id"]: row["state"] for row in database.rows("SELECT id,state FROM work_items")}
+            self.assertEqual(states[retest["baseline_job"]], "ready")
 
     def test_failed_significance_archives_dependent_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

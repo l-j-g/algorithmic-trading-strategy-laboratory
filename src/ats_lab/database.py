@@ -3114,7 +3114,12 @@ class WorkflowDatabase:
         }
 
     def reconcile_significance_gate(self, work_item_id: str, p_value: float, active_limit: int) -> dict:
-        """Release or terminalize baselines dependent on completed significance work."""
+        """Release or terminalize baselines dependent on completed significance work.
+
+        First-test-wins: only the earliest finished significance run for an
+        entry fingerprint may flip dependent readiness. Later tests are stored
+        but reported as superseded without touching dependents.
+        """
         if p_value < 0.05:
             target = "ready"
             decision = "significance_passed"
@@ -3128,6 +3133,43 @@ class WorkflowDatabase:
         changed: list[str] = []
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            item = connection.execute(
+                "SELECT experiment_id FROM work_items WHERE id=?", (work_item_id,),
+            ).fetchone()
+            fingerprint = None
+            if item is not None:
+                experiment = connection.execute(
+                    "SELECT specification_json FROM experiments WHERE id=?",
+                    (item["experiment_id"],),
+                ).fetchone()
+                if experiment is not None:
+                    specification = json.loads(experiment["specification_json"])
+                    entry_rule = specification.get("entry_rule")
+                    if isinstance(entry_rule, dict):
+                        fingerprint = entry_rule.get("fingerprint")
+            binding = None
+            if fingerprint:
+                binding = connection.execute(
+                    """SELECT r.id, r.experiment_id,
+                              json_extract(r.metrics_json, '$.p_value') AS p_value
+                       FROM runs r JOIN experiments e ON e.id=r.experiment_id
+                       WHERE e.experiment_type='significance' AND r.status='finished'
+                         AND json_extract(e.specification_json, '$.entry_rule.fingerprint')=?
+                         AND json_extract(r.metrics_json, '$.p_value') IS NOT NULL
+                       ORDER BY COALESCE(r.finished_at, r.started_at) ASC, r.id ASC LIMIT 1""",
+                    (fingerprint,),
+                ).fetchone()
+            if binding is not None and item is not None \
+                    and binding["experiment_id"] != item["experiment_id"]:
+                return {"decision": "superseded_by_first_test", "dependents": []}
+            if binding is not None:
+                p_value = float(binding["p_value"])
+                if p_value < 0.05:
+                    target, decision = "ready", "significance_passed"
+                elif p_value <= 0.10:
+                    target, decision = "archived", "significance_inconclusive"
+                else:
+                    target, decision = "archived", "significance_failed"
             dependents = connection.execute(
                 """SELECT id,specification_json FROM work_items
                    WHERE state='scheduled' AND EXISTS (
