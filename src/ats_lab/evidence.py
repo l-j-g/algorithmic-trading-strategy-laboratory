@@ -129,6 +129,29 @@ CandidateMetrics = NormalizedEvidence
 _FIELD_NAMES = tuple(NormalizedEvidence.__dataclass_fields__)
 _CHILD_COLLECTIONS = ("route_runs", "atomic_routes", "routes", "route_results")
 
+# Per-route outcome aggregates. When one raw run expands into multiple atomic
+# route rows, these keys never inherit from the parent metric payload: a route
+# row carries an outcome only if its own metrics declare it. Configuration and
+# provenance fields (leverage, strategy version, protocol metadata, ...) still
+# inherit so shared setup is not duplicated per route.
+_ROUTE_OUTCOME_FIELDS = frozenset({
+    "net_profit_percentage",
+    "max_drawdown_percentage",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "calmar_ratio",
+    "profit_factor",
+    "win_rate",
+    "trade_count",
+    "fees",
+    "expectancy",
+    "effective_leverage_mean",
+    "effective_leverage_p95",
+    "effective_leverage_max",
+    "liquidation_count",
+    "significance_p_value",
+})
+
 _METRIC_ALIASES = {
     "net_profit_percentage": (
         "net_profit_percentage", "net_profit_pct", "net_profit_percent",
@@ -147,13 +170,9 @@ _METRIC_ALIASES = {
         "leverage_mode", "futures_leverage_mode", "margin_mode", "leverage_type",
         "mode",
     ),
-    "leverage": (
-        "leverage", "configured_futures_leverage", "configured_leverage",
-        "futures_leverage",
-    ),
+    "leverage": ("leverage",),
     "configured_futures_leverage": (
         "configured_futures_leverage", "configured_leverage", "futures_leverage",
-        "leverage",
     ),
     "effective_leverage_mean": (
         "effective_leverage_mean", "mean_effective_leverage",
@@ -178,6 +197,13 @@ _METRIC_ALIASES = {
     ),
     "significance_p_value": ("significance_p_value", "p_value"),
 }
+
+_ROUTE_OUTCOME_KEYS = frozenset(
+    alias
+    for field, aliases in _METRIC_ALIASES.items()
+    if field in _ROUTE_OUTCOME_FIELDS
+    for alias in aliases
+) | {"gross_profit", "gross_loss", "win_rate", "win_rate_percentage"}
 
 
 def display_value(value: object) -> str:
@@ -215,7 +241,14 @@ def normalize_run_evidence(
     finding: str | None = None,
     next_action: str | None = None,
 ) -> tuple[NormalizedEvidence, ...]:
-    """Expand one raw run into one canonical row per atomic route."""
+    """Expand one raw run into one canonical row per atomic route.
+
+    Win-rate units are declared by the metric key, never inferred from
+    magnitude: ``win_rate_percentage`` is stored verbatim as a percentage and
+    ``win_rate`` is a fraction in ``[0, 1]`` scaled by 100. A ``win_rate``
+    outside that range violates the declared unit contract and normalizes to
+    null instead of being guessed.
+    """
     spec = dict(experiment_spec or {})
     raw_metrics = dict(metrics or {})
     parent_route = dict(route or {})
@@ -225,6 +258,7 @@ def normalize_run_evidence(
         if isinstance(value, list) and any(isinstance(item, Mapping) for item in value):
             children = [item for item in value if isinstance(item, Mapping)]
             break
+    has_route_children = children is not None
     if children is None:
         children = ({},)
 
@@ -236,7 +270,14 @@ def normalize_run_evidence(
             if isinstance(child_metrics_value, Mapping)
             else dict(child)
         )
-        merged_metrics = {**raw_metrics, **child_metrics}
+        if has_route_children:
+            parent_context = {
+                key: value for key, value in raw_metrics.items()
+                if key not in _ROUTE_OUTCOME_KEYS
+            }
+            merged_metrics = {**parent_context, **child_metrics}
+        else:
+            merged_metrics = dict(raw_metrics)
         child_route_value = child.get("route")
         child_route = (
             dict(child_route_value)
@@ -317,7 +358,7 @@ def _normalize_atomic(
     elif 0 <= raw_win_rate <= 1:
         win_rate = raw_win_rate * 100
     else:
-        win_rate = raw_win_rate
+        win_rate = None
 
     cost_status = _normalize_cost_status(_first(
         metrics, spec, names=("cost_stress_status",),

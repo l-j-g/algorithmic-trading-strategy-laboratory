@@ -102,7 +102,7 @@ class NormalizedEvidenceTests(unittest.TestCase):
             }, completed_at=None,
         )[0]
 
-        self.assertEqual(evidence.leverage, 3.0)
+        self.assertIsNone(evidence.leverage)
         self.assertEqual(evidence.leverage_mode, "cross_margin")
         self.assertEqual(evidence.configured_futures_leverage, 3.0)
         self.assertEqual(evidence.effective_leverage_mean, 2.1)
@@ -119,15 +119,88 @@ class NormalizedEvidenceTests(unittest.TestCase):
             self.assertIn(field, full)
             self.assertEqual(compact[field], full[field])
 
-    def test_legacy_leverage_populates_new_configured_field(self) -> None:
-        evidence = normalize_run_evidence(
+    def test_leverage_fields_populate_only_from_their_own_sources(self) -> None:
+        legacy = normalize_run_evidence(
             experiment_id="EXP-1", run_id="RUN-1", session_id="session",
             strategy="Trend", lifecycle_stage="baseline", experiment_spec={},
             route={}, metrics={"leverage": 2}, completed_at=None,
         )[0]
+        configured = normalize_run_evidence(
+            experiment_id="EXP-1", run_id="RUN-1", session_id="session",
+            strategy="Trend", lifecycle_stage="baseline", experiment_spec={},
+            route={}, metrics={"futures_leverage": 3}, completed_at=None,
+        )[0]
 
-        self.assertEqual(evidence.leverage, 2.0)
-        self.assertEqual(evidence.configured_futures_leverage, 2.0)
+        self.assertEqual(legacy.leverage, 2.0)
+        self.assertIsNone(legacy.configured_futures_leverage)
+        self.assertIsNone(configured.leverage)
+        self.assertEqual(configured.configured_futures_leverage, 3.0)
+
+    def test_route_rows_never_inherit_parent_outcome_aggregates(self) -> None:
+        rows = normalize_run_evidence(
+            experiment_id="EXP-1",
+            run_id="RUN-1",
+            session_id="parent",
+            strategy="Trend",
+            lifecycle_stage="baseline",
+            experiment_spec={},
+            route={"exchange": "Binance", "timeframe": "1h"},
+            metrics={
+                "net_profit_percentage": 99,
+                "sharpe_ratio": 5,
+                "win_rate": 0.9,
+                "leverage": 3,
+                "route_runs": [{
+                    "session_id": "route-1",
+                    "route": {
+                        "symbol": "BTC-USDT",
+                        "start_date": "2025-01-01",
+                        "finish_date": "2025-12-31",
+                    },
+                    "metrics": {"total_trades": 30},
+                }],
+            },
+            completed_at="2026-01-01T00:00:00Z",
+        )
+
+        self.assertEqual(len(rows), 1)
+        evidence = rows[0]
+        self.assertIsNone(evidence.net_profit_percentage)
+        self.assertIsNone(evidence.sharpe_ratio)
+        self.assertIsNone(evidence.win_rate)
+        self.assertEqual(evidence.trade_count, 30)
+        self.assertEqual(evidence.leverage, 3.0)
+
+    def test_single_route_runs_keep_top_level_metrics(self) -> None:
+        evidence = normalize_run_evidence(
+            experiment_id="EXP-1", run_id="RUN-1", session_id="session",
+            strategy="Trend", lifecycle_stage="baseline", experiment_spec={},
+            route={}, metrics={"net_profit_percentage": 12.5},
+            completed_at=None,
+        )[0]
+
+        self.assertEqual(evidence.net_profit_percentage, 12.5)
+
+    def test_win_rate_units_are_declared_by_the_metric_key(self) -> None:
+        fraction = normalize_run_evidence(
+            experiment_id="EXP-1", run_id="RUN-1", session_id="session",
+            strategy="Trend", lifecycle_stage="baseline", experiment_spec={},
+            route={}, metrics={"win_rate": 0.42}, completed_at=None,
+        )[0]
+        percentage = normalize_run_evidence(
+            experiment_id="EXP-1", run_id="RUN-1", session_id="session",
+            strategy="Trend", lifecycle_stage="baseline", experiment_spec={},
+            route={}, metrics={"win_rate_percentage": 42}, completed_at=None,
+        )[0]
+        violation = normalize_run_evidence(
+            experiment_id="EXP-1", run_id="RUN-1", session_id="session",
+            strategy="Trend", lifecycle_stage="baseline", experiment_spec={},
+            route={}, metrics={"win_rate": 42}, completed_at=None,
+        )[0]
+
+        self.assertEqual(fraction.win_rate, 42.0)
+        self.assertEqual(percentage.win_rate, 42.0)
+        self.assertIsNone(violation.win_rate)
 
     def test_currency_net_profit_never_becomes_percentage(self) -> None:
         evidence = normalize_run_evidence(

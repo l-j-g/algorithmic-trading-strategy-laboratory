@@ -208,6 +208,26 @@ class EvidencePersistenceTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(events[-1]["payload_json"])["scanned"], 1)
 
+    def test_backfill_rederives_distorted_rows_from_retained_raw_metrics(self) -> None:
+        self._add_atomic_run()
+        self.database.rows(
+            """UPDATE normalized_evidence
+               SET net_profit_percentage=999, win_rate=4800"""
+        )
+
+        first = self.database.backfill_normalized_evidence()
+        second = self.database.backfill_normalized_evidence()
+
+        self.assertEqual(first["updated"], 2)
+        self.assertEqual(second["skipped"], 2)
+        rows = {
+            row.evidence_split: row
+            for row in self.database.normalized_evidence_for_run("RUN-1")
+        }
+        self.assertEqual(rows[EvidenceSplit.TRAIN].net_profit_percentage, 10)
+        self.assertEqual(rows[EvidenceSplit.HOLDOUT].net_profit_percentage, 4)
+        self.assertIsNone(rows[EvidenceSplit.TRAIN].win_rate)
+
     def test_raw_diagnostic_missing_run_returns_none(self) -> None:
         self.assertIsNone(self.database.diagnostic_raw_evidence("missing"))
 
