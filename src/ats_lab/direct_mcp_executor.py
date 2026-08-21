@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from .database import WorkflowDatabase
 from .models import utc_now
+from .resources import ResourcePolicy
 from .session_recovery import SessionRecoveryPolicy
 from .strategy_contracts import StrategyContractValidator
 from .worker import DispatchResult, Dispatcher
@@ -648,6 +649,7 @@ class DirectMcpDispatcher:
         client_factory: Callable[[str, float], McpClient] = McpClient,
         dashboard_client: DashboardClient | None = None,
         contract_validator: StrategyContractValidator | None = None,
+        resource_policy: ResourcePolicy | None = None,
     ) -> None:
         self.database = database
         self.config = config
@@ -655,6 +657,7 @@ class DirectMcpDispatcher:
         self.sleep = sleep
         self.client_factory = client_factory
         self.session_recovery_policy = SessionRecoveryPolicy()
+        self.resource_policy = resource_policy or ResourcePolicy()
         self.dashboard_client = dashboard_client or DashboardClient.from_environment(
             config.dashboard_api_base_url, timeout=config.timeout_seconds,
         )
@@ -1418,6 +1421,23 @@ class DirectMcpDispatcher:
             base = base[: -len("/backtest")] + f"/{plan.dashboard_path}"
         return f"{base}/{session_id}"
 
+    def _infrastructure_failure_streak(self, work_item_id: str) -> int:
+        """Count trailing consecutive retry outcomes in executor telemetry."""
+        rows = self.database.rows(
+            """SELECT outcome FROM direct_execution_telemetry
+               WHERE work_item_id=? ORDER BY id DESC LIMIT ?""",
+            (
+                work_item_id,
+                self.resource_policy.executor_infrastructure_failure_limit,
+            ),
+        )
+        streak = 0
+        for row in rows:
+            if row["outcome"] != "retry":
+                break
+            streak += 1
+        return streak
+
     def _record_and_return(
         self,
         client: McpClient,
@@ -1429,6 +1449,19 @@ class DirectMcpDispatcher:
         detail: str,
         attempt_charged: bool | None = None,
     ) -> dict[str, Any]:
+        if outcome == "retry":
+            failures = self._infrastructure_failure_streak(work_item_id) + 1
+            if failures >= self.resource_policy.executor_infrastructure_failure_limit:
+                return self._record_and_return(
+                    client, work_item_id, polls, "blocked",
+                    blocker_code="infrastructure_circuit_broken",
+                    detail=(
+                        f"{failures} consecutive uncharged infrastructure "
+                        "failures; circuit opened for this work item and must "
+                        "be resolved through the blocker flow"
+                    ),
+                    attempt_charged=True,
+                )
         result = {
             "work_item_id": work_item_id, "outcome": outcome,
             "blocker_code": blocker_code, "detail": detail,

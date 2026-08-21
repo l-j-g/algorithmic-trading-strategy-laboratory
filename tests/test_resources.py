@@ -67,6 +67,20 @@ rolling_lookback_days = 90
         policy = EvaluationWindowPolicy(mode="explicit")
         self.assertEqual(policy.resolve(as_of=date(2026, 8, 18)), {})
 
+    def test_executor_infrastructure_failure_limit_defaults_and_parses(self) -> None:
+        self.assertEqual(ResourcePolicy().executor_infrastructure_failure_limit, 10)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "[resources]\nexecutor_infrastructure_failure_limit = 4\n"
+            )
+            policy = load_resource_policy(path)
+            self.assertEqual(policy.executor_infrastructure_failure_limit, 4)
+
+    def test_rejects_non_positive_executor_infrastructure_failure_limit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            ResourcePolicy(executor_infrastructure_failure_limit=0)
+
     def test_rejects_too_few_significance_simulations(self) -> None:
         with self.assertRaises(ValueError):
             ResourcePolicy(significance_simulations=1000)

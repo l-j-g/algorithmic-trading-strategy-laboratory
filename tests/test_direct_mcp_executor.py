@@ -21,6 +21,7 @@ from ats_lab.direct_mcp_executor import (
     load_direct_execution_config,
 )
 from ats_lab.models import ExperimentSpec, WorkItem, WorkState
+from ats_lab.resources import ResourcePolicy
 from ats_lab.session_recovery import SessionRecoveryPolicy
 from ats_lab.worker import DispatchResult
 
@@ -387,6 +388,7 @@ class DirectMcpExecutorTests(unittest.TestCase):
         experiment_id: str = "EXP-1",
         specification: dict | None = None,
         poll_initial_seconds: float = 0,
+        resource_policy: ResourcePolicy | None = None,
     ) -> tuple[DirectMcpDispatcher, WorkflowDatabase]:
         database = WorkflowDatabase(Path(root) / "lab.sqlite3")
         database.initialize()
@@ -410,6 +412,7 @@ class DirectMcpExecutorTests(unittest.TestCase):
             fallback=fallback,
             sleep=lambda _seconds: None,
             dashboard_client=dashboard,
+            resource_policy=resource_policy,
         )
         return dispatcher, database
 
@@ -659,6 +662,46 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 "ORDER BY id DESC LIMIT 1"
             )[0]
             self.assertEqual(telemetry["outcome"], "blocked")
+
+    def test_uncharged_infrastructure_failures_open_recoverable_circuit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running"]
+        ) as server:
+            dispatcher, database = self.make_dispatcher(
+                tmp, server, max_polls=1,
+                resource_policy=ResourcePolicy(
+                    executor_infrastructure_failure_limit=2,
+                ),
+            )
+            first = dispatcher.dispatch(batch_request())
+            self.assertEqual(first.payload["results"][0]["outcome"], "retry")
+            second = dispatcher.dispatch(batch_request())
+            blocked_item = second.payload["results"][0]
+            self.assertEqual(blocked_item["outcome"], "blocked")
+            self.assertEqual(
+                blocked_item["blocker_code"], "infrastructure_circuit_broken",
+            )
+            self.assertIn(
+                "consecutive uncharged infrastructure", blocked_item["detail"],
+            )
+            self.assertTrue(blocked_item["attempt_charged"])
+            outcomes = [
+                row["outcome"] for row in database.rows(
+                    """SELECT outcome FROM direct_execution_telemetry
+                       WHERE work_item_id='JOB-1' ORDER BY id""",
+                )
+            ]
+            self.assertEqual(outcomes, ["retry", "blocked"])
+            server.http.statuses = ["running", "finished"]
+            recovered = dispatcher.dispatch(batch_request())
+            self.assertEqual(recovered.payload["results"][0]["outcome"], "finished")
+            outcomes = [
+                row["outcome"] for row in database.rows(
+                    """SELECT outcome FROM direct_execution_telemetry
+                       WHERE work_item_id='JOB-1' ORDER BY id""",
+                )
+            ]
+            self.assertEqual(outcomes, ["retry", "blocked", "finished"])
 
     def test_backtest_forwards_work_item_data_routes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
