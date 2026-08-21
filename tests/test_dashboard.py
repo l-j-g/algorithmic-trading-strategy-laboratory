@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import io
+import json
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
-import json
+from contextlib import redirect_stdout
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
 from ats_lab.dashboard import (
-    DASHBOARD_JS, dashboard_counts, make_handler, query_page, render_overview,
-    render_page, top_backtests,
+    DASHBOARD_JS, dashboard_counts, host_allows_mutations, make_handler,
+    query_page, render_overview, render_page, serve, top_backtests,
 )
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import (
@@ -490,6 +493,112 @@ class DashboardTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def test_mutations_are_refused_when_handler_disallows_them(self) -> None:
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), make_handler(self.database, allow_mutations=False),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = urllib.request.Request(
+                f"{base}/api/work-items/JOB-1/retry",
+                data=b'{"reason":"should be refused"}',
+                headers={"X-ATS-Lab-Confirm": "retry"}, method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request)
+            self.assertEqual(error.exception.code, 403)
+            body = json.load(error.exception)
+            self.assertEqual(body["error"]["code"], "mutations_disabled")
+
+            request = urllib.request.Request(
+                f"{base}/api/work-items/JOB-1/rectify",
+                data=b"{}", headers={"X-ATS-Lab-Confirm": "rectify"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request)
+            self.assertEqual(error.exception.code, 403)
+
+            with urllib.request.urlopen(f"{base}/api/summary") as response:
+                self.assertEqual(response.status, 200)
+
+            self.assertEqual(
+                self.database.rows(
+                    "SELECT state FROM work_items WHERE id='JOB-1'"
+                )[0]["state"],
+                "blocked",
+            )
+            self.assertEqual(
+                self.database.rows(
+                    "SELECT COUNT(*) AS count FROM events "
+                    "WHERE event_type IN "
+                    "('blocker_retry_requested','blocker_rectified')"
+                )[0]["count"],
+                0,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_only_loopback_binds_enable_mutations(self) -> None:
+        self.assertTrue(host_allows_mutations("127.0.0.1"))
+        self.assertTrue(host_allows_mutations("localhost"))
+        self.assertTrue(host_allows_mutations("::1"))
+        self.assertFalse(host_allows_mutations("0.0.0.0"))
+        self.assertFalse(host_allows_mutations("192.168.1.10"))
+
+    def test_serve_wires_mutation_gate_to_bind_host(self) -> None:
+        for host, expected_code in (("127.0.0.1", 428), ("0.0.0.0", 403)):
+            recording: dict[str, object] = {}
+
+            class FakeServer:
+                server_port = 8765
+
+                def __init__(self, address, handler) -> None:
+                    recording["address"] = address
+                    recording["handler"] = handler
+
+                def serve_forever(self) -> None:
+                    raise KeyboardInterrupt
+
+                def server_close(self) -> None:
+                    return
+
+            with (
+                patch("ats_lab.dashboard.ThreadingHTTPServer", FakeServer),
+                redirect_stdout(io.StringIO()),
+            ):
+                serve(self.database, host, 8765)
+
+            self.assertEqual(recording["address"], (host, 8765))
+            server = ThreadingHTTPServer(
+                ("127.0.0.1", 0), recording["handler"],
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}"
+                    "/api/work-items/JOB-1/retry",
+                    data=b'{"reason":"gate probe"}', method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(request)
+                self.assertEqual(error.exception.code, expected_code)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+            self.assertEqual(
+                self.database.rows(
+                    "SELECT state FROM work_items WHERE id='JOB-1'"
+                )[0]["state"],
+                "blocked",
+            )
 
 
 if __name__ == "__main__":

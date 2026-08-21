@@ -1,8 +1,11 @@
 # Operator dashboard
 
-The local dashboard is a read-only view of the SQLite laboratory database. It
-shows active work, running and blocked counts, research candidates, canonical
-normalized evidence and dashboard links. It refreshes automatically every five seconds while
+The local dashboard shows the SQLite laboratory database: active work, running
+and blocked counts, research candidates, canonical normalized evidence and
+dashboard links. Pages and JSON GET endpoints are read-only; the only state
+changes happen through two audited queue actions (retry and rectify) that are
+limited to loopback binds and require an explicit confirmation header. The
+dashboard refreshes automatically every five seconds while
 the tab is visible; the header controls can pause it or select 15/30 seconds.
 
 Start it from the repository root:
@@ -77,6 +80,18 @@ Explicit diagnostic-only endpoint:
 - `/api/diagnostics/hpo/HPO-STUDY-ID/trials/TRIAL-NUMBER`
 
 Do not use diagnostic payloads as dashboard, HPO, gate or analyzer contracts.
+
+Two state-mutating endpoints exist for blocked queue items:
+
+- `POST /api/work-items/WORK-ITEM-ID/retry` — preserve old evidence and run again
+- `POST /api/work-items/WORK-ITEM-ID/rectify` — archive the blocker without running
+
+Both require the header `X-ATS-Lab-Confirm: <action>` (the browser UI asks for
+confirmation and sends it automatically) and respond `428` without it. They are
+served only when the dashboard is bound to a loopback address (`127.0.0.1`,
+`localhost`, `::1`); any other bind returns `403` for every mutation while
+read-only views keep working. Every applied action is recorded as a durable
+audit event.
 
 Terminal supervision:
 
@@ -207,12 +222,14 @@ ats-lab recover-claims --stale-after-hours 2 --apply
 
 Always inspect preview first. Completed executions awaiting analysis are excluded.
 
-The server has no write endpoints. Queries use bound parameters and predefined
+The two queue actions above are the only write endpoints, and they are served
+only on loopback binds. Queries use bound parameters and predefined
 sort expressions; database content is HTML-escaped before rendering. Responses
 disable caching and include restrictive browser security headers.
 
-The default bind address is loopback-only. Do not bind it to `0.0.0.0` on an
-untrusted network: the server has no authentication and research evidence may be
-sensitive.
+The default bind address is loopback-only. Binding to a non-loopback address
+keeps the views readable but disables the retry/rectify mutations entirely.
+The server has no authentication on any bind and research evidence may be
+sensitive, so keep it on loopback unless you have a specific reason not to.
 
 Stop it with `Ctrl-C`.
