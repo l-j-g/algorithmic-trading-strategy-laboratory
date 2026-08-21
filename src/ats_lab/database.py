@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -10,7 +11,7 @@ from dataclasses import asdict
 from datetime import date
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from . import SCHEMA_VERSION
 from .evidence import (
@@ -97,6 +98,128 @@ def _validate_hpo_route_partitions(routes_by_split: Mapping[str, list[dict[str, 
                     )
 
 
+def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone() is not None
+
+
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
+def _ensure_columns(
+    connection: sqlite3.Connection,
+    table: str,
+    additions: Mapping[str, str],
+) -> None:
+    """Guarded check-before-alter DDL; safe under concurrent initializers."""
+    if not _table_exists(connection, table):
+        return
+    existing = _table_columns(connection, table)
+    for name, declaration in additions.items():
+        if name not in existing:
+            connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN {name} {declaration}"
+            )
+
+
+def _schema_statement(name: str) -> str:
+    """Extract one canonical CREATE ... IF NOT EXISTS statement from schema.sql.
+
+    Migrations rebuild objects from this single source of truth so migrated
+    databases receive byte-identical definitions to fresh ones.
+    """
+    text = Path(__file__).with_name("schema.sql").read_text()
+    pattern = re.compile(
+        rf"CREATE\s+(?:TABLE|VIEW|INDEX|TRIGGER)\s+IF\s+NOT\s+EXISTS\s+"
+        rf"{re.escape(name)}\b",
+        re.IGNORECASE,
+    )
+    match = pattern.search(text)
+    if match is None:
+        raise KeyError(f"schema.sql does not define: {name}")
+    cursor = match.start()
+    quote = ""
+    while cursor < len(text):
+        character = text[cursor]
+        if quote:
+            if character == quote:
+                quote = ""
+        elif character in ("'", '"'):
+            quote = character
+        elif character == ";":
+            break
+        cursor += 1
+    return text[match.start():cursor]
+
+
+def _migrate_runs_raw_result(connection: sqlite3.Connection) -> None:
+    _ensure_columns(connection, "runs", {"raw_result_json": "TEXT"})
+
+
+def _migrate_execution_checkpoints(connection: sqlite3.Connection) -> None:
+    _ensure_columns(connection, "direct_execution_sessions", {
+        "first_observed_at": "TEXT",
+        "last_observed_at": "TEXT",
+        "last_jesse_updated_at": "TEXT",
+        "last_progress": "REAL",
+        "unchanged_observations": "INTEGER NOT NULL DEFAULT 0",
+        "recovery_attempted": "INTEGER NOT NULL DEFAULT 0",
+        "replacement_created": "INTEGER NOT NULL DEFAULT 0",
+    })
+
+
+def _migrate_evidence_protocol_columns(connection: sqlite3.Connection) -> None:
+    _ensure_columns(connection, "normalized_evidence", {
+        "monte_carlo_scenarios": "INTEGER",
+        "monte_carlo_method": "TEXT",
+        "walk_forward_windows": "INTEGER",
+        "walk_forward_method": "TEXT",
+    })
+
+
+def _migrate_evidence_leverage_columns(connection: sqlite3.Connection) -> None:
+    _ensure_columns(connection, "normalized_evidence", {
+        "leverage_mode": "TEXT",
+        "configured_futures_leverage": "REAL",
+        "effective_leverage_mean": "REAL",
+        "effective_leverage_p95": "REAL",
+        "effective_leverage_max": "REAL",
+        "liquidation_count": "INTEGER",
+    })
+
+
+def _migrate_normalized_evidence_backfill(connection: sqlite3.Connection) -> None:
+    if _table_exists(connection, "runs") and _table_exists(
+        connection, "experiments",
+    ):
+        WorkflowDatabase._backfill_normalized_evidence(
+            connection, record_event=False,
+        )
+
+
+# Ordered migrations are the single versioning mechanism. Each entry must be
+# idempotent and tolerate a fresh database where baseline tables do not exist
+# yet; initialize() applies the baseline schema.sql after pending migrations.
+_MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
+    (2, _migrate_runs_raw_result),
+    (3, _migrate_execution_checkpoints),
+    (4, _migrate_evidence_protocol_columns),
+    (5, _migrate_evidence_leverage_columns),
+    (6, _migrate_normalized_evidence_backfill),
+)
+
+if SCHEMA_VERSION != _MIGRATIONS[-1][0]:
+    raise RuntimeError(
+        "SCHEMA_VERSION must equal the latest ordered migration version"
+    )
+
+
 class WorkflowDatabase:
     def __init__(self, path: Path):
         self.path = path
@@ -118,62 +241,39 @@ class WorkflowDatabase:
             connection.close()
 
     def initialize(self) -> None:
+        """Create or upgrade the database schema.
+
+        Concurrency contract: concurrent ``initialize()`` callers serialize on
+        the SQLite writer lock (``busy_timeout`` plus ``BEGIN IMMEDIATE``) and
+        every migration step uses guarded, idempotent DDL, so racing
+        initializers converge on the same schema instead of failing on
+        duplicate ALTERs. Pending migrations run first; the baseline
+        ``schema.sql`` then fills in any objects a fresh database needs.
+        """
         schema = Path(__file__).with_name("schema.sql").read_text()
         with self.connect() as connection:
-            connection.executescript(schema)
-            run_columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(runs)").fetchall()
-            }
-            if "raw_result_json" not in run_columns:
-                connection.execute("ALTER TABLE runs ADD COLUMN raw_result_json TEXT")
-            checkpoint_columns = {
-                row["name"] for row in connection.execute(
-                    "PRAGMA table_info(direct_execution_sessions)"
-                ).fetchall()
-            }
-            checkpoint_additions = {
-                "first_observed_at": "TEXT",
-                "last_observed_at": "TEXT",
-                "last_jesse_updated_at": "TEXT",
-                "last_progress": "REAL",
-                "unchanged_observations": "INTEGER NOT NULL DEFAULT 0",
-                "recovery_attempted": "INTEGER NOT NULL DEFAULT 0",
-                "replacement_created": "INTEGER NOT NULL DEFAULT 0",
-            }
-            for name, declaration in checkpoint_additions.items():
-                if name not in checkpoint_columns:
-                    connection.execute(
-                        f"ALTER TABLE direct_execution_sessions ADD COLUMN {name} {declaration}"
-                    )
-            evidence_columns = {
-                row["name"] for row in connection.execute(
-                    "PRAGMA table_info(normalized_evidence)"
-                ).fetchall()
-            }
-            evidence_additions = {
-                "monte_carlo_scenarios": "INTEGER",
-                "monte_carlo_method": "TEXT",
-                "walk_forward_windows": "INTEGER",
-                "walk_forward_method": "TEXT",
-                "leverage_mode": "TEXT",
-                "configured_futures_leverage": "REAL",
-                "effective_leverage_mean": "REAL",
-                "effective_leverage_p95": "REAL",
-                "effective_leverage_max": "REAL",
-                "liquidation_count": "INTEGER",
-            }
-            for name, declaration in evidence_additions.items():
-                if name not in evidence_columns:
-                    connection.execute(
-                        f"ALTER TABLE normalized_evidence ADD COLUMN {name} {declaration}"
-                    )
-            migration = connection.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION, utc_now()),
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS schema_migrations (
+                       version INTEGER PRIMARY KEY,
+                       applied_at TEXT NOT NULL
+                   )"""
             )
-            if migration.rowcount:
-                self._backfill_normalized_evidence(connection, record_event=False)
+            connection.execute("BEGIN IMMEDIATE")
+            applied = {
+                row["version"]
+                for row in connection.execute(
+                    "SELECT version FROM schema_migrations"
+                )
+            }
+            for version, migrate in _MIGRATIONS:
+                if version in applied:
+                    continue
+                migrate(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (version, utc_now()),
+                )
+            connection.executescript(schema)
 
     def upsert_normalized_evidence(
         self,
@@ -281,8 +381,8 @@ class WorkflowDatabase:
             connection.execute("BEGIN IMMEDIATE")
             return self._backfill_normalized_evidence(connection)
 
+    @staticmethod
     def _backfill_normalized_evidence(
-        self,
         connection: sqlite3.Connection,
         *,
         record_event: bool = True,
@@ -302,7 +402,9 @@ class WorkflowDatabase:
         for run_id in run_ids:
             result["scanned"] += 1
             try:
-                outcomes = self._refresh_run_evidence(connection, run_id)
+                outcomes = WorkflowDatabase._refresh_run_evidence(
+                    connection, run_id,
+                )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 result["invalid"] += 1
                 continue
@@ -317,8 +419,8 @@ class WorkflowDatabase:
             )
         return result
 
+    @staticmethod
     def _upsert_normalized_evidence(
-        self,
         connection: sqlite3.Connection,
         evidence: NormalizedEvidence,
     ) -> str:
@@ -352,8 +454,8 @@ class WorkflowDatabase:
         )
         return "inserted" if existing is None else "updated"
 
+    @staticmethod
     def _refresh_run_evidence(
-        self,
         connection: sqlite3.Connection,
         run_id: str,
     ) -> list[str]:
@@ -411,7 +513,7 @@ class WorkflowDatabase:
                 tuple(stale),
             )
         return [
-            self._upsert_normalized_evidence(connection, item)
+            WorkflowDatabase._upsert_normalized_evidence(connection, item)
             for item in normalized
         ]
 

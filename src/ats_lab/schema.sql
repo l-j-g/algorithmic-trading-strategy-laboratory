@@ -387,6 +387,9 @@ CREATE TABLE IF NOT EXISTS work_item_stage_timings (
 
 CREATE INDEX IF NOT EXISTS idx_work_items_queue ON work_items(state, priority, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id);
+CREATE INDEX IF NOT EXISTS idx_runs_work_item ON runs(work_item_id);
+CREATE INDEX IF NOT EXISTS idx_events_aggregate
+ON events(aggregate_type, aggregate_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_evaluations_verdict ON evaluations(verdict, evaluated_at);
 CREATE INDEX IF NOT EXISTS idx_synthesis_cohorts_status ON synthesis_cohorts(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_normalized_evidence_experiment
