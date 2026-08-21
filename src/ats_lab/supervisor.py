@@ -1073,7 +1073,9 @@ class BatchSupervisor:
             evaluation, operation, normalized, execution_failed, work_item_id,
         ) in validated:
             persistence_started = time.perf_counter()
-            item = self.database.finalize_batch_evaluation(evaluation)
+            item = self.database.finalize_batch_evaluation(
+                evaluation, work_item_id=work_item_id,
+            )
             persistence_ms = (
                 time.perf_counter() - persistence_started
             ) * 1000

@@ -414,6 +414,81 @@ class ResearchMemoryTests(unittest.TestCase):
             for method, path in adapter.paths[paths_before_recall:]
         ))
 
+class BatchFinalizationTargetingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.database = WorkflowDatabase(Path(self.temp.name) / "lab.sqlite3")
+        self.database.initialize()
+        self.database.upsert_experiment(ExperimentSpec(id="EXP-1", strategy_name="Test"))
+        for item_id, updated_at in (("WI-A", "2026-08-01T00:00:00Z"),
+                                    ("WI-B", "2026-08-02T00:00:00Z")):
+            self.database.upsert_work_item(WorkItem(
+                id=item_id, experiment_id="EXP-1", priority=1,
+                state=WorkState.RUNNING,
+            ))
+            self.database.add_run(RunResult(
+                id=f"RUN-{item_id}", experiment_id="EXP-1",
+                work_item_id=item_id, session_id=f"session-{item_id}",
+                status=RunStatus.FINISHED,
+                metrics={
+                    "total": 120, "net_profit_percentage": -4.0,
+                    "max_drawdown": 12.0, "sharpe_ratio": -0.3,
+                    "gross_profit": 80.0, "gross_loss": -100.0,
+                },
+                finished_at="2026-08-01T00:00:00Z",
+            ))
+            self.database.mark_awaiting_evaluation(item_id, f"BATCH-{item_id}")
+            self.database.rows(
+                "UPDATE work_items SET updated_at=? WHERE id=?", (updated_at, item_id),
+            )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _evaluation(self) -> Evaluation:
+        return Evaluation(
+            experiment_id="EXP-1", verdict=Verdict.REVISE,
+            evaluator="ats-lab-batch-analyzer",
+            evaluated_at="2026-08-03T00:00:00Z",
+        )
+
+    def test_explicit_work_item_id_finalizes_that_execution(self) -> None:
+        stored = self.database.finalize_batch_evaluation(
+            self._evaluation(), work_item_id="WI-A",
+        )
+
+        self.assertEqual(stored["state"], "finished")
+        states = {
+            row["id"]: row["state"]
+            for row in self.database.rows("SELECT id,state FROM work_items")
+        }
+        self.assertEqual(states, {"WI-A": "finished", "WI-B": "running"})
+
+    def test_explicit_work_item_id_must_be_awaiting_evaluation(self) -> None:
+        with self.assertRaises(ValueError):
+            self.database.finalize_batch_evaluation(
+                self._evaluation(), work_item_id="WI-MISSING",
+            )
+        states = {
+            row["id"]: row["state"]
+            for row in self.database.rows("SELECT id,state FROM work_items")
+        }
+        self.assertEqual(states, {"WI-A": "running", "WI-B": "running"})
+
+    def test_ambiguous_recency_fallback_records_audit_event(self) -> None:
+        stored = self.database.finalize_batch_evaluation(self._evaluation())
+
+        self.assertEqual(stored["id"], "WI-B")
+        events = self.database.rows(
+            """SELECT payload_json FROM events
+               WHERE event_type='batch_finalization_ambiguous'"""
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            json.loads(events[0]["payload_json"]),
+            {"candidates": ["WI-B", "WI-A"], "chosen": "WI-B"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

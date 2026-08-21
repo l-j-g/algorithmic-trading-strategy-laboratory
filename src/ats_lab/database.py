@@ -2480,20 +2480,53 @@ class WorkflowDatabase:
                 "SELECT * FROM work_items WHERE id=?", (work_item_id,)
             ).fetchone())
 
-    def finalize_batch_evaluation(self, evaluation: Evaluation) -> dict:
-        """Persist one evaluation and finish its awaiting work item atomically."""
+    def finalize_batch_evaluation(
+        self, evaluation: Evaluation, work_item_id: str | None = None,
+    ) -> dict:
+        """Persist one evaluation and finish its awaiting work item atomically.
+
+        Pass work_item_id to finalize a specific execution; without it the
+        most recently updated awaiting execution wins, and an ambiguous
+        choice is recorded as an event so silent misattribution stays
+        visible in the audit trail.
+        """
         from .research_memory import enqueue_learning_safely
 
         now = utc_now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """SELECT * FROM work_items WHERE experiment_id=? AND state='running'
-                   AND blocker_code='awaiting_batch_evaluation' ORDER BY updated_at DESC LIMIT 1""",
-                (evaluation.experiment_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError(f"no awaiting execution for {evaluation.experiment_id}")
+            if work_item_id is not None:
+                row = connection.execute(
+                    """SELECT * FROM work_items WHERE id=? AND experiment_id=?
+                       AND state='running'
+                       AND blocker_code='awaiting_batch_evaluation'""",
+                    (work_item_id, evaluation.experiment_id),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(
+                        f"work item {work_item_id} is not awaiting batch "
+                        f"evaluation for {evaluation.experiment_id}"
+                    )
+            else:
+                candidates = connection.execute(
+                    """SELECT * FROM work_items WHERE experiment_id=? AND state='running'
+                       AND blocker_code='awaiting_batch_evaluation' ORDER BY updated_at DESC""",
+                    (evaluation.experiment_id,),
+                ).fetchall()
+                if not candidates:
+                    raise ValueError(f"no awaiting execution for {evaluation.experiment_id}")
+                row = candidates[0]
+                if len(candidates) > 1:
+                    connection.execute(
+                        """INSERT INTO events(aggregate_type,aggregate_id,event_type,payload_json,occurred_at)
+                           VALUES ('experiment',?,'batch_finalization_ambiguous',?,?)""",
+                        (evaluation.experiment_id,
+                         json.dumps({
+                             "candidates": [item["id"] for item in candidates],
+                             "chosen": row["id"],
+                         }),
+                         now),
+                    )
             self._append_evaluation(connection, evaluation)
             self._refresh_experiment_evidence(
                 connection, evaluation.experiment_id,
