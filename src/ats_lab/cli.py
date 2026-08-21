@@ -1181,8 +1181,8 @@ def main() -> int:
         if work_item.experiment_id != experiment.id:
             raise ValueError("work_item.experiment_id must equal experiment.id")
         database.upsert_experiment(experiment)
-        database.upsert_work_item(work_item)
-        emit({"experiment_id": experiment.id, "work_item_id": work_item.id, "state": work_item.state.value})
+        stored = database.upsert_work_item(work_item)
+        emit({"experiment_id": experiment.id, "work_item_id": work_item.id, "state": stored["state"]})
     elif args.command == "evaluate":
         database.initialize()
         contract_path = args.file if args.file.is_absolute() else repo / args.file

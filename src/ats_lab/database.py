@@ -263,6 +263,23 @@ if SCHEMA_VERSION != _MIGRATIONS[-1][0]:
     )
 
 
+def _ensure_matching_work_item(row: sqlite3.Row, item: WorkItem) -> None:
+    conflicts = []
+    if row["experiment_id"] != item.experiment_id:
+        conflicts.append("experiment_id")
+    if row["priority"] != item.priority:
+        conflicts.append("priority")
+    if json.loads(row["dependencies_json"] or "[]") != list(item.dependencies):
+        conflicts.append("dependencies")
+    if json.loads(row["specification_json"] or "{}") != dict(item.specification):
+        conflicts.append("specification")
+    if conflicts:
+        raise ValueError(
+            f"work item {item.id} already exists with different "
+            f"{', '.join(conflicts)}"
+        )
+
+
 class WorkflowDatabase:
     def __init__(self, path: Path):
         self.path = path
@@ -2089,21 +2106,40 @@ class WorkflowDatabase:
             )
             self._refresh_experiment_evidence(connection, spec.id)
 
-    def upsert_work_item(self, item: WorkItem) -> None:
+    def upsert_work_item(self, item: WorkItem) -> dict:
+        """Insert a work item or reconcile with the stored row.
+
+        Re-registering an identical specification is a no-op that returns
+        the stored row with its attempts and blocker bookkeeping intact. A
+        differing experiment_id, priority, dependency list, or specification
+        raises instead of silently overwriting queued work. A state change
+        is applied only through the guarded transition machinery; anything
+        beyond scheduled-to-ready is refused.
+        """
         now = utc_now()
         with self.connect() as connection:
-            connection.execute(
-                """INSERT INTO work_items(id, experiment_id, priority, state, dependencies_json,
-                   attempts, retry_after, blocker_code, blocker_detail, specification_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET priority=excluded.priority, state=excluded.state,
-                   dependencies_json=excluded.dependencies_json, attempts=excluded.attempts,
-                   retry_after=excluded.retry_after, blocker_code=excluded.blocker_code,
-                   blocker_detail=excluded.blocker_detail, specification_json=excluded.specification_json,
-                   updated_at=excluded.updated_at""",
-                (item.id, item.experiment_id, item.priority, item.state.value,
-                 json.dumps(item.dependencies), item.attempts, item.retry_after, item.blocker_code,
-                 item.blocker_detail, json.dumps(item.specification), now, now),
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM work_items WHERE id=?", (item.id,),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """INSERT INTO work_items(id, experiment_id, priority, state, dependencies_json,
+                       attempts, retry_after, blocker_code, blocker_detail, specification_json, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (item.id, item.experiment_id, item.priority, item.state.value,
+                     json.dumps(item.dependencies), item.attempts, item.retry_after, item.blocker_code,
+                     item.blocker_detail, json.dumps(item.specification), now, now),
+                )
+                return dict(connection.execute(
+                    "SELECT * FROM work_items WHERE id=?", (item.id,),
+                ).fetchone())
+            _ensure_matching_work_item(existing, item)
+            if existing["state"] == item.state.value:
+                return dict(existing)
+            return self._transition_work_item_row(
+                connection, existing, WorkState.READY,
+                allowed_from=(WorkState.SCHEDULED,),
             )
 
     def add_run(self, run: RunResult, source_path: str = "") -> None:
@@ -3127,6 +3163,36 @@ class WorkflowDatabase:
             )
             return cursor.rowcount
 
+    @staticmethod
+    def _transition_work_item_row(
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        target: WorkState,
+        *,
+        allowed_from: tuple[WorkState, ...],
+        blocker_code: str | None = None,
+        blocker_detail: str | None = None,
+        retry_after: str | None = None,
+    ) -> dict:
+        work_item_id = row["id"]
+        if row["state"] == target.value:
+            return dict(row)
+        allowed = {state.value for state in allowed_from}
+        if row["state"] not in allowed:
+            raise ValueError(f"cannot transition {work_item_id} from {row['state']} to {target.value}")
+        attempts = row["attempts"] + (1 if target is WorkState.WAITING_RETRY else 0)
+        now = utc_now()
+        connection.execute(
+            """UPDATE work_items SET state=?, attempts=?, retry_after=?, blocker_code=?,
+               blocker_detail=?, claimed_by=NULL, claimed_at=NULL, updated_at=? WHERE id=?""",
+            (target.value, attempts, retry_after, blocker_code, blocker_detail, now, work_item_id),
+        )
+        connection.execute(
+            "INSERT INTO events(aggregate_type, aggregate_id, event_type, payload_json, occurred_at) VALUES ('work_item', ?, 'state_changed', ?, ?)",
+            (work_item_id, json.dumps({"from": row["state"], "to": target.value}), now),
+        )
+        return dict(connection.execute("SELECT * FROM work_items WHERE id=?", (work_item_id,)).fetchone())
+
     def transition_work_item(
         self,
         work_item_id: str,
@@ -3142,23 +3208,11 @@ class WorkflowDatabase:
             row = connection.execute("SELECT * FROM work_items WHERE id=?", (work_item_id,)).fetchone()
             if row is None:
                 raise KeyError(f"unknown work item: {work_item_id}")
-            allowed = {state.value for state in allowed_from}
-            if row["state"] == target.value:
-                return dict(row)
-            if row["state"] not in allowed:
-                raise ValueError(f"cannot transition {work_item_id} from {row['state']} to {target.value}")
-            attempts = row["attempts"] + (1 if target is WorkState.WAITING_RETRY else 0)
-            now = utc_now()
-            connection.execute(
-                """UPDATE work_items SET state=?, attempts=?, retry_after=?, blocker_code=?,
-                   blocker_detail=?, claimed_by=NULL, claimed_at=NULL, updated_at=? WHERE id=?""",
-                (target.value, attempts, retry_after, blocker_code, blocker_detail, now, work_item_id),
+            return self._transition_work_item_row(
+                connection, row, target, allowed_from=allowed_from,
+                blocker_code=blocker_code, blocker_detail=blocker_detail,
+                retry_after=retry_after,
             )
-            connection.execute(
-                "INSERT INTO events(aggregate_type, aggregate_id, event_type, payload_json, occurred_at) VALUES ('work_item', ?, 'state_changed', ?, ?)",
-                (work_item_id, json.dumps({"from": row["state"], "to": target.value}), now),
-            )
-            return dict(connection.execute("SELECT * FROM work_items WHERE id=?", (work_item_id,)).fetchone())
 
     def rows(self, query: str, parameters: tuple = ()) -> list[dict]:
         with self.connect() as connection:

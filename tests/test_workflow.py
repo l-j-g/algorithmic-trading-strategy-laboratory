@@ -333,6 +333,82 @@ class EvaluationHistoryTests(unittest.TestCase):
             )
 
 
+class WorkItemUpsertTests(unittest.TestCase):
+    def _item(self, item_id: str = "JOB-1", state: WorkState = WorkState.READY,
+              priority: int = 1, specification: dict | None = None) -> WorkItem:
+        return WorkItem(
+            id=item_id, experiment_id=item_id, priority=priority, state=state,
+            specification={} if specification is None else specification,
+        )
+
+    def test_reregistering_identical_work_item_preserves_bookkeeping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(id="JOB-1", strategy_name="Test"))
+            database.upsert_work_item(self._item())
+            database.rows(
+                """UPDATE work_items SET attempts=3, blocker_code='missing_candles',
+                   claimed_by='worker-7' WHERE id='JOB-1'"""
+            )
+
+            stored = database.upsert_work_item(self._item())
+
+            row = database.rows("SELECT * FROM work_items WHERE id='JOB-1'")[0]
+            self.assertEqual(row["state"], "ready")
+            self.assertEqual(row["attempts"], 3)
+            self.assertEqual(row["blocker_code"], "missing_candles")
+            self.assertEqual(row["claimed_by"], "worker-7")
+            self.assertEqual(stored["state"], "ready")
+
+    def test_conflicting_work_item_specification_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(id="JOB-1", strategy_name="Test"))
+            database.upsert_work_item(self._item(specification={"window": "2025"}))
+
+            with self.assertRaises(ValueError):
+                database.upsert_work_item(self._item(priority=9))
+            with self.assertRaises(ValueError):
+                database.upsert_work_item(
+                    self._item(specification={"window": "2024"})
+                )
+            self.assertEqual(
+                database.rows("SELECT priority FROM work_items WHERE id='JOB-1'")[0]["priority"],
+                1,
+            )
+
+    def test_work_item_state_regression_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(id="JOB-1", strategy_name="Test"))
+            database.upsert_work_item(self._item(state=WorkState.FINISHED))
+
+            with self.assertRaises(ValueError):
+                database.upsert_work_item(self._item(state=WorkState.READY))
+            self.assertEqual(
+                database.rows("SELECT state FROM work_items WHERE id='JOB-1'")[0]["state"],
+                "finished",
+            )
+
+    def test_scheduled_work_item_advances_to_ready_on_reregistration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(id="JOB-1", strategy_name="Test"))
+            database.upsert_work_item(self._item(state=WorkState.SCHEDULED))
+
+            stored = database.upsert_work_item(self._item(state=WorkState.READY))
+
+            self.assertEqual(stored["state"], "ready")
+            events = database.rows(
+                "SELECT event_type,payload_json FROM events WHERE aggregate_id='JOB-1'"
+            )
+            self.assertEqual(len(events), 1)
+
+
 class LegacyImporterTests(unittest.TestCase):
     def make_repo(self, root: Path) -> None:
         research = root / "research"
