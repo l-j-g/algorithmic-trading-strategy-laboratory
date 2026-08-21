@@ -308,10 +308,29 @@ class McpClient:
         except (urllib.error.URLError, TimeoutError) as error:
             raise McpError(f"MCP transport failed: {error}") from error
         self.response_bytes += len(body)
-        decoded = self._decode_http_body(body.decode())
+        frames = self._decode_http_body(body.decode())
+        decoded = self._select_response(frames, payload.get("id"))
         if isinstance(decoded, dict) and decoded.get("error"):
             raise McpError(str(decoded["error"]))
         return decoded
+
+    def close(self) -> None:
+        """Best-effort Streamable HTTP DELETE teardown of the MCP session."""
+        session_id = self.headers.get("mcp-session-id")
+        if not session_id:
+            return
+        headers = {
+            key: value for key, value in self.headers.items()
+            if key != "Content-Type"
+        }
+        request = urllib.request.Request(
+            self.url, headers=headers, method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout):
+                pass
+        except (urllib.error.URLError, OSError, TimeoutError):
+            pass
 
     def _id(self) -> int:
         value = self.next_id
@@ -319,13 +338,44 @@ class McpClient:
         return value
 
     @staticmethod
-    def _decode_http_body(text: str) -> Any:
+    def _decode_http_body(text: str) -> list[Any]:
+        frames: list[str] = []
         for line in text.splitlines():
             if line.startswith("data:"):
                 value = line[5:].strip()
                 if value:
-                    return json.loads(value)
-        return json.loads(text) if text.strip() else None
+                    frames.append(value)
+        if not frames and text.strip():
+            frames.append(text)
+        return [json.loads(frame) for frame in frames]
+
+    @staticmethod
+    def _select_response(frames: list[Any], request_id: Any) -> Any:
+        """Correlate the JSON-RPC response id and discard foreign frames.
+
+        Interleaved notifications and responses belonging to other requests
+        are ignored; only a frame whose ``id`` equals the request ``id`` is
+        accepted. A response stream that never carries the matching id is a
+        transport defect and surfaces as :class:`McpError`, which the bounded
+        executor poll slice treats like any other retryable transport error.
+        """
+        if request_id is None:
+            return frames[0] if frames else None
+        matching = [
+            frame for frame in frames
+            if isinstance(frame, dict)
+            and "id" in frame
+            and frame.get("id") == request_id
+        ]
+        if matching:
+            return matching[-1]
+        observed = [
+            frame.get("id") for frame in frames if isinstance(frame, dict)
+        ]
+        raise McpError(
+            f"MCP response id mismatch: expected {request_id!r}, "
+            f"received {observed!r}"
+        )
 
     @staticmethod
     def _decode_tool_result(result: Any) -> Any:
@@ -878,6 +928,8 @@ class DirectMcpDispatcher:
                 blocker_code="direct_mcp_error", detail=str(error),
                 attempt_charged=False,
             )
+        finally:
+            client.close()
 
     def _start_and_verify(
         self, client: McpClient, session_id: str, plan: ExecutionPlan,

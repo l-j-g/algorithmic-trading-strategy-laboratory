@@ -14,6 +14,7 @@ from ats_lab.direct_mcp_executor import (
     DirectExecutionConfig,
     DirectMcpDispatcher,
     McpClient,
+    McpError,
     classify_jesse_session,
     load_direct_execution_config,
 )
@@ -124,6 +125,14 @@ class FakeMcpHandler(BaseHTTPRequestHandler):
             result = {}
         self._reply({"jsonrpc": "2.0", "id": payload.get("id"), "result": result})
 
+    def do_DELETE(self) -> None:
+        self.server.deleted_sessions.append(  # type: ignore[attr-defined]
+            self.headers.get("mcp-session-id"),
+        )
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _reply(self, payload: object, notification: bool = False) -> None:
         body = b"" if notification else (
             "event: message\ndata: " + json.dumps(payload) + "\n\n"
@@ -144,6 +153,7 @@ class FakeMcpServer:
         self.http.run_calls = 0
         self.http.poll_count = 0
         self.http.statuses = statuses
+        self.http.deleted_sessions = []
         self.http.metrics = {
             "net_profit_percentage": 12.345678901234,
             "route_runs": [
@@ -155,6 +165,50 @@ class FakeMcpServer:
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
 
     def __enter__(self) -> FakeMcpServer:
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.http.shutdown()
+        self.thread.join()
+        self.http.server_close()
+
+    @property
+    def url(self) -> str:
+        host, port = self.http.server_address
+        return f"http://{host}:{port}/mcp"
+
+
+class CorrelatedFrameHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        frames = self.server.frames  # type: ignore[attr-defined]
+        body = "".join(
+            f"event: message\ndata: {frame}\n\n" for frame in frames
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("mcp-session-id", "correlated-session")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class CorrelatedMcpServer:
+    """Replay a fixed multi-frame SSE stream for JSON-RPC correlation tests."""
+
+    def __init__(self, frames: list[str]) -> None:
+        self.http = ThreadingHTTPServer(("127.0.0.1", 0), CorrelatedFrameHandler)
+        self.http.frames = frames  # type: ignore[attr-defined]
+        self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
+
+    def __enter__(self) -> CorrelatedMcpServer:
         self.thread.start()
         return self
 
@@ -364,6 +418,73 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 "get_backtest_session", {"session_id": "jesse-session-1"}
             )
             self.assertEqual(result["data"]["session"]["status"], "finished")
+
+    def test_client_selects_response_matching_request_id(self) -> None:
+        frames = [
+            json.dumps({"jsonrpc": "2.0", "method": "tools/call", "params": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 99, "result": {"foreign": True}}),
+            json.dumps({"jsonrpc": "2.0", "id": 7, "result": {"value": 42}}),
+        ]
+        with CorrelatedMcpServer(frames) as server:
+            client = McpClient(server.url)
+            client.next_id = 7
+            result = client.post({"jsonrpc": "2.0", "id": 7, "method": "x"})
+        self.assertEqual(result, {"jsonrpc": "2.0", "id": 7, "result": {"value": 42}})
+
+    def test_client_discards_interleaved_frames_before_match(self) -> None:
+        frames = [
+            json.dumps({"jsonrpc": "2.0", "method": "notify", "params": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 3, "result": {"stale": 1}}),
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"fresh": 1}}),
+        ]
+        with CorrelatedMcpServer(frames) as server:
+            client = McpClient(server.url)
+            client.next_id = 4
+            result = client.post({"jsonrpc": "2.0", "id": 4, "method": "x"})
+        self.assertEqual(result["result"], {"fresh": 1})
+
+    def test_client_raises_when_no_frame_matches_request_id(self) -> None:
+        frames = [
+            json.dumps({"jsonrpc": "2.0", "id": 11, "result": {}}),
+            json.dumps({"jsonrpc": "2.0", "method": "notify", "params": {}}),
+        ]
+        with CorrelatedMcpServer(frames) as server:
+            client = McpClient(server.url)
+            client.next_id = 12
+            with self.assertRaises(McpError) as caught:
+                client.post({"jsonrpc": "2.0", "id": 12, "method": "x"})
+        self.assertIn("id mismatch", str(caught.exception))
+        self.assertIn("11", str(caught.exception))
+
+    def test_notification_post_without_id_tolerates_empty_body(self) -> None:
+        with CorrelatedMcpServer([]) as server:
+            client = McpClient(server.url)
+            self.assertIsNone(client.post({
+                "jsonrpc": "2.0", "method": "notifications/initialized",
+                "params": {},
+            }))
+
+    def test_dispatch_sends_session_delete_teardown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, _ = self.make_dispatcher(tmp, server)
+            result = dispatcher.dispatch(batch_request())
+            self.assertEqual(result.outcome, "finished")
+            self.assertEqual(
+                server.http.deleted_sessions, ["mcp-test-session"],
+            )
+
+    def test_deferred_dispatch_still_tears_down_session_at_final_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running"]
+        ) as server:
+            dispatcher, _ = self.make_dispatcher(tmp, server, max_polls=1)
+            result = dispatcher.dispatch(batch_request())
+            self.assertEqual(result.payload["results"][0]["outcome"], "retry")
+            self.assertEqual(
+                server.http.deleted_sessions, ["mcp-test-session"],
+            )
 
     def test_create_run_poll_finished_preserves_exact_metrics_and_routes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
@@ -660,6 +781,9 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 self.created = 0
 
             def initialize(self) -> None:
+                return
+
+            def close(self) -> None:
                 return
 
             def call_tool(self, name: str, arguments: dict | None = None) -> object:
