@@ -1118,6 +1118,7 @@ class BatchSupervisor:
                     self.database.reconcile_significance_gate(
                         item["id"], float(max(p_values)),
                         self.resource_policy.active_ready_limit,
+                        fdr_level=self.resource_policy.significance_fdr_level,
                     )
         if self.memory_adapter is not None:
             sync_memory_outbox(

@@ -193,6 +193,33 @@ def _slug(value: str) -> str:
     return re.sub(r"[^A-Z0-9]+", "-", value.upper()).strip("-")[:40] or "STRATEGY"
 
 
+def benjamini_hochberg(p_values: list[float], level: float) -> list[dict[str, Any]]:
+    """Rank one family of p-values with Benjamini-Hochberg critical values.
+
+    Returns one finding per hypothesis in the input order: 1-based rank,
+    ``rank * level / m`` critical threshold, and whether the step-up
+    procedure rejects it (every p-value at or below the largest rank k
+    satisfying p(k) <= k*level/m is rejected).
+    """
+    if not 0 < level <= 1:
+        raise ValueError("FDR level must be in (0, 1]")
+    total = len(p_values)
+    order = sorted(range(total), key=lambda index: (p_values[index], index))
+    ranks = {index: rank for rank, index in enumerate(order, start=1)}
+    rejected_rank = 0
+    for rank, index in enumerate(order, start=1):
+        if p_values[index] <= rank * level / total:
+            rejected_rank = rank
+    return [
+        {
+            "rank": ranks[index],
+            "threshold": ranks[index] * level / total,
+            "rejected": ranks[index] <= rejected_rank,
+        }
+        for index in range(total)
+    ]
+
+
 def _binding_significance_test(database: WorkflowDatabase, fingerprint: str) -> dict[str, Any] | None:
     """Return the first finished significance test for a canonical fingerprint.
 

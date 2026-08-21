@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from ats_lab.database import WorkflowDatabase
 from ats_lab.models import ExperimentSpec, RouteSpec, RunResult, RunStatus
 from ats_lab.synthesis import (
     SynthesisRequest,
+    benjamini_hochberg,
     synthesis_request_from_payload,
     synthesize,
 )
@@ -227,6 +229,91 @@ class SynthesisTests(unittest.TestCase):
             self.assertIsNone(result["significance_job"])
             self.assertEqual(result["baseline_state"], "ready")
             self.assertEqual(database.rows("SELECT COUNT(*) count FROM experiments")[0]["count"], 1)
+
+    def test_benjamini_hochberg_known_family(self) -> None:
+        findings = benjamini_hochberg(
+            [0.001, 0.008, 0.039, 0.041, 0.2, 0.5], 0.05,
+        )
+        self.assertEqual([finding["rank"] for finding in findings], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(findings[0]["threshold"], 0.05 / 6)
+        self.assertAlmostEqual(findings[5]["threshold"], 0.05)
+        self.assertEqual(
+            [finding["rejected"] for finding in findings],
+            [True, True, False, False, False, False],
+        )
+        with self.assertRaisesRegex(ValueError, "FDR level"):
+            benjamini_hochberg([0.01], 0.0)
+
+    def cohort_member(self, slot: int) -> SynthesisRequest:
+        return SynthesisRequest(
+            strategy_name=f"Cohort{slot}", hypothesis=f"Hypothesis {slot}.",
+            entry_rule=f"Entry rule {slot}", change_scope="new_entry",
+            routes=(ROUTE,), random_seed=42, cohort_id="COH-1", cohort_slot=slot,
+        )
+
+    def finish_cohort_member(
+        self, database: WorkflowDatabase, member: dict, p_value: float, slot: int,
+    ) -> None:
+        database.add_run(RunResult(
+            id=f"rst-{member['significance_job']}",
+            experiment_id=member["significance_job"],
+            work_item_id=member["significance_job"],
+            session_id=f"session-{slot}", status=RunStatus.FINISHED,
+            metrics={"p_value": p_value},
+            finished_at=f"2026-01-0{slot + 1}T00:00:00Z",
+        ))
+
+    def test_cohort_significance_gated_by_bh_fdr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            members = [
+                synthesize(database, self.cohort_member(slot)) for slot in range(4)
+            ]
+            for slot, (member, p_value) in enumerate(zip(members, [0.001, 0.008, 0.039])):
+                self.finish_cohort_member(database, member, p_value, slot)
+                outcome = database.reconcile_significance_gate(
+                    member["significance_job"], p_value, active_limit=10,
+                )
+                self.assertEqual(outcome["decision"], "awaiting_cohort_fdr")
+                states = {
+                    row["id"]: row["state"]
+                    for row in database.rows("SELECT id,state FROM work_items")
+                }
+                self.assertEqual(states[member["baseline_job"]], "scheduled")
+
+            self.finish_cohort_member(database, members[3], 0.2, 3)
+            outcome = database.reconcile_significance_gate(
+                members[3]["significance_job"], 0.2, active_limit=10,
+            )
+
+            self.assertEqual(outcome["decision"], "cohort_fdr_applied")
+            fdr = outcome["cohort_fdr"]
+            self.assertEqual(fdr["cohort_id"], "COH-1")
+            self.assertEqual(fdr["family_size"], 4)
+            self.assertEqual(fdr["fdr_level"], 0.05)
+            self.assertEqual(
+                [(m["rank"], m["rejected"]) for m in fdr["members"]],
+                [(1, True), (2, True), (3, False), (4, False)],
+            )
+            states = {
+                row["id"]: (row["state"], json.loads(row["specification_json"]))
+                for row in database.rows(
+                    "SELECT id,state,specification_json FROM work_items",
+                )
+            }
+            self.assertEqual(states[members[0]["baseline_job"]][0], "ready")
+            self.assertEqual(states[members[1]["baseline_job"]][0], "ready")
+            withheld = states[members[2]["baseline_job"]]
+            self.assertEqual(withheld[0], "scheduled")
+            self.assertEqual(
+                withheld[1]["gate_decision"], "significance_withheld_bh_fdr",
+            )
+            self.assertEqual(withheld[1]["gate_findings"], {
+                "procedure": "benjamini_hochberg", "fdr_level": 0.05,
+                "family_size": 4, "rank": 3, "threshold": 3 * 0.05 / 4,
+                "rejected": False,
+            })
+            self.assertEqual(states[members[3]["baseline_job"]][0], "archived")
 
 
 if __name__ == "__main__":

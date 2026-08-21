@@ -76,6 +76,7 @@ class ResourcePolicy:
     mode: str = "balanced"
     cpu_cores: int = 4
     significance_simulations: int = 2000
+    significance_fdr_level: float = 0.05
     hpo_trials_per_parameter: int = 100
     hpo_best_candidates: int = 20
     monte_carlo_scenarios: int = 500
@@ -127,6 +128,8 @@ class ResourcePolicy:
                                  else f"resources.{name} must be positive")
         if self.significance_simulations < 2000:
             raise ValueError("resources.significance_simulations must be at least 2000")
+        if not 0 < float(self.significance_fdr_level) <= 1:
+            raise ValueError("resources.significance_fdr_level must be in (0, 1]")
         if self.monte_carlo_scenarios < 500:
             raise ValueError("resources.monte_carlo_scenarios must be at least 500")
         if self.synthesis_generate_limit > self.synthesis_inspect_limit:

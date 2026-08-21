@@ -29,6 +29,33 @@ Every evaluation must produce:
 
 No strategy advances from one profitable backtest. A strategy must survive multiple comparison windows and market regimes before HPO.
 
+## Entry Significance Testing
+
+Entry-rule significance protects against reading noise as edge. Two
+methodology rules are enforced in code:
+
+1. **First test wins.** For each canonical entry fingerprint, the earliest
+   finished significance run is binding. Later re-tests of the same entry
+   rule are stored and visible but never flip baseline readiness; the
+   synthesis status output reports which run counted (`run_id`, `p_value`,
+   `decided_at`). Re-running significance until p < 0.05 is not a valid
+   path to release.
+2. **Benjamini-Hochberg FDR control per synthesis cohort.** All entry
+   significance p-values inside one synthesis cohort form one hypothesis
+   family. Once every member has a binding finished test, the family is
+   evaluated with the Benjamini-Hochberg step-up procedure at
+   `resources.significance_fdr_level` (default 0.05): sort the p-values
+   ascending and reject the largest rank k satisfying p(k) <= k * q / m;
+   every hypothesis at or below that rank is rejected. A baseline is
+   released only when its raw p < 0.05 AND Benjamini-Hochberg rejects it.
+   Raw-significant but non-rejected members stay scheduled as
+   `significance_withheld_bh_fdr`; the effective per-hypothesis threshold,
+   rank, family size, and rejection flag are persisted on the dependent
+   work item under `gate_findings` so every verdict remains explainable.
+   Cohorts with unfinished members wait (`awaiting_cohort_fdr`) instead of
+   releasing early. Significance tests outside a synthesis cohort keep the
+   single-test raw-p gates.
+
 ## Evaluation Window Policy
 
 Do not treat calendar dates in this document as permanent defaults. Configure
