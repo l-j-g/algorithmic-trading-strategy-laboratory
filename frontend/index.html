@@ -59,7 +59,10 @@
           <h2 id="room-title">Workflow at a glance</h2>
           <p class="muted">Canonical queue state, HPO readiness, and candidate evidence in one bounded view.</p>
         </div>
-        <span class="snapshot-chip" id="snapshot-source">Waiting for API</span>
+        <div class="intro-actions">
+          <span class="snapshot-chip" id="snapshot-source">Waiting for API</span>
+          <button class="button button-secondary" id="refresh-button" type="button">Refresh now</button>
+        </div>
       </section>
 
       <section class="summary-grid" aria-label="Workflow summary">
@@ -92,16 +95,24 @@
       <section class="panel attention-panel" aria-labelledby="attention-title">
         <div class="section-heading">
           <div><p class="eyebrow">Needs attention</p><h2 id="attention-title">Operator attention</h2></div>
-          <span class="count-chip" id="attention-count">0 items</span>
+          <span class="heading-actions"><span class="count-chip" id="attention-count">0 items</span><button class="panel-link" type="button" data-view="attention">View all →</button></span>
         </div>
         <ul class="attention-list" id="attention-list"></ul>
+      </section>
+
+      <section class="panel activity-panel" aria-labelledby="activity-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">Command centre</p><h2 id="activity-title">Activity</h2></div>
+          <span class="panel-caption">audit ledger · newest first · local time</span>
+        </div>
+        <ul class="activity-list" id="activity-list"></ul>
       </section>
 
       <div class="content-grid">
         <section class="panel queue-panel" aria-labelledby="queue-title">
           <div class="section-heading">
             <div><p class="eyebrow">Execution lane</p><h2 id="queue-title">Queue</h2></div>
-            <span class="panel-caption">bounded work view</span>
+            <span class="heading-actions"><span class="panel-caption">bounded work view</span><button class="panel-link" type="button" data-view="queue">View all →</button></span>
           </div>
           <div class="table-wrap">
             <table>
@@ -117,7 +128,7 @@
         <section class="panel hpo-panel" aria-labelledby="hpo-title">
           <div class="section-heading">
             <div><p class="eyebrow">Optimizer lane</p><h2 id="hpo-title">HPO studies</h2></div>
-            <span class="panel-caption">route readiness</span>
+            <span class="heading-actions"><span class="panel-caption">route readiness</span><button class="panel-link" type="button" data-view="hpo">View all →</button></span>
           </div>
           <div class="hpo-list" id="hpo-list"></div>
         </section>

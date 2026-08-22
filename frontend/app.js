@@ -13,13 +13,14 @@
     hpoStudies: "/api/v1/hpo/studies",
     control: "/api/v1/control",
     attention: "/api/v1/attention",
+    events: "/api/v1/events",
     backtests: "/api/v1/backtests",
     commands: "/api/v1/commands",
   });
   const API_BASE = String(window.ATS_LAB_API_BASE || "").replace(/\/$/, "");
   const REFRESH_INTERVAL_MS = 30000;
   const STALE_AFTER_MS = 90000;
-  const state = { view: "dashboard", snapshot: null, detail: null, refreshTimer: null };
+  const state = { view: "dashboard", snapshot: null, detail: null, refreshTimer: null, ageTimer: null, backtestsParams: null };
 
   const DEMO = {
     summary: {
@@ -39,6 +40,11 @@
       { id: "HPO-017", name: "Range breakout search", strategy: "RangeBreakout", state: "requirements_pending", completed_trials: 0, total_trials: 30, selected: 0, validation: 0, next_action: "Attach completed study" },
     ],
     control: { available: false, desired_state: "unknown", supervisor_phase: "unknown" },
+    events: [
+      { aggregate_type: "work_item", aggregate_id: "JOB-1041", event_type: "state_changed", occurred_at: "2026-08-11T01:19:40Z" },
+      { aggregate_type: "run", aggregate_id: "RUN-2214", event_type: "infrastructure_retry_deferred", occurred_at: "2026-08-11T01:12:03Z" },
+      { aggregate_type: "work_item", aggregate_id: "JOB-1039", event_type: "claim_recovered", occurred_at: "2026-08-11T00:58:51Z" },
+    ],
     demo: true,
   };
 
@@ -138,13 +144,23 @@
     return { available: true, desired_state: source.desired_state ?? "unknown", supervisor_phase: supervisor.phase ?? "not_reported", process_id: supervisor.process_id ?? null };
   }
 
+  function normalizeEvents(payload) {
+    return arrayPayload(payload, ["events", "items", "rows"]).slice(0, 12).map((event) => ({
+      aggregate_type: event.aggregate_type ?? "system",
+      aggregate_id: event.aggregate_id ?? "—",
+      event_type: event.event_type ?? "unknown",
+      occurred_at: event.occurred_at ?? null,
+    }));
+  }
+
   async function loadSnapshot(client) {
     const entries = await Promise.allSettled([
       client.getJson(client.routes.summary), client.getJson(client.routes.health),
       client.getJson(client.routes.queue), client.getJson(client.routes.hpoStudies), client.getJson(client.routes.control),
+      client.getJson(`${client.routes.events}?limit=12`),
     ]);
-    const [summary, health, queue, hpoStudies, control] = entries;
-    const dataEntries = entries.slice(0, 4);
+    const [summary, health, queue, hpoStudies, control, events] = entries;
+    const dataEntries = entries.slice(0, 5);
     const failures = dataEntries.filter((entry) => entry.status === "rejected").map((entry) => entry.reason?.message || "request failed");
     return {
       summary: summary.status === "fulfilled" ? normalizeSummary(summary.value) : DEMO.summary,
@@ -152,6 +168,7 @@
       queue: queue.status === "fulfilled" ? normalizeQueue(queue.value) : DEMO.queue,
       hpoStudies: hpoStudies.status === "fulfilled" ? normalizeHpo(hpoStudies.value) : DEMO.hpoStudies,
       control: control.status === "fulfilled" ? normalizeControl(control.value) : DEMO.control,
+      events: events.status === "fulfilled" ? normalizeEvents(events.value) : DEMO.events,
       failures, controlFailure: control.status === "rejected", demo: failures.length === dataEntries.length,
     };
   }
@@ -228,6 +245,36 @@
     return `${hours}h ${minutes % 60}m`;
   }
 
+  function relativeAge(value) {
+    const ms = Date.now() - Date.parse(value || "");
+    if (!Number.isFinite(ms) || ms < 0) return null;
+    const seconds = Math.round(ms / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 48) return `${hours}h ago`;
+    return `${Math.round(hours / 24)}d ago`;
+  }
+
+  function eventMeaning(type) {
+    return {
+      infrastructure_retry_deferred: "Infrastructure problem deferred retry; no strategy result was produced.",
+      state_changed: "Work-item state changed in the canonical workflow.",
+      claim_recovered: "Orphaned claim was returned to the runnable queue.",
+      blocker_resolved: "Operator resolved a blocker; item returned to ready.",
+    }[type] || "Point-in-time workflow or infrastructure event.";
+  }
+
+  function renderActivity(snapshot) {
+    const list = $("#activity-list");
+    if (!list) return;
+    const events = snapshot.events || [];
+    list.innerHTML = events.length ? events.map((event) => {
+      return `<li class="activity-item" data-detail-${event.aggregate_type === "work_item" ? "work-item" : "evidence"}="${escapeHtml(event.aggregate_id)}"><time title="${escapeHtml(formatTime(event.occurred_at))}">${escapeHtml(relativeAge(event.occurred_at) || "—")}</time><strong>${escapeHtml(event.aggregate_id)}</strong><span title="${escapeHtml(eventMeaning(event.event_type))}">${escapeHtml(eventMeaning(event.event_type))}</span></li>`;
+    }).join("") : '<li class="empty-state">No recent activity.</li>';
+  }
+
   function renderSummary(snapshot) {
     const summary = snapshot.summary;
     $("#queue-count").textContent = text(summary.queue);
@@ -245,7 +292,9 @@
     badge.dataset.status = statusClass(snapshot.health.status);
     $("#health-label").textContent = snapshot.health.label || "Unknown";
     $("#snapshot-source").textContent = snapshot.demo ? "Demo fallback" : (snapshot.failures.length ? "Partial API" : "Live API");
-    $("#last-updated").textContent = `Last heartbeat ${formatTime(snapshot.summary.heartbeat_at, "not reported")}`;
+    const age = relativeAge(snapshot.summary.updated_at);
+    $("#last-updated").textContent = age ? `Snapshot ${age}` : `Last heartbeat ${formatTime(snapshot.summary.heartbeat_at, "not reported")}`;
+    $("#last-updated").title = `Snapshot taken ${formatTime(snapshot.summary.updated_at)} · heartbeat ${formatTime(snapshot.summary.heartbeat_at)}`;
   }
 
   function renderControl(snapshot) {
@@ -318,9 +367,26 @@
     }
   }
 
+  const VIEW_HASHES = Object.freeze(["dashboard", "queue", "running", "hpo", "candidates", "attention", "backtests"]);
+
+  function syncHash(view) {
+    const current = String(window.location.hash || "").replace(/^#\/?/, "");
+    if (VIEW_HASHES.includes(view)) {
+      if (current !== view) history.replaceState(null, "", `#${view}`);
+      return;
+    }
+    if (current) history.replaceState(null, "", window.location.pathname + window.location.search);
+  }
+
+  function applyHash() {
+    const raw = String(window.location.hash || "").replace(/^#\/?/, "");
+    if (VIEW_HASHES.includes(raw)) setView(raw);
+  }
+
   function setView(view) {
     const valid = ["dashboard", "queue", "running", "hpo", "candidates", "attention", "backtests"];
     state.view = valid.includes(view) ? view : "dashboard";
+    syncHash(state.view);
     document.querySelectorAll("[data-view]").forEach((element) => {
       if (element.classList.contains("view-nav-button")) element.classList.toggle("active", element.dataset.view === state.view);
     });
@@ -488,11 +554,6 @@
     const timings = payload.stage_timings || [];
     const events = payload.events || [];
     const rows = evidence.length ? evidence.map((row) => `<tr data-detail-evidence="${escapeHtml(row.run_id || "")}"><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td>${escapeHtml(row.evidence_split || "—")}</td><td>${formatMetric(row.trade_count)}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${statusPill(row.verdict || "reported")}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="5">No normalized evidence attached.</td></tr>`;
-    const eventMeaning = (type) => ({
-      infrastructure_retry_deferred: "Infrastructure problem deferred retry; no strategy result was produced.",
-      state_changed: "Work-item state changed in the canonical workflow.",
-      claim_recovered: "Orphaned claim was returned to the runnable queue.",
-    }[type] || "Point-in-time workflow or infrastructure event.");
     const timingList = timings.length ? timings.map((row) => `<li><strong>${escapeHtml(row.stage || row.kind || "stage")}</strong><span>${statusPill(row.state || row.outcome || "unknown")} · ${formatDuration(row.duration_seconds)} · finished ${formatTime(row.completed_at || row.started_at, "not finished")}</span></li>`).join("") : "<li class='empty-state'>No stage timings.</li>";
     const eventList = events.length ? events.map((row) => `<li><strong>${escapeHtml(row.event_type)}</strong><span>${escapeHtml(eventMeaning(row.event_type))} · ${formatTime(row.occurred_at)}</span></li>`).join("") : "<li class='empty-state'>No events.</li>";
     const form = item.state === "blocked" ? `<form class="resolution-form" id="resolution-form"><h3>Resolve blocker</h3><p class="muted">This reopens the item as ready and records an auditable resolution event.</p><label>Resolution code <input name="resolution_code" required maxlength="200" placeholder="verified_route"></label><label>Detail <textarea name="detail" required maxlength="4000" placeholder="What was checked or changed?"></textarea></label><button type="submit">Confirm resolution</button><p class="command-output" id="resolution-output" role="status"></p></form>` : `<div class="notice">Item is ${escapeHtml(item.state || "not blocked")}. Resolution form appears only for blocked items.</div>`;
@@ -510,6 +571,7 @@
   }
 
   async function loadBacktests(params = new URLSearchParams()) {
+    state.backtestsParams = params;
     $("#detail-view").innerHTML = detailNotice("Loading canonical evidence…");
     try { renderBacktestsView(await createApiClient().getJson(`${API_ROUTES.backtests}?${params.toString()}`)); }
     catch (error) { $("#detail-view").innerHTML = `${detailHeader("Research database", "Backtests / DB", "The live API is required for database queries.")}${detailNotice(error.message || "Backtest query failed")}`; }
@@ -517,7 +579,7 @@
 
   async function loadView(view) {
     const detail = $("#detail-view");
-    if (view === "backtests") { await loadBacktests(); return; }
+    if (view === "backtests") { await loadBacktests(state.backtestsParams || new URLSearchParams()); return; }
     detail.innerHTML = detailNotice("Loading live view…");
     try {
       const api = createApiClient();
@@ -536,7 +598,7 @@
 
   async function openWorkItem(id) {
     setView("dashboard");
-    $("#dashboard-view").hidden = true; $("#detail-view").hidden = false; state.view = "item";
+    $("#dashboard-view").hidden = true; $("#detail-view").hidden = false; state.view = "item"; syncHash(state.view);
     $("#detail-view").innerHTML = detailNotice("Loading work item…");
     try { renderWorkItemDetail(await createApiClient().getJson(`/api/v1/work-items/${encodeURIComponent(id)}`)); }
     catch (error) { $("#detail-view").innerHTML = `${detailHeader("Work item", id)}${detailNotice(error.message || "Work item unavailable")}`; }
@@ -544,7 +606,7 @@
 
   async function openEvidence(id) {
     if (!id) return;
-    $("#dashboard-view").hidden = true; $("#detail-view").hidden = false; state.view = "evidence";
+    $("#dashboard-view").hidden = true; $("#detail-view").hidden = false; state.view = "evidence"; syncHash(state.view);
     $("#detail-view").innerHTML = detailNotice("Loading evidence…");
     try { renderEvidenceDetail(await createApiClient().getJson(`/api/v1/evidence/${encodeURIComponent(id)}`)); }
     catch (error) { $("#detail-view").innerHTML = `${detailHeader("Evidence", id)}${detailNotice(error.message || "Evidence unavailable")}`; }
@@ -552,7 +614,7 @@
 
   async function openExperiment(id) {
     if (!id) return;
-    $("#dashboard-view").hidden = true; $("#detail-view").hidden = false; state.view = "experiment";
+    $("#dashboard-view").hidden = true; $("#detail-view").hidden = false; state.view = "experiment"; syncHash(state.view);
     $("#detail-view").innerHTML = detailNotice("Loading experiment lineage…");
     try { renderExperimentDetail(await createApiClient().getJson(`/api/v1/experiments/${encodeURIComponent(id)}`)); }
     catch (error) { $("#detail-view").innerHTML = `${detailHeader("Strategy experiment", id)}${detailNotice(error.message || "Experiment unavailable")}`; }
@@ -561,11 +623,33 @@
   async function openHpo(id) {
     if (!id || id === "—") return;
     $("#dashboard-view").hidden = true; $("#detail-view").hidden = false; state.view = "hpo-detail";
+    syncHash(state.view);
     $("#detail-view").innerHTML = detailNotice("Loading HPO study…");
     try {
       const payload = await createApiClient().getJson(`/api/v1/hpo/studies/${encodeURIComponent(id)}`);
       const study = payload.study || payload;
-      $("#detail-view").innerHTML = `${detailHeader("Optimizer study", study.study_id || study.id || id, `${study.strategy || "—"} · ${study.lifecycle_state || study.state || "—"}`)}<div class="notice">${escapeHtml(study.next_action || study.finding || "Review study evidence")}</div><pre class="json-view">${escapeHtml(JSON.stringify(payload, null, 2))}</pre>`;
+      const selected = Array.isArray(study.selected_trials) ? study.selected_trials : [];
+      const validations = Array.isArray(study.validations) ? study.validations : [];
+      const timings = Array.isArray(study.timings) ? study.timings : [];
+      const total = number(study.trial_count);
+      const completed = Math.min(number(study.completed_trial_count), total || number(study.completed_trial_count));
+      const progress = total ? Math.round((completed / total) * 100) : 0;
+      const metaEntries = [
+        ["Objective", study.objective_name],
+        ["Direction", study.direction],
+        ["Parent experiment", study.parent_experiment_id],
+        ["Parent job", study.parent_work_item_id],
+        ["HPO experiment", study.hpo_experiment_id],
+        ["HPO job", study.hpo_work_item_id],
+        ["Started", formatTime(study.started_at)],
+        ["Completed", formatTime(study.completed_at)],
+        ["Updated", formatTime(study.updated_at)],
+        ["Disposition", study.disposition],
+      ].filter(([, value]) => value !== null && value !== undefined && value !== "" && value !== "—");
+      const selectedRows = selected.length ? selected.map((trial) => `<tr${trial.run_id ? ` data-detail-evidence="${escapeHtml(trial.run_id)}"` : ""}><td><strong>#${escapeHtml(trial.trial_number ?? trial.trial_id ?? "—")}</strong>${trial.rank ? `<small>rank ${escapeHtml(trial.rank)}</small>` : ""}</td><td>${formatMetric(trial.objective_value)}</td><td>${escapeHtml(trial.classification || "—")}</td><td>${escapeHtml(trial.selection_reason || "—")}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="4">No trials selected yet.</td></tr>`;
+      const validationRows = validations.length ? validations.map((job) => `<tr><td>${statusPill(job.state || "unknown")}</td><td>${escapeHtml(job.experiment_id || "—")}</td><td>${escapeHtml(job.readiness_status || job.blocker_detail || job.blocker_code || "—")}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="3">No validation jobs recorded.</td></tr>`;
+      const timingList = timings.length ? timings.map((row) => `<li><strong>${escapeHtml(row.stage || row.kind || "stage")}</strong><span>${statusPill(row.state || row.outcome || "unknown")} · ${formatDuration(row.duration_seconds)} · finished ${formatTime(row.completed_at || row.started_at, "not finished")}</span></li>`).join("") : "<li class='empty-state'>No stage timings.</li>";
+      $("#detail-view").innerHTML = `${detailHeader("Optimizer study", study.name || study.study_id || id, `${study.strategy || "—"} · ${study.lifecycle_state || study.state || "—"}`)}<div class="notice">${escapeHtml(study.next_action || study.finding || "Review study evidence")}</div><div class="stat-grid">${statCard("Trials done", `${completed}/${total || "—"}`)}${statCard("Selected", formatMetric(study.selected_trial_count ?? selected.length))}${statCard("Validations", formatMetric(study.validation_count ?? validations.length))}${statCard("Progress", `${progress}%`)}</div><div class="panel"><h3>Study metadata</h3><ul class="timeline-list">${metaEntries.map(([label, value]) => `<li><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></li>`).join("")}</ul></div><div class="panel"><h3>Selected trials</h3><p class="muted">Provisional winners. They stay provisional until validation and promotion gates pass.</p><div class="table-wrap"><table class="detail-table"><thead><tr><th>Trial</th><th>Objective</th><th>Classification</th><th>Reason</th></tr></thead><tbody>${selectedRows}</tbody></table></div></div><div class="panel"><h3>Validation</h3><div class="table-wrap"><table class="detail-table"><thead><tr><th>State</th><th>Experiment</th><th>Readiness</th></tr></thead><tbody>${validationRows}</tbody></table></div></div><div class="panel"><h3>Stage timings</h3><ul class="timeline-list">${timingList}</ul></div><details class="json-details"><summary>Raw study JSON</summary><pre class="json-view">${escapeHtml(JSON.stringify(payload, null, 2))}</pre></details>`;
     } catch (error) { $("#detail-view").innerHTML = `${detailHeader("Optimizer study", id)}${detailNotice(error.message || "HPO detail unavailable")}`; }
   }
 
@@ -629,10 +713,28 @@
 
   async function refresh() {
     state.snapshot = await loadSnapshot(createApiClient());
-    renderSummary(state.snapshot); renderHealth(state.snapshot); renderControl(state.snapshot); renderAttention(state.snapshot); renderQueue(state.snapshot); renderHpo(state.snapshot); renderStale(state.snapshot);
+    renderSummary(state.snapshot); renderHealth(state.snapshot); renderControl(state.snapshot); renderAttention(state.snapshot); renderQueue(state.snapshot); renderHpo(state.snapshot); renderStale(state.snapshot); renderActivity(state.snapshot);
     if (state.view !== "dashboard" && !["item", "evidence", "experiment", "hpo-detail"].includes(state.view)) loadView(state.view);
   }
 
+  function tickRelativeAges() {
+    if (!state.snapshot) return;
+    renderHealth(state.snapshot);
+    renderActivity(state.snapshot);
+  }
+
   window.ATS_LAB_CONTROL_ROOM = Object.freeze({ API_ROUTES, createApiClient, normalizeSummary, normalizeHealth, normalizeQueue, normalizeHpo, normalizeControl, loadSnapshot, refresh });
-  document.addEventListener("DOMContentLoaded", () => { bindEvents(); refresh(); state.refreshTimer = window.setInterval(refresh, REFRESH_INTERVAL_MS); });
+  document.addEventListener("DOMContentLoaded", () => {
+    bindEvents();
+    $("#refresh-button").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try { await refresh(); } finally { button.disabled = false; }
+    });
+    applyHash();
+    window.addEventListener("hashchange", applyHash);
+    refresh();
+    state.refreshTimer = window.setInterval(refresh, REFRESH_INTERVAL_MS);
+    state.ageTimer = window.setInterval(tickRelativeAges, 15000);
+  });
 }());
