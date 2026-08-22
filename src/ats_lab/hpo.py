@@ -312,7 +312,7 @@ def import_optuna_study(
     snapshot = read_optuna_study(source_path, study_name=study_name)
     source_path = source_path.resolve()
     stable = hashlib.sha256(
-        f"{source_path}:{snapshot.source_study_id}".encode()
+        source_path.read_bytes() + f":{snapshot.source_study_id}".encode()
     ).hexdigest()[:12].upper()
     return _import_study_snapshot(
         database,

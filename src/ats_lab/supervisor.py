@@ -564,8 +564,6 @@ class BatchSupervisor:
                 job, "HPO study has no canonical completed-trial evidence",
                 recovered=recovered, promoted=promoted,
             )
-        if int(job.get("attempts") or 1) > 1:
-            canonical = canonical[:max(1, len(canonical) // 2)]
         experiment_id = payload["study"]["hpo_experiment_id"]
         request = {
             "schema_version": 1,

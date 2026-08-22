@@ -541,6 +541,53 @@ class OptunaImportTests(unittest.TestCase):
         self.assertEqual(study["trial_count"], 0)
         self.assertIsNone(study["source_database_path"])
 
+    def test_import_identity_keys_on_content_not_path(self) -> None:
+        first = import_optuna_study(
+            self.database,
+            self.source,
+            study_name="Trend_optuna",
+            parent_experiment_id="EXP-HPO",
+            parent_work_item_id="JOB-HPO", strategy="Trend",
+        )
+        copy_path = Path(self.temp.name) / "copy.sqlite3"
+        copy_path.write_bytes(self.source.read_bytes())
+        other = WorkflowDatabase(Path(self.temp.name) / "other.sqlite3")
+        other.initialize()
+        other.upsert_experiment(ExperimentSpec(
+            id="EXP-OTHER", strategy_name="Trend",
+            experiment_type=ExperimentType.HPO,
+        ))
+        other.upsert_work_item(WorkItem(
+            id="JOB-OTHER", experiment_id="EXP-OTHER", priority=1,
+            state=WorkState.FINISHED,
+        ))
+        second = import_optuna_study(
+            other,
+            copy_path,
+            study_name="Trend_optuna",
+            parent_experiment_id="EXP-OTHER",
+            parent_work_item_id="JOB-OTHER", strategy="Trend",
+        )
+        self.assertEqual(first["study_id"], second["study_id"])
+
+        source = sqlite3.connect(self.source)
+        source.execute(
+            """INSERT INTO trials VALUES (
+                   3,8,1,'COMPLETE','2026-01-01 00:00:00','2026-01-01 00:00:02'
+               )""",
+        )
+        source.execute("INSERT INTO trial_values VALUES (3,3,0,0.6,'FINITE')")
+        source.commit()
+        source.close()
+        third = import_optuna_study(
+            other,
+            self.source,
+            study_name="Trend_optuna",
+            parent_experiment_id="EXP-OTHER",
+            parent_work_item_id="JOB-OTHER", strategy="Trend",
+        )
+        self.assertNotEqual(third["study_id"], first["study_id"])
+
     def test_read_rejects_partial_optuna_schema(self) -> None:
         partial = Path(self.temp.name) / "partial.sqlite3"
         sqlite3.connect(partial).close()

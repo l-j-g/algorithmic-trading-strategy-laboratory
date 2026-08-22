@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
+from ats_lab.hpo import import_optuna_study
 from ats_lab.models import (
     Evaluation,
     ExperimentSpec,
@@ -734,6 +737,129 @@ class BatchSupervisorTests(unittest.TestCase):
                 )[0]["state"],
                 "waiting_retry",
             )
+
+    def test_hpo_analysis_payload_is_attempt_invariant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "optuna.sqlite3"
+            source_conn = sqlite3.connect(source)
+            source_conn.executescript("""
+            CREATE TABLE studies(study_id INTEGER PRIMARY KEY,study_name TEXT);
+            CREATE TABLE study_directions(
+              study_direction_id INTEGER PRIMARY KEY,direction TEXT,
+              study_id INTEGER,objective INTEGER
+            );
+            CREATE TABLE trials(
+              trial_id INTEGER PRIMARY KEY,number INTEGER,study_id INTEGER,
+              state TEXT,datetime_start TEXT,datetime_complete TEXT
+            );
+            CREATE TABLE trial_values(
+              trial_value_id INTEGER PRIMARY KEY,trial_id INTEGER,
+              objective INTEGER,value REAL,value_type TEXT
+            );
+            CREATE TABLE trial_params(
+              param_id INTEGER PRIMARY KEY,trial_id INTEGER,param_name TEXT,
+              param_value REAL,distribution_json TEXT
+            );
+            CREATE TABLE trial_user_attributes(
+              trial_user_attribute_id INTEGER PRIMARY KEY,trial_id INTEGER,
+              key TEXT,value_json TEXT
+            );
+            CREATE TABLE trial_system_attributes(
+              trial_system_attribute_id INTEGER PRIMARY KEY,trial_id INTEGER,
+              key TEXT,value_json TEXT
+            );
+            INSERT INTO studies VALUES (1,'Trend_optuna');
+            INSERT INTO study_directions VALUES (1,'MAXIMIZE',1,0);
+            """)
+            for number in (7, 8):
+                source_conn.execute(
+                    """INSERT INTO trials VALUES (
+                           ?,?,1,'COMPLETE','2026-01-01 00:00:00',
+                           '2026-01-01 00:00:01'
+                       )""",
+                    (number, number),
+                )
+                source_conn.execute(
+                    "INSERT INTO trial_values VALUES (?,?,0,0.5,'FINITE')",
+                    (number, number),
+                )
+                source_conn.execute(
+                    "INSERT INTO trial_params VALUES (?,?, 'period',12,?)",
+                    (number, number, json.dumps({"name": "IntDistribution"})),
+                )
+                source_conn.execute(
+                    """INSERT INTO trial_user_attributes VALUES
+                           (?,?, 'training_metrics',?)""",
+                    (number, number, json.dumps({
+                        "net_profit_percentage": 12, "max_drawdown": -4,
+                        "sharpe_ratio": 1.5, "total_trades": 40,
+                        "sortino_ratio": 1.1, "calmar_ratio": 1.2,
+                        "profit_factor": 1.3,
+                    })),
+                )
+                source_conn.execute(
+                    """INSERT INTO trial_user_attributes VALUES
+                           (?,?, 'testing_metrics',?)""",
+                    (number + 10, number, json.dumps({
+                        "net_profit_percentage": 8, "max_drawdown": -5,
+                        "sharpe_ratio": 1.1, "total_trades": 25,
+                        "sortino_ratio": 1.0, "calmar_ratio": 1.1,
+                        "profit_factor": 1.2,
+                    })),
+                )
+            source_conn.commit()
+            source_conn.close()
+
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-HPO", strategy_name="Trend",
+                experiment_type=ExperimentType.HPO,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="JOB-HPO", experiment_id="EXP-HPO", priority=1,
+                state=WorkState.FINISHED,
+            ))
+            result = import_optuna_study(
+                database, source, study_name="Trend_optuna",
+                parent_experiment_id="EXP-HPO",
+                parent_work_item_id="JOB-HPO", strategy="Trend",
+            )
+            with database.connect() as connection:
+                connection.execute(
+                    "UPDATE hpo_analysis_jobs SET attempts=2 WHERE study_id=?",
+                    (result["study_id"],),
+                )
+            job = dict(database.rows(
+                "SELECT * FROM hpo_analysis_jobs WHERE study_id=?",
+                (result["study_id"],),
+            )[0])
+            supervisor = BatchSupervisor(
+                database, SequenceDispatcher([]), "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+            captured: dict = {}
+
+            def capture(request):
+                captured["request"] = request
+                return DispatchResult(outcome="finished", payload={
+                    "outcome": "finished",
+                    "evaluations": [{
+                        "experiment_id": (
+                            request["executions"][0]["experiment_id"]
+                        ),
+                        "verdict": "revise", "finding": "f",
+                        "next_action": "n",
+                    }],
+                })
+
+            supervisor._dispatch = capture
+
+            outcome = supervisor._analyze_hpo_job(job, recovered=0, promoted=0)
+
+            self.assertIn(outcome["status"], {"terminal", "finished"})
+            evidence = captured["request"]["executions"][0]["evidence"]
+            self.assertEqual(len(evidence), 4)
 
     def test_terminal_hpo_failure_parks_external_trial_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
