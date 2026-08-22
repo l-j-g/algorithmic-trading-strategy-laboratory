@@ -26,6 +26,25 @@ def host_allows_mutations(host: str) -> bool:
     return host in LOOPBACK_HOSTS
 
 
+def _host_header_name(value: str) -> str:
+    header = value.strip().lower()
+    if header.startswith("["):
+        return header[1:].split("]", 1)[0]
+    if header.count(":") == 1:
+        return header.split(":", 1)[0]
+    return header
+
+
+def host_header_allowed(header: str, bound_host: str) -> bool:
+    """Accept loopback Host headers plus an explicitly non-loopback bind."""
+    allowed = (
+        LOOPBACK_HOSTS
+        if bound_host in LOOPBACK_HOSTS
+        else LOOPBACK_HOSTS | {bound_host.strip().lower()}
+    )
+    return _host_header_name(header) in allowed
+
+
 PAGE_SPECS = {
     "queue": {
         "title": "Active queue",
@@ -141,13 +160,14 @@ def _newest_complete_evidence(
     evidence = database.query_normalized_evidence(
         filters=dict(filters or {}), limit=2000,
     )
-    complete = [item for item in evidence if _complete_compatibility(_evidence_dict(item))]
+    complete = [
+        (item, row) for item, row in (
+            (item, _evidence_dict(item)) for item in evidence
+        ) if _complete_compatibility(row)
+    ]
     if not complete:
         return None
-    return max(
-        complete,
-        key=lambda item: _evidence_dict(item).get("completed_at") or "",
-    )
+    return max(complete, key=lambda pair: pair[1].get("completed_at") or "")[0]
 
 
 def top_backtests(database: WorkflowDatabase, metric: str = "sharpe", limit: int = 20,
@@ -178,14 +198,14 @@ def top_backtests(database: WorkflowDatabase, metric: str = "sharpe", limit: int
             "start_date": start_date, "finish_date": finish_date,
         })
     if comparison_filters:
-        evidence = [
-            _evidence_dict(item)
-            for item in database.query_normalized_evidence(limit=5000)
-            if _complete_compatibility(_evidence_dict(item))
-            and _matches_comparison_filters(
-                _evidence_dict(item), comparison_filters,
-            )
-        ]
+        evidence = []
+        for item in database.query_normalized_evidence(limit=5000):
+            row = _evidence_dict(item)
+            if (
+                _complete_compatibility(row)
+                and _matches_comparison_filters(row, comparison_filters)
+            ):
+                evidence.append(row)
     else:
         anchor = _newest_complete_evidence(database, filters)
         if anchor is None:
@@ -375,13 +395,15 @@ def dashboard_counts(database: WorkflowDatabase) -> dict[str, object]:
         SUM(CASE WHEN state='blocked' THEN 1 ELSE 0 END) AS blocked,
         SUM(CASE WHEN state='waiting_retry' THEN 1 ELSE 0 END) AS retry
         FROM work_items""")[0]
-    candidates = len({
-        item.experiment_id
-        for item in database.query_normalized_evidence(limit=5000)
-        if item.verdict in {
-            "hpo_candidate", "paper_trade_candidate", "revise",
-        }
-    })
+    candidates = database.rows(
+        """SELECT COUNT(DISTINCT experiment_id) AS count FROM (
+               SELECT experiment_id FROM normalized_evidence
+               WHERE verdict IN ('hpo_candidate','paper_trade_candidate','revise')
+               ORDER BY COALESCE(completed_at,'') DESC,
+                        experiment_id,run_id,session_id,evidence_key
+               LIMIT 5000
+           )"""
+    )[0]["count"]
     awaiting = database.rows(
         """SELECT COUNT(*) AS count FROM work_items
            WHERE state='running' AND blocker_code='awaiting_batch_evaluation'"""
@@ -949,10 +971,26 @@ def _integer_text(value: object) -> str:
 
 
 def make_handler(
-    database: WorkflowDatabase, *, allow_mutations: bool = True,
+    database: WorkflowDatabase,
+    *,
+    allow_mutations: bool = True,
+    bound_host: str = "127.0.0.1",
 ) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
+        def _reject_host(self) -> bool:
+            if host_header_allowed(self.headers.get("Host", ""), bound_host):
+                return False
+            self._send(_json_bytes({
+                "error": {
+                    "code": "forbidden_host",
+                    "detail": "dashboard accepts loopback Host headers only",
+                },
+            }), "application/json", status=403)
+            return True
+
         def do_GET(self) -> None:  # noqa: N802
+            if self._reject_host():
+                return
             request = urlsplit(self.path)
             page = request.path.strip("/") or "queue"
             raw = parse_qs(request.query, keep_blank_values=False)
@@ -1090,6 +1128,8 @@ def make_handler(
             self._send(payload, "text/html; charset=utf-8")
 
         def do_POST(self) -> None:  # noqa: N802
+            if self._reject_host():
+                return
             if not allow_mutations:
                 self._send(_json_bytes({
                     "error": {
@@ -1182,8 +1222,8 @@ def make_handler(
             self.end_headers()
             self.wfile.write(payload)
 
-        def log_message(self, format: str, *args: object) -> None:
-            print(f"dashboard: {format % args}")
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
 
     return DashboardHandler
 
@@ -1192,7 +1232,11 @@ def serve(database: WorkflowDatabase, host: str = "127.0.0.1", port: int = 8765)
     database.initialize()
     server = ThreadingHTTPServer(
         (host, port),
-        make_handler(database, allow_mutations=host_allows_mutations(host)),
+        make_handler(
+            database,
+            allow_mutations=host_allows_mutations(host),
+            bound_host=host,
+        ),
     )
     print(f"ATS Lab dashboard: http://{host}:{server.server_port}")
     try:

@@ -72,6 +72,21 @@ class MemoryProviderError(RuntimeError):
     pass
 
 
+class _CredentialSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Strip Authorization when a provider redirects across hosts."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if (
+            urllib.parse.urlparse(newurl).hostname
+            != urllib.parse.urlparse(req.full_url).hostname
+        ):
+            req.headers = {
+                key: value for key, value in req.headers.items()
+                if key.lower() != "authorization"
+            }
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _text(field: str, value: object) -> str:
     text = " ".join(str(value or "").split())
     if _FORBIDDEN_TEXT.search(text):
@@ -726,7 +741,8 @@ class MemoryResearchAdapter:
             data=data, headers=headers, method=method,
         )
         try:
-            with urllib.request.urlopen(
+            opener = urllib.request.build_opener(_CredentialSafeRedirectHandler())
+            with opener.open(
                 request, timeout=self.config.timeout_seconds,
             ) as response:
                 body = response.read()

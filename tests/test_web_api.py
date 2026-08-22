@@ -5,14 +5,15 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import (
-    ExperimentSpec, ExperimentType, RouteSpec, RunResult, RunStatus,
-    WorkItem, WorkState,
+    Evaluation, ExperimentSpec, ExperimentType, RouteSpec, RunResult,
+    RunStatus, Verdict, WorkItem, WorkState,
 )
 from ats_lab.local_commands import LocalCommandError
 from ats_lab.web_api import ControlService, ReadOnlyApi, make_handler
@@ -311,6 +312,105 @@ class WebApiTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+
+    def test_hpo_study_detail_route_decodes_percent_encoded_ids(self) -> None:
+        self.database.add_evaluation(Evaluation(
+            experiment_id="EXP-1", verdict=Verdict.HPO_CANDIDATE,
+            summary="promising", next_step="run OOS", evaluator="test",
+        ))
+        study_id = self.database.schedule_hpo_candidate("EXP-1", "JOB-1")["id"]
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.database))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            encoded = urllib.parse.quote(study_id, safe="")
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/v1/hpo/studies/{encoded}"
+            ) as response:
+                payload = json.load(response)
+
+            self.assertEqual(payload["study_id"], study_id)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+
+class WebApiHostHeaderGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.database = WorkflowDatabase(Path(self.temporary.name) / "lab.sqlite3")
+        self.database.initialize()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _serve(self, **kwargs: object) -> str:
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), make_handler(self.database, **kwargs),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def test_loopback_host_headers_with_ports_are_accepted(self) -> None:
+        base = self._serve()
+        port = base.rsplit(":", 1)[-1]
+
+        with urllib.request.urlopen(f"{base}/api/health") as response:
+            self.assertEqual(response.status, 200)
+        request = urllib.request.Request(
+            f"{base}/api/health", headers={"Host": f"localhost:{port}"},
+        )
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual(response.status, 200)
+
+    def test_foreign_host_header_is_rejected_with_403(self) -> None:
+        base = self._serve()
+
+        request = urllib.request.Request(
+            f"{base}/api/health", headers={"Host": "attacker.example"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        self.assertEqual(error.exception.code, 403)
+        self.assertEqual(
+            json.load(error.exception)["error"]["code"], "forbidden_host",
+        )
+
+    def test_post_rejects_foreign_host_before_confirmation_gate(self) -> None:
+        base = self._serve()
+
+        request = urllib.request.Request(
+            f"{base}/api/v1/control/pause",
+            data=b"{}", method="POST",
+            headers={
+                "Host": "attacker.example",
+                "X-ATS-Lab-Confirm": "pause",
+            },
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        self.assertEqual(error.exception.code, 403)
+
+    def test_explicit_non_loopback_bind_accepts_literal_host_only(self) -> None:
+        base = self._serve(bound_host="192.168.10.10")
+
+        request = urllib.request.Request(
+            f"{base}/api/health", headers={"Host": "192.168.10.10:8766"},
+        )
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual(response.status, 200)
+        request = urllib.request.Request(
+            f"{base}/api/health", headers={"Host": "attacker.example"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        self.assertEqual(error.exception.code, 403)
 
 
 if __name__ == "__main__":

@@ -147,10 +147,11 @@ python3 -m pip install -e .
 ats-lab init
 ```
 
-`ats-lab init` creates the local database and configuration skeleton. Then
-copy the example config and point it at your Jesse workspace:
+`ats-lab init` creates the local database only. Then create the
+configuration directory yourself and point it at your Jesse workspace:
 
 ```bash
+mkdir -p .ats-lab
 cp .ats-lab/config.toml.example .ats-lab/config.toml
 # edit .ats-lab/config.toml: [repositories].jesse -> your Jesse research workspace
 ```

@@ -735,7 +735,13 @@ def run_console(
                 render_control(state, database.supervisor_runtime_status()) + "\n"
             )
         elif parts[0] == "watch":
-            seconds = float(parts[1]) if len(parts) > 1 else interval
+            seconds = interval
+            if len(parts) > 1:
+                try:
+                    seconds = float(parts[1])
+                except ValueError:
+                    output.write(f"invalid interval: {parts[1]}\n")
+                    continue
             try:
                 watch_monitor(database, interval=seconds, output=output)
             except KeyboardInterrupt:

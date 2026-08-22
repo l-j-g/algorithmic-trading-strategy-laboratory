@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -127,6 +128,83 @@ class OperatorStatusTests(unittest.TestCase):
             self.assertEqual(
                 database.rows("SELECT state FROM work_items")[0]["state"], "ready",
             )
+
+    def test_route_readiness_groups_validation_jobs_across_studies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1", strategy_name="TestStrategy",
+            ))
+            database.upsert_work_item(WorkItem(
+                id="HPO-A-JOB", experiment_id="EXP-1", priority=1,
+                state=WorkState.RUNNING,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="HPO-B-JOB", experiment_id="EXP-1", priority=1,
+                state=WorkState.RUNNING,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="VAL-A1", experiment_id="EXP-1", priority=2,
+                state=WorkState.READY,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="VAL-A2", experiment_id="EXP-1", priority=3,
+                state=WorkState.SCHEDULED,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="VAL-B1", experiment_id="EXP-1", priority=4,
+                state=WorkState.FINISHED,
+            ))
+            with database.connect() as connection:
+                for study_id in ("HPO-A", "HPO-B"):
+                    connection.execute(
+                        """INSERT INTO hpo_studies(
+                               id,study_name,strategy,hpo_experiment_id,
+                               hpo_work_item_id,lifecycle_state,created_at,updated_at
+                           ) VALUES (?,?,?,?,?,'validation','2026-08-01T00:00:00Z',
+                                     '2026-08-01T00:00:00Z')""",
+                        (
+                            study_id, f"study-{study_id}", "TestStrategy",
+                            "EXP-1", f"{study_id}-JOB",
+                        ),
+                    )
+                jobs = (
+                    ("VJ-A1", "HPO-A", "VAL-A1", "ready", None),
+                    ("VJ-A2", "HPO-A", "VAL-A2", "scheduled", "requirements_pending"),
+                    ("VJ-B1", "HPO-B", "VAL-B1", "finished", None),
+                )
+                for index, (job_id, study_id, work_item_id, state, readiness) in enumerate(jobs):
+                    connection.execute(
+                        """INSERT INTO hpo_trials(
+                               id,study_id,trial_number,state,params_json,imported_at
+                           ) VALUES (?,?,?,'COMPLETE','{}','2026-08-01T00:00:00Z')""",
+                        (f"trial-{job_id}", study_id, -(index + 1)),
+                    )
+                    connection.execute(
+                        """INSERT INTO hpo_validation_jobs(
+                               id,study_id,trial_id,work_item_id,evidence_split,
+                               state,created_at
+                           ) VALUES (?,?,?,?,'oos',?,'2026-08-01T00:00:00Z')""",
+                        (job_id, study_id, f"trial-{job_id}", work_item_id, state),
+                    )
+                    connection.execute(
+                        """UPDATE work_items SET specification_json=?
+                           WHERE id=?""",
+                        (json.dumps({"readiness": {"status": readiness}}), work_item_id),
+                    )
+
+            readiness = operator_status(database)["hpo"]["route_readiness"]
+
+            per_study = {
+                entry["study_id"]: entry["validation_jobs"]
+                for entry in readiness["studies"]
+            }
+            self.assertEqual(per_study, {"HPO-A": 2, "HPO-B": 1})
+            self.assertEqual(readiness["validation_jobs"]["total"], 3)
+            self.assertEqual(readiness["validation_jobs"]["ready"], 2)
+            self.assertEqual(readiness["validation_jobs"]["pending"], 1)
+            self.assertEqual(readiness["validation_jobs"]["finished"], 1)
 
 
 if __name__ == "__main__":
