@@ -55,6 +55,7 @@ from .correctness_recovery import (
     backfill_aggregate_route_coverage,
     classify_recovery_candidates,
     recover_executor_infrastructure_failures,
+    recover_orphaned_replacement_reservations,
     recover_partial_batch_retries,
     recover_zombie_execution_sessions,
 )
@@ -546,6 +547,11 @@ def build_parser() -> AtsLabArgumentParser:
     )
     executor_recovery.add_argument("--apply", action="store_true")
     executor_recovery.add_argument("--worker", default="ats-lab-supervisor")
+    replacement_recovery = sub.add_parser(
+        "recover-orphaned-replacements",
+        help="Clear replacement reservations that never persisted a session id.",
+    )
+    replacement_recovery.add_argument("--apply", action="store_true")
     zombie_recovery = sub.add_parser(
         "recover-zombie-sessions",
         help="Inspect and recover explicit evidence-free Jesse session checkpoints.",
@@ -1501,6 +1507,19 @@ def _run_recover_executor_infrastructure(context: CommandContext) -> int:
     return 0
 
 
+def _run_recover_orphaned_replacements(context: CommandContext) -> int:
+    args = context.args
+    repo = context.repo
+    database = context.database
+    database.initialize()
+    policy = load_resource_policy(repo / ".ats-lab" / "config.toml")
+    emit(recover_orphaned_replacement_reservations(
+        database, apply=args.apply,
+        active_limit=policy.active_ready_limit,
+    ))
+    return 0
+
+
 def _run_recover_zombie_sessions(context: CommandContext) -> int:
     args = context.args
     repo = context.repo
@@ -1688,6 +1707,7 @@ def _run_supervisor(context: CommandContext) -> int:
         dispatcher = DirectMcpDispatcher(
             database, execution_config,
             fallback=fallback_dispatcher,
+            resource_policy=policy,
         )
         results = BatchSupervisor(
             database, dispatcher, args.worker,
@@ -1722,6 +1742,7 @@ def _run_dashboard(context: CommandContext) -> int:
 REPO_DISCOVERY_COMMANDS = frozenset({
     "worker", "supervisor", "dashboard", "backend", "web", "status", "monitor", "control",
     "console", "recover-claims", "resolve-blocker", "requeue-evaluation",
+    "recover-orphaned-replacements",
     "queue", "candidates", "evidence", "diagnostic-export",
     "diagnostic-hpo-trial",
     "hpo", "hpo-detail", "hpo-route-plan", "hpo-defaults", "timings", "telemetry", "analyzer",
@@ -1786,6 +1807,7 @@ COMMAND_HANDLERS: dict[str, Callable[[CommandContext], int]] = {
     "backfill-route-coverage": _run_backfill_route_coverage,
     "recover-partial-batch-retries": _run_recover_partial_batch_retries,
     "recover-executor-infrastructure": _run_recover_executor_infrastructure,
+    "recover-orphaned-replacements": _run_recover_orphaned_replacements,
     "recover-zombie-sessions": _run_recover_zombie_sessions,
     "recovery-audit": _run_recovery_audit,
     "sanitize": _run_sanitize,

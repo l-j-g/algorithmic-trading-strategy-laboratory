@@ -537,6 +537,52 @@ class CliDispatchTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertNotIn("Traceback", errors)
 
+    def test_recover_orphaned_replacements_preview_and_apply(self) -> None:
+        database = WorkflowDatabase(self.path)
+        database.initialize()
+        database.upsert_experiment(ExperimentSpec(
+            id="EXP-R", strategy_name="RecoveryStrategy",
+        ))
+        database.upsert_work_item(WorkItem(
+            id="JOB-R", experiment_id="EXP-R", priority=1,
+            state=WorkState.WAITING_RETRY,
+        ))
+        stamp = "2026-08-22T00:00:00Z"
+        with database.connect() as connection:
+            connection.execute(
+                """INSERT INTO direct_execution_recoveries(
+                       work_item_id,old_session_id,old_state,reason,
+                       replacement_allowed,replacement_reserved,
+                       replacement_session_id,created_at,updated_at)
+                   VALUES('JOB-R','OLD-1','running','transport_failure',
+                          1,1,NULL,?,?)""",
+                (stamp, stamp),
+            )
+
+        preview_code, preview_output, _ = self.invoke_raw(
+            "recover-orphaned-replacements",
+        )
+        preview = json.loads(preview_output)
+
+        self.assertEqual(preview_code, 0)
+        self.assertEqual(
+            [item["work_item_id"] for item in preview["planned"]], ["JOB-R"],
+        )
+        self.assertEqual(preview["changed"], [])
+
+        apply_code, apply_output, _ = self.invoke_raw(
+            "recover-orphaned-replacements", "--apply",
+        )
+        applied = json.loads(apply_output)
+        cleared = database.rows(
+            """SELECT replacement_reserved FROM direct_execution_recoveries
+               WHERE work_item_id='JOB-R'""",
+        )
+
+        self.assertEqual(apply_code, 0)
+        self.assertEqual(applied["changed"], ["JOB-R"])
+        self.assertEqual(cleared[0]["replacement_reserved"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
