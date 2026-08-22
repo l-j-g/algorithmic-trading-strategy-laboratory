@@ -41,6 +41,19 @@ session snapshot sets `futures_leverage_mode` to `isolated`.
 Python producers and consumers use `JesseExecutionRequest` and
 `JesseExecutionResult` from `ats_lab.jesse_contracts`.
 
+The JSON Schema files under `src/ats_lab/schemas/` document the wire shapes;
+they are not parsed at runtime. The direct mechanical executor enforces
+hand-rolled stdlib validators derived from them
+(`ats_lab.direct_mcp_executor.execution_request_violations` and
+`execution_result_violations`). Request-shape violations are raised as
+`McpError` before any MCP session is opened, so they surface through the
+existing retryable harness-error funnel. Result-shape violations at the
+persist boundary downgrade the item to a terminal `invalid_execution_result`
+block instead of emitting run evidence; `raw_result` keeps exactly
+`session_id`, `status`, and `metrics`, matching the supervisor persistence
+check. Batch-level identity fields (`request_id`, `transport`) belong to the
+batch envelope and are validated on the result view, not per work item.
+
 ## Safety boundary
 
 `transport` is fixed to `jesse_mcp`. The contract module only parses and

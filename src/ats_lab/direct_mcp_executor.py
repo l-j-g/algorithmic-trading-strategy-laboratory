@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from .database import WorkflowDatabase
 from .models import utc_now
+from .resources import ResourcePolicy
 from .session_recovery import SessionRecoveryPolicy
 from .strategy_contracts import StrategyContractValidator
 from .worker import DispatchResult, Dispatcher
@@ -37,6 +38,12 @@ SIGNIFICANCE_METRIC_FIELDS = (
     "observed_mean", "annualized_return", "p_value",
     "n_simulations", "n_observations",
 )
+JESSE_OPERATIONS = frozenset({"backtest", "hpo", "significance", "monte_carlo"})
+JESSE_RESULT_STATUSES = frozenset(
+    {"draft", "running", "finished", "stopped", "terminated", "unknown"},
+)
+ROUTE_FIELDS = ("exchange", "symbol", "timeframe", "start_date", "finish_date")
+RAW_RESULT_KEYS = {"session_id", "status", "metrics"}
 
 
 class McpError(RuntimeError):
@@ -234,6 +241,136 @@ def classify_jesse_session(
     if status in {"running", "pending", "queued", "starting"}:
         return SessionClassification(state="temporarily_nonterminal", **base)
     return SessionClassification(state="malformed_session", **base)
+
+
+def _text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _route_violations(routes: Any) -> list[str]:
+    if not isinstance(routes, list) or not routes:
+        return ["experiment.routes must be a non-empty array"]
+    violations: list[str] = []
+    for index, route in enumerate(routes):
+        if not isinstance(route, dict):
+            violations.append(f"experiment.routes[{index}] must be an object")
+            continue
+        for field in ROUTE_FIELDS:
+            if not _text(route.get(field)):
+                violations.append(
+                    f"experiment.routes[{index}].{field} must be non-empty text"
+                )
+    return violations
+
+
+def _gate_violations(label: str, gates: Any) -> list[str]:
+    if gates is None:
+        return []
+    if not isinstance(gates, list):
+        return [f"{label} must be an array"]
+    violations: list[str] = []
+    for index, gate in enumerate(gates):
+        if not isinstance(gate, dict):
+            violations.append(f"{label}[{index}] must be an object")
+            continue
+        for field in ("name", "operator"):
+            if not _text(gate.get(field)):
+                violations.append(f"{label}[{index}].{field} must be non-empty text")
+        if "required" in gate and not isinstance(gate["required"], bool):
+            violations.append(f"{label}[{index}].required must be boolean")
+    return violations
+
+
+def execution_request_violations(request: Any) -> list[str]:
+    """Report jesse-execution-request schema violations for one workflow item.
+
+    Hand-rolled projection of ``schemas/jesse-execution-request.schema.json``
+    onto the nested workflow item the direct executor receives: identity,
+    operation enum, strategy name, routes, parameters, and gate shapes.
+    Batch-level identity fields (``request_id``, ``transport``) are owned by
+    the batch envelope and are not repeated per work item.
+    """
+    if not isinstance(request, dict):
+        return ["execution request must be an object"]
+    violations: list[str] = []
+    if "schema_version" in request and request["schema_version"] != 1:
+        violations.append("schema_version must be 1")
+    for field in ("work_item_id", "experiment_id"):
+        if not _text(request.get(field)):
+            violations.append(f"{field} must be non-empty text")
+    experiment = request.get("experiment")
+    work_item = request.get("work_item")
+    if not isinstance(experiment, dict):
+        violations.append("experiment must be an object")
+    else:
+        if not _text(experiment.get("strategy_name")):
+            violations.append("experiment.strategy_name must be non-empty text")
+        violations.extend(_route_violations(experiment.get("routes")))
+        violations.extend(_gate_violations(
+            "experiment.success_gates", experiment.get("success_gates"),
+        ))
+        violations.extend(_gate_violations(
+            "experiment.failure_gates", experiment.get("failure_gates"),
+        ))
+    if not isinstance(work_item, dict):
+        violations.append("work_item must be an object")
+    else:
+        operation = work_item.get("operation")
+        if operation is not None and operation not in JESSE_OPERATIONS:
+            violations.append(
+                "work_item.operation must be one of "
+                + ", ".join(sorted(JESSE_OPERATIONS))
+            )
+        parameters = work_item.get("parameters")
+        if parameters is not None and not isinstance(parameters, dict):
+            violations.append("work_item.parameters must be an object")
+    return violations
+
+
+def execution_result_violations(view: Any) -> list[str]:
+    """Report jesse-execution-result schema violations for one result view.
+
+    Hand-rolled projection of ``schemas/jesse-execution-result.schema.json``.
+    ``raw_result`` must keep exactly session_id/status/metrics with values
+    equal to the outer envelope, mirroring the supervisor persistence check.
+    """
+    if not isinstance(view, dict):
+        return ["execution result must be an object"]
+    violations: list[str] = []
+    if view.get("schema_version") != 1:
+        violations.append("schema_version must be 1")
+    if view.get("transport") != "jesse_mcp":
+        violations.append("transport must be jesse_mcp")
+    if not _text(view.get("work_item_id")):
+        violations.append("work_item_id must be non-empty text")
+    status = view.get("status")
+    if status not in JESSE_RESULT_STATUSES:
+        violations.append(
+            "status must be one of " + ", ".join(sorted(JESSE_RESULT_STATUSES))
+        )
+    session_id = view.get("session_id")
+    if not _text(session_id):
+        violations.append("session_id must be non-empty text")
+    dashboard_url = view.get("dashboard_url")
+    if dashboard_url is not None and not isinstance(dashboard_url, str):
+        violations.append("dashboard_url must be text or null")
+    if not isinstance(view.get("metrics"), dict):
+        violations.append("metrics must be an object")
+    if view.get("error") is not None:
+        violations.append("finished result cannot contain an error")
+    raw = view.get("raw_result")
+    if not isinstance(raw, dict) or set(raw) != RAW_RESULT_KEYS:
+        violations.append(
+            "raw_result must contain exactly session_id, status, and metrics"
+        )
+    else:
+        if raw.get("session_id") != session_id:
+            violations.append("raw_result.session_id must equal session_id")
+        if raw.get("status") != status:
+            violations.append("raw_result.status must equal status")
+        if raw.get("metrics") != view.get("metrics"):
+            violations.append("raw_result.metrics must equal metrics")
+    return violations
 
 
 def load_direct_execution_config(path: Any) -> DirectExecutionConfig:
@@ -512,6 +649,7 @@ class DirectMcpDispatcher:
         client_factory: Callable[[str, float], McpClient] = McpClient,
         dashboard_client: DashboardClient | None = None,
         contract_validator: StrategyContractValidator | None = None,
+        resource_policy: ResourcePolicy | None = None,
     ) -> None:
         self.database = database
         self.config = config
@@ -519,6 +657,7 @@ class DirectMcpDispatcher:
         self.sleep = sleep
         self.client_factory = client_factory
         self.session_recovery_policy = SessionRecoveryPolicy()
+        self.resource_policy = resource_policy or ResourcePolicy()
         self.dashboard_client = dashboard_client or DashboardClient.from_environment(
             config.dashboard_api_base_url, timeout=config.timeout_seconds,
         )
@@ -722,6 +861,12 @@ class DirectMcpDispatcher:
         polls = 0
         outcome = "retry"
         try:
+            violations = execution_request_violations(request)
+            if violations:
+                raise McpError(
+                    "jesse-execution-request schema violation: "
+                    + "; ".join(violations)
+                )
             client.initialize()
             fingerprint = self._fingerprint(request)
             checkpoint = self._checkpoint(work_item_id)
@@ -1159,7 +1304,11 @@ class DirectMcpDispatcher:
             )
             if reserved.rowcount != 1:
                 raise McpError("replacement session reservation changed")
-        session_id = self._create(client, request, plan)
+        try:
+            session_id = self._create(client, request, plan)
+        except Exception:
+            self._release_replacement_reservation(work_item_id)
+            raise
         with self.database.connect() as connection:
             saved = connection.execute(
                 """UPDATE direct_execution_recoveries
@@ -1171,6 +1320,21 @@ class DirectMcpDispatcher:
             if saved.rowcount != 1:
                 raise McpError("replacement session id persistence failed")
         return session_id, True, True
+
+    def _release_replacement_reservation(self, work_item_id: str) -> None:
+        """Undo a reservation whose replacement draft never got created.
+
+        A crash between reservation and session-id persist still wedges the
+        row; :mod:`ats_lab.correctness_recovery` clears those orphans.
+        """
+        with self.database.connect() as connection:
+            connection.execute(
+                """UPDATE direct_execution_recoveries
+                   SET replacement_reserved=0,updated_at=?
+                   WHERE work_item_id=? AND replacement_reserved=1
+                     AND replacement_session_id IS NULL""",
+                (utc_now(), work_item_id),
+            )
 
     def _adopt_replacement_checkpoint(
         self, work_item_id: str, session_id: str,
@@ -1237,16 +1401,32 @@ class DirectMcpDispatcher:
         raw = {
             "session_id": session_id, "status": "finished", "metrics": metrics,
         }
+        dashboard_url = self._dashboard_url(plan, session_id)
         result = {
             "work_item_id": work_item_id,
             "outcome": "finished",
             "evidence": {"run": {
                 "id": f"{work_item_id}:{session_id}",
                 "session_id": session_id, "status": "finished",
-                "dashboard_url": self._dashboard_url(plan, session_id),
+                "dashboard_url": dashboard_url,
                 "metrics": metrics, "raw_result": raw,
             }},
         }
+        violations = execution_result_violations({
+            "schema_version": 1, "transport": "jesse_mcp",
+            "work_item_id": work_item_id, "status": "finished",
+            "session_id": session_id, "dashboard_url": dashboard_url,
+            "metrics": metrics, "error": None, "raw_result": raw,
+        })
+        if violations:
+            return self._record_and_return(
+                client, work_item_id, polls, "blocked",
+                blocker_code="invalid_execution_result",
+                detail=(
+                    "jesse-execution-result schema violation: "
+                    + "; ".join(violations)
+                )[:1000],
+            )
         self._telemetry(client, work_item_id, "finished", polls, result)
         return result
 
@@ -1260,6 +1440,23 @@ class DirectMcpDispatcher:
             base = base[: -len("/backtest")] + f"/{plan.dashboard_path}"
         return f"{base}/{session_id}"
 
+    def _infrastructure_failure_streak(self, work_item_id: str) -> int:
+        """Count trailing consecutive retry outcomes in executor telemetry."""
+        rows = self.database.rows(
+            """SELECT outcome FROM direct_execution_telemetry
+               WHERE work_item_id=? ORDER BY id DESC LIMIT ?""",
+            (
+                work_item_id,
+                self.resource_policy.executor_infrastructure_failure_limit,
+            ),
+        )
+        streak = 0
+        for row in rows:
+            if row["outcome"] != "retry":
+                break
+            streak += 1
+        return streak
+
     def _record_and_return(
         self,
         client: McpClient,
@@ -1271,6 +1468,19 @@ class DirectMcpDispatcher:
         detail: str,
         attempt_charged: bool | None = None,
     ) -> dict[str, Any]:
+        if outcome == "retry":
+            failures = self._infrastructure_failure_streak(work_item_id) + 1
+            if failures >= self.resource_policy.executor_infrastructure_failure_limit:
+                return self._record_and_return(
+                    client, work_item_id, polls, "blocked",
+                    blocker_code="infrastructure_circuit_broken",
+                    detail=(
+                        f"{failures} consecutive uncharged infrastructure "
+                        "failures; circuit opened for this work item and must "
+                        "be resolved through the blocker flow"
+                    ),
+                    attempt_charged=True,
+                )
         result = {
             "work_item_id": work_item_id, "outcome": outcome,
             "blocker_code": blocker_code, "detail": detail,

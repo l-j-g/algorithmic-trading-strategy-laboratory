@@ -91,6 +91,7 @@ class ResourcePolicy:
     claim_timeout_seconds: int = 7200
     execution_batch_size: int = 8
     active_ready_limit: int = 3
+    executor_infrastructure_failure_limit: int = 10
     analysis_cohort_min: int = 4
     analysis_cohort_max: int = 8
     analysis_parallelism: int = 1
@@ -118,6 +119,7 @@ class ResourcePolicy:
             "synthesis_max_revision_depth", "synthesis_failure_diagnosis_limit",
             "synthesis_retry_cooldown_seconds", "synthesis_lease_seconds",
             "claim_timeout_seconds", "execution_batch_size", "active_ready_limit",
+            "executor_infrastructure_failure_limit",
             "analysis_cohort_min", "analysis_cohort_max",
             "analysis_parallelism", "analyzer_timeout_seconds",
             "minimum_trades", "minimum_trades_per_year", "minimum_trade_floor",
