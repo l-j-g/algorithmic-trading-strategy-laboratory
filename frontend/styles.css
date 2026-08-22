@@ -136,6 +136,14 @@ td strong { display: block; font-size: .82rem; } td small { color: var(--muted);
 .stat-card strong { display: block; font-size: 1.2rem; }
 .stat-card span { color: var(--muted); font-size: .7rem; }
 .lane-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .7rem; margin-bottom: 1rem; }
+.top-ranking { display: grid; gap: 0; padding: 0; margin: 0; list-style: none; }
+.top-ranking li { display: flex; align-items: baseline; gap: .7rem; min-width: 0; padding: .5rem .25rem; border-bottom: 1px solid var(--line); font-size: .8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.top-ranking li:hover, .top-ranking li:focus-visible { background: rgba(89, 216, 232, .06); }
+.top-ranking li em { flex: 0 0 1.4rem; color: var(--muted); font-style: normal; font-variant-numeric: tabular-nums; }
+.top-ranking li strong { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.top-ranking li span { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--muted); font-size: .72rem; text-overflow: ellipsis; }
+.top-ranking li output { flex: 0 0 auto; color: var(--green); font-weight: 800; font-variant-numeric: tabular-nums; }
+.top-ranking li:first-child output { color: var(--cyan); }
 .lane-card { padding: .8rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--surface-soft); }
 .lane-card > div:first-child { display: flex; justify-content: space-between; gap: .5rem; }
 .lane-card strong { text-transform: capitalize; }

@@ -27,6 +27,11 @@ ats-lab web --host 127.0.0.1 --port 8765
 
 Open <http://127.0.0.1:8765>. API requests and static assets share one origin.
 
+The legacy server-rendered operator dashboard (`ats-lab dashboard`, default
+port 8799) is deprecated; the Control Room is the primary operator surface.
+Its leaderboard and rendered HPO study detail have been folded into the
+Control Room.
+
 Frontend-only fallback:
 
 ```bash

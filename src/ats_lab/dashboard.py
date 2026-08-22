@@ -1231,7 +1231,7 @@ def make_handler(
     return DashboardHandler
 
 
-def serve(database: WorkflowDatabase, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(database: WorkflowDatabase, host: str = "127.0.0.1", port: int = 8799) -> None:
     database.initialize()
     server = ThreadingHTTPServer(
         (host, port),
@@ -1254,7 +1254,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, default=Path(".ats-lab/laboratory.sqlite3"))
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=8799)
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
