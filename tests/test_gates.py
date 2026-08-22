@@ -8,7 +8,7 @@ from ats_lab.evidence import (
     LifecycleStage,
     NormalizedEvidence,
 )
-from ats_lab.gates import evaluate_gates, evaluate_promotion
+from ats_lab.gates import evaluate_gates, evaluate_hpo_candidate, evaluate_promotion
 from ats_lab.models import Verdict
 from ats_lab.resources import ResourcePolicy
 
@@ -183,6 +183,122 @@ class GateTests(unittest.TestCase):
         )
         self.assertFalse(decision.allowed)
         self.assertIn("net_profit", decision.failed)
+
+    def hpo_family(self, **overrides) -> list[NormalizedEvidence]:
+        payload = {
+            "net_profit_percentage": 10.0, "trade_count": 100,
+            "cost_stress_status": CostStressStatus.PASS,
+        }
+        payload.update(overrides)
+        rows = []
+        for symbol in ("BTC-USDT", "ETH-USDT"):
+            for start, finish in (
+                ("2024-01-01", "2024-07-01"), ("2024-07-01", "2025-01-01"),
+            ):
+                rows.append(self.row(
+                    symbol=symbol, start_date=start, finish_date=finish,
+                    **payload,
+                ))
+        return rows
+
+    def test_hpo_candidate_passes_documented_criteria(self) -> None:
+        decision = evaluate_hpo_candidate(
+            self.hpo_family(), policy=ResourcePolicy(),
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.failed, ())
+        self.assertEqual(decision.missing, ())
+
+    def test_hpo_candidate_missing_evidence_is_never_allowed(self) -> None:
+        decision = evaluate_hpo_candidate(
+            [self.row()], policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.failed, ())
+        self.assertIn("hpo_multi_window_positivity", decision.missing)
+        self.assertIn("hpo_single_route_dominance", decision.missing)
+        self.assertIn("fees_cost_sensitivity", decision.missing)
+
+    def test_hpo_candidate_missing_fees_is_baseline_missing(self) -> None:
+        decision = evaluate_hpo_candidate(
+            [self.row(fees=None)], policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("hpo_baseline_positive_after_fees", decision.missing)
+
+    def test_hpo_candidate_fails_activity_floor(self) -> None:
+        decision = evaluate_hpo_candidate(
+            self.hpo_family(trade_count=5), policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("hpo_activity_floor", decision.failed)
+
+    def test_hpo_candidate_fails_single_dominant_route(self) -> None:
+        rows = self.hpo_family()
+        for index, row in enumerate(rows):
+            rows[index] = self.row(**{
+                **row.__dict__,
+                "net_profit_percentage": 30.0 if row.symbol == "BTC-USDT" else -5.0,
+            })
+        decision = evaluate_hpo_candidate(rows, policy=ResourcePolicy())
+        self.assertFalse(decision.allowed)
+        self.assertIn("hpo_single_route_dominance", decision.failed)
+
+    def test_hpo_candidate_fails_when_fee_stress_destroys_edge(self) -> None:
+        decision = evaluate_hpo_candidate(
+            self.hpo_family(cost_stress_status=CostStressStatus.FAIL),
+            policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("fees_cost_sensitivity", decision.failed)
+
+    def test_promotion_rejects_oos_overlapping_training_dates(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(evidence_split=EvidenceSplit.TRAIN),
+                self.row(
+                    evidence_split=EvidenceSplit.OOS,
+                    start_date="2024-07-01", finish_date="2025-07-01",
+                    cost_stress_status=CostStressStatus.PASS,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("oos_training_overlap", decision.failed)
+
+    def test_promotion_accepts_adjacent_oos_window_after_training(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(
+                    evidence_split=EvidenceSplit.TRAIN,
+                    finish_date="2024-12-31",
+                ),
+                self.row(
+                    evidence_split=EvidenceSplit.OOS,
+                    start_date="2024-12-31", finish_date="2025-06-30",
+                    cost_stress_status=CostStressStatus.PASS,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertNotIn("oos_training_overlap", decision.failed)
+        self.assertNotIn("oos_validation", decision.missing)
+        self.assertFalse(decision.allowed)
+
+    def test_promotion_oos_overlap_only_matches_same_route(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(evidence_split=EvidenceSplit.TRAIN),
+                self.row(
+                    evidence_split=EvidenceSplit.OOS,
+                    symbol="ETH-USDT",
+                    cost_stress_status=CostStressStatus.PASS,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertNotIn("oos_training_overlap", decision.failed)
 
 
 if __name__ == "__main__":

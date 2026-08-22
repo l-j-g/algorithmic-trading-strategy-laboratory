@@ -193,17 +193,57 @@ def _slug(value: str) -> str:
     return re.sub(r"[^A-Z0-9]+", "-", value.upper()).strip("-")[:40] or "STRATEGY"
 
 
-def _latest_p_value(database: WorkflowDatabase, fingerprint: str) -> float | None:
+def benjamini_hochberg(p_values: list[float], level: float) -> list[dict[str, Any]]:
+    """Rank one family of p-values with Benjamini-Hochberg critical values.
+
+    Returns one finding per hypothesis in the input order: 1-based rank,
+    ``rank * level / m`` critical threshold, and whether the step-up
+    procedure rejects it (every p-value at or below the largest rank k
+    satisfying p(k) <= k*level/m is rejected).
+    """
+    if not 0 < level <= 1:
+        raise ValueError("FDR level must be in (0, 1]")
+    total = len(p_values)
+    order = sorted(range(total), key=lambda index: (p_values[index], index))
+    ranks = {index: rank for rank, index in enumerate(order, start=1)}
+    rejected_rank = 0
+    for rank, index in enumerate(order, start=1):
+        if p_values[index] <= rank * level / total:
+            rejected_rank = rank
+    return [
+        {
+            "rank": ranks[index],
+            "threshold": ranks[index] * level / total,
+            "rejected": ranks[index] <= rejected_rank,
+        }
+        for index in range(total)
+    ]
+
+
+def _binding_significance_test(database: WorkflowDatabase, fingerprint: str) -> dict[str, Any] | None:
+    """Return the first finished significance test for a canonical fingerprint.
+
+    First-test-wins: the earliest finished run is binding; later re-tests are
+    stored and visible but never flip baseline readiness.
+    """
     rows = database.rows(
-        """SELECT json_extract(r.metrics_json, '$.p_value') AS p_value
+        """SELECT r.id AS run_id,
+                  json_extract(r.metrics_json, '$.p_value') AS p_value,
+                  COALESCE(r.finished_at, r.started_at) AS decided_at
            FROM runs r JOIN experiments e ON e.id=r.experiment_id
            WHERE e.experiment_type='significance' AND r.status='finished'
              AND json_extract(e.specification_json, '$.entry_rule.fingerprint')=?
              AND json_extract(r.metrics_json, '$.p_value') IS NOT NULL
-           ORDER BY COALESCE(r.finished_at, r.started_at) DESC, r.id DESC LIMIT 1""",
+           ORDER BY COALESCE(r.finished_at, r.started_at) ASC, r.id ASC LIMIT 1""",
         (fingerprint,),
     )
-    return float(rows[0]["p_value"]) if rows else None
+    if not rows:
+        return None
+    return {
+        "run_id": rows[0]["run_id"],
+        "p_value": float(rows[0]["p_value"]),
+        "decided_at": rows[0]["decided_at"],
+    }
 
 
 def _ensure_experiment(database: WorkflowDatabase, spec: ExperimentSpec) -> None:
@@ -257,7 +297,8 @@ def synthesize(
         "cohort_id": request.cohort_id,
         "cohort_slot": request.cohort_slot,
     }
-    p_value = _latest_p_value(database, fingerprint)
+    binding = _binding_significance_test(database, fingerprint)
+    p_value = binding["p_value"] if binding else None
     needs_significance = request.change_scope in ENTRY_CHANGE_SCOPES
 
     if needs_significance:
@@ -322,6 +363,7 @@ def synthesize(
         "significance_job": significance_id if needs_significance else None,
         "baseline_job": baseline_id, "baseline_state": baseline_state.value,
         "decision": decision, "p_value": p_value,
+        "binding_significance_test": binding,
         "released_ready": release_ready,
     }
 

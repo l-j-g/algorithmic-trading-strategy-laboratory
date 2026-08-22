@@ -265,7 +265,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(dispatcher.requests[0]["task_type"], "synthesize_batch")
             self.assertEqual(database.synthesis_status()["latest_cohort"]["generated_count"], 25)
 
-    def test_significance_result_archives_inconclusive_baseline(self) -> None:
+    def test_significance_result_keeps_inconclusive_baseline_scheduled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
             with database.connect() as connection:
@@ -284,7 +284,7 @@ class WorkerTests(unittest.TestCase):
             outcome = Worker(database, FakeDispatcher(result), "worker-1").run_once()
             self.assertEqual(outcome["status"], "finished")
             dependent = database.rows("SELECT state,specification_json FROM work_items WHERE id='JOB-2'")[0]
-            self.assertEqual(dependent["state"], "archived")
+            self.assertEqual(dependent["state"], "scheduled")
             self.assertIn("significance_inconclusive", dependent["specification_json"])
 
 

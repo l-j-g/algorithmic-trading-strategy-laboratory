@@ -3113,48 +3113,190 @@ class WorkflowDatabase:
             "latest_cohort": rows[0] if rows else None,
         }
 
-    def reconcile_significance_gate(self, work_item_id: str, p_value: float, active_limit: int) -> dict:
-        """Release or terminalize baselines dependent on completed significance work."""
-        if p_value < 0.05:
-            target = "ready"
-            decision = "significance_passed"
-        elif p_value <= 0.10:
-            target = "archived"
-            decision = "significance_inconclusive"
-        else:
-            target = "archived"
-            decision = "significance_failed"
-        now = utc_now()
+    def _binding_cohort_p_value(
+        self, connection: sqlite3.Connection, fingerprint: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """SELECT r.id, r.experiment_id,
+                      json_extract(r.metrics_json, '$.p_value') AS p_value
+               FROM runs r JOIN experiments e ON e.id=r.experiment_id
+               WHERE e.experiment_type='significance' AND r.status='finished'
+                 AND json_extract(e.specification_json, '$.entry_rule.fingerprint')=?
+                 AND json_extract(r.metrics_json, '$.p_value') IS NOT NULL
+               ORDER BY COALESCE(r.finished_at, r.started_at) ASC, r.id ASC LIMIT 1""",
+            (fingerprint,),
+        ).fetchone()
+
+    def _release_dependents(
+        self, connection: sqlite3.Connection, work_item_id: str, target: str,
+        decision: str, active_limit: int, active: int, now: str,
+        findings: dict | None = None,
+    ) -> tuple[list[str], int]:
         changed: list[str] = []
+        dependents = connection.execute(
+            """SELECT id,specification_json FROM work_items
+               WHERE state='scheduled' AND EXISTS (
+                   SELECT 1 FROM json_each(work_items.dependencies_json)
+                   WHERE value=?
+               ) ORDER BY priority,created_at,id""",
+            (work_item_id,),
+        ).fetchall()
+        for row in dependents:
+            state = target
+            if target == "ready" and int(active) >= active_limit:
+                state = "scheduled"
+            elif state == "ready":
+                active += 1
+            specification = json.loads(row["specification_json"])
+            specification["gate_decision"] = (
+                decision if state != "scheduled" else "significance_passed_capacity_held"
+                if decision == "significance_passed" else decision
+            )
+            if findings is not None:
+                specification["gate_findings"] = findings
+            connection.execute(
+                """UPDATE work_items SET state=?,specification_json=?,updated_at=?
+                   WHERE id=? AND state='scheduled'""",
+                (state, json.dumps(specification, sort_keys=True), now, row["id"]),
+            )
+            changed.append(row["id"])
+        return changed, active
+
+    def reconcile_significance_gate(
+        self, work_item_id: str, p_value: float, active_limit: int,
+        fdr_level: float = 0.05,
+    ) -> dict:
+        """Release or terminalize baselines dependent on completed significance work.
+
+        First-test-wins: only the earliest finished significance run for an
+        entry fingerprint may flip dependent readiness. Later tests are stored
+        but reported as superseded without touching dependents. Cohort members
+        are additionally gated by Benjamini-Hochberg FDR control across the
+        whole cohort family once every member has a binding test.
+        """
+        now = utc_now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            dependents = connection.execute(
-                """SELECT id,specification_json FROM work_items
-                   WHERE state='scheduled' AND EXISTS (
-                       SELECT 1 FROM json_each(work_items.dependencies_json)
-                       WHERE value=?
-                   ) ORDER BY priority,created_at,id""",
+            item = connection.execute(
+                "SELECT experiment_id,specification_json FROM work_items WHERE id=?",
                 (work_item_id,),
-            ).fetchall()
+            ).fetchone()
+            fingerprint = None
+            cohort_id = None
+            if item is not None:
+                specification = json.loads(item["specification_json"])
+                entry_rule = specification.get("entry_rule")
+                if isinstance(entry_rule, dict):
+                    fingerprint = entry_rule.get("fingerprint")
+                    cohort_id = entry_rule.get("cohort_id")
+            if cohort_id:
+                from .synthesis import benjamini_hochberg
+                members = connection.execute(
+                    """SELECT w.id AS work_item_id, w.experiment_id
+                       FROM work_items w
+                       WHERE json_extract(w.specification_json,'$.operation')='significance'
+                         AND json_extract(w.specification_json,'$.entry_rule.cohort_id')=?
+                       ORDER BY json_extract(w.specification_json,'$.entry_rule.cohort_slot') ASC, w.id ASC""",
+                    (cohort_id,),
+                ).fetchall()
+                family: list[dict[str, Any]] = []
+                for member in members:
+                    member_fingerprint = None
+                    member_experiment = connection.execute(
+                        "SELECT specification_json FROM experiments WHERE id=?",
+                        (member["experiment_id"],),
+                    ).fetchone()
+                    if member_experiment is not None:
+                        member_specification = json.loads(
+                            member_experiment["specification_json"]
+                        )
+                        member_entry_rule = member_specification.get("entry_rule")
+                        if isinstance(member_entry_rule, dict):
+                            member_fingerprint = member_entry_rule.get("fingerprint")
+                    binding = (
+                        self._binding_cohort_p_value(connection, member_fingerprint)
+                        if member_fingerprint else None
+                    )
+                    family.append({
+                        "work_item_id": str(member["work_item_id"]),
+                        "p_value": (
+                            float(binding["p_value"]) if binding is not None else None
+                        ),
+                    })
+                if any(member["p_value"] is None for member in family):
+                    return {
+                        "decision": "awaiting_cohort_fdr",
+                        "dependents": [],
+                        "cohort_fdr": {
+                            "cohort_id": cohort_id, "fdr_level": fdr_level,
+                            "family_size": len(family),
+                            "tested": sum(
+                                member["p_value"] is not None for member in family
+                            ),
+                        },
+                    }
+                findings = benjamini_hochberg(
+                    [member["p_value"] for member in family], fdr_level,
+                )
+                changed: list[str] = []
+                active = connection.execute(
+                    "SELECT COUNT(*) FROM work_items WHERE state IN ('ready','running')"
+                ).fetchone()[0]
+                member_findings: list[dict[str, Any]] = []
+                for member, finding in zip(family, findings):
+                    raw = member["p_value"]
+                    if finding["rejected"] and raw < 0.05:
+                        target, decision = "ready", "significance_passed_bh_fdr"
+                    elif not finding["rejected"] and raw < 0.05:
+                        target, decision = "scheduled", "significance_withheld_bh_fdr"
+                    elif raw <= 0.10:
+                        target, decision = "scheduled", "significance_inconclusive"
+                    else:
+                        target, decision = "archived", "significance_failed"
+                    gate_findings = {
+                        "procedure": "benjamini_hochberg",
+                        "fdr_level": fdr_level,
+                        "family_size": len(family),
+                        "rank": finding["rank"],
+                        "threshold": finding["threshold"],
+                        "rejected": finding["rejected"],
+                    }
+                    released, active = self._release_dependents(
+                        connection, member["work_item_id"], target, decision,
+                        active_limit, active, now, findings=gate_findings,
+                    )
+                    changed.extend(released)
+                    member_findings.append({
+                        **member, **finding, "decision": decision,
+                    })
+                return {
+                    "decision": "cohort_fdr_applied",
+                    "dependents": changed,
+                    "cohort_fdr": {
+                        "cohort_id": cohort_id, "fdr_level": fdr_level,
+                        "family_size": len(family), "members": member_findings,
+                    },
+                }
+            binding = None
+            if fingerprint:
+                binding = self._binding_cohort_p_value(connection, fingerprint)
+            if binding is not None and item is not None \
+                    and binding["experiment_id"] != item["experiment_id"]:
+                return {"decision": "superseded_by_first_test", "dependents": []}
+            if binding is not None:
+                p_value = float(binding["p_value"])
+            if p_value < 0.05:
+                target, decision = "ready", "significance_passed"
+            elif p_value <= 0.10:
+                target, decision = "scheduled", "significance_inconclusive"
+            else:
+                target, decision = "archived", "significance_failed"
             active = connection.execute(
                 "SELECT COUNT(*) FROM work_items WHERE state IN ('ready','running')"
             ).fetchone()[0]
-            for row in dependents:
-                state = target
-                if target == "ready" and int(active) >= active_limit:
-                    state = "scheduled"
-                elif state == "ready":
-                    active += 1
-                specification = json.loads(row["specification_json"])
-                specification["gate_decision"] = (
-                    decision if state != "scheduled" else "significance_passed_capacity_held"
-                )
-                connection.execute(
-                    """UPDATE work_items SET state=?,specification_json=?,updated_at=?
-                       WHERE id=? AND state='scheduled'""",
-                    (state, json.dumps(specification, sort_keys=True), now, row["id"]),
-                )
-                changed.append(row["id"])
+            changed, _ = self._release_dependents(
+                connection, work_item_id, target, decision, active_limit, active, now,
+            )
         return {"decision": decision, "dependents": changed}
 
     def execution_request(self, work_item_id: str) -> dict:

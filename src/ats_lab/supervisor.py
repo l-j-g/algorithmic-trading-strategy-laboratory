@@ -22,7 +22,12 @@ from .execution_disposition import (
     ExecutionRoute,
     TerminalFailureRecovery,
 )
-from .gates import GateDecision, evaluate_gates, evaluate_promotion
+from .gates import (
+    GateDecision,
+    evaluate_gates,
+    evaluate_hpo_candidate,
+    evaluate_promotion,
+)
 from .hpo_routes import default_hpo_routes
 from .models import (
     Evaluation,
@@ -1053,6 +1058,30 @@ class BatchSupervisor:
                             "cost-stress checks before paper-trade review."
                         ),
                     )
+            if not execution_failed and (
+                evaluation.verdict is Verdict.HPO_CANDIDATE
+            ):
+                hpo_candidate = evaluate_hpo_candidate(
+                    normalized, policy=self.resource_policy,
+                )
+                if not hpo_candidate.allowed:
+                    evaluation = replace(
+                        evaluation,
+                        verdict=(
+                            Verdict.REJECT
+                            if hpo_candidate.failed else Verdict.INCONCLUSIVE
+                        ),
+                        summary=(
+                            f"{evaluation.summary.rstrip()} "
+                            f"{hpo_candidate.finding}"
+                        ).strip(),
+                        next_step=(
+                            "Satisfy the documented HPO-candidate criteria: "
+                            "positive baseline after fees, activity floor per "
+                            "window, multi-window positivity, no single "
+                            "dominant route, and surviving fee sensitivity."
+                        ),
+                    )
             operation = self._operation(run_row)
             if (
                 not execution_failed
@@ -1118,6 +1147,7 @@ class BatchSupervisor:
                     self.database.reconcile_significance_gate(
                         item["id"], float(max(p_values)),
                         self.resource_policy.active_ready_limit,
+                        fdr_level=self.resource_policy.significance_fdr_level,
                     )
         if self.memory_adapter is not None:
             sync_memory_outbox(

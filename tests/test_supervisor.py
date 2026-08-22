@@ -500,14 +500,40 @@ class BatchSupervisorTests(unittest.TestCase):
                 0,
             )
 
+    @staticmethod
+    def hpo_evidence_metrics() -> dict:
+        route = {
+            "net_profit_percentage": 10.0, "trade_count": 100, "fees": 20.0,
+        }
+        windows = (
+            ("2024-01-01", "2024-07-01"), ("2024-07-01", "2025-01-01"),
+        )
+        return {
+            "net_profit_percentage": 10.0,
+            "fees": 20.0,
+            "trade_count": 100,
+            "cost_stress_status": "pass",
+            "route_results": [
+                {
+                    "symbol": symbol, "timeframe": "1h",
+                    "start_date": start, "finish_date": finish,
+                    **route,
+                }
+                for symbol in ("BTC-USDT", "ETH-USDT")
+                for start, finish in windows
+            ],
+        }
+
     def test_hpo_candidate_automatically_schedules_hpo_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
+            metrics = self.hpo_evidence_metrics()
+            execution = self.execution_result()
+            execution.payload["results"][0]["evidence"]["run"]["metrics"] = dict(metrics)
+            execution.payload["results"][0]["evidence"]["run"]["raw_result"]["metrics"] = dict(metrics)
             analysis = self.analysis_result()
             analysis.payload["evaluations"][0]["verdict"] = "hpo_candidate"
-            dispatcher = SequenceDispatcher([
-                self.execution_result(), analysis,
-            ])
+            dispatcher = SequenceDispatcher([execution, analysis])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
                 resource_policy=ResourcePolicy(synthesis_low_watermark=0),
@@ -528,6 +554,31 @@ class BatchSupervisorTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(work["specification_json"])["operation"], "hpo",
             )
+
+    def test_hpo_candidate_without_gate_evidence_is_inconclusive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            analysis = self.analysis_result()
+            analysis.payload["evaluations"][0]["verdict"] = "hpo_candidate"
+            dispatcher = SequenceDispatcher([
+                self.execution_result(), analysis,
+            ])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            self.assertEqual(supervisor.run_round()["status"], "batch_complete")
+
+            studies = database.hpo_studies({
+                "parent_experiment_id": "EXP-1",
+            })
+            self.assertEqual(studies, [])
+            evaluation = database.rows(
+                "SELECT verdict,summary FROM evaluations WHERE experiment_id='EXP-1'",
+            )[0]
+            self.assertEqual(evaluation["verdict"], "inconclusive")
+            self.assertIn("HPO-candidate evidence", evaluation["summary"])
 
     def test_paper_trade_claim_without_validation_is_inconclusive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
