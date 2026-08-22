@@ -113,6 +113,45 @@ class SynthesisTests(unittest.TestCase):
             self.assertEqual(significance["experiment"]["routes"], [ROUTE.__dict__])
             self.assertEqual(significance["work_item"]["parameters"]["n_simulations"], 2000)
 
+    def test_significance_sweeps_all_requested_routes(self) -> None:
+        second_route = RouteSpec(
+            exchange="Binance Perpetual Futures", symbol="ETH-USDT", timeframe="1h",
+            start_date=ROUTE.start_date, finish_date=ROUTE.finish_date,
+        )
+        request = SynthesisRequest(
+            strategy_name="TrendPullback", hypothesis="Trend pullbacks continue.",
+            entry_rule="EMA trend AND RSI pullback reclaim", change_scope="new_entry",
+            routes=(ROUTE, second_route), random_seed=42,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            result = synthesize(database, request)
+            significance = database.execution_request(result["significance_job"])
+            self.assertEqual(
+                significance["experiment"]["routes"],
+                [ROUTE.__dict__, second_route.__dict__],
+            )
+
+    def test_job_fingerprint_ignores_hypothesis_prose(self) -> None:
+        first = self.make_request()
+        second = SynthesisRequest(
+            strategy_name=first.strategy_name, hypothesis="Reworded thesis prose.",
+            entry_rule=first.entry_rule, change_scope=first.change_scope,
+            routes=first.routes, random_seed=42,
+        )
+        self.assertEqual(first.job_fingerprint, second.job_fingerprint)
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            first_result = synthesize(database, first)
+            second_result = synthesize(database, second)
+            self.assertEqual(
+                first_result["significance_job"], second_result["significance_job"],
+            )
+            self.assertEqual(first_result["baseline_job"], second_result["baseline_job"])
+            self.assertEqual(
+                database.rows("SELECT COUNT(*) count FROM experiments")[0]["count"], 2,
+            )
+
     def test_passing_significance_unlocks_baseline_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")

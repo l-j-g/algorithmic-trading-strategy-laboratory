@@ -31,10 +31,13 @@ from .gates import (
 from .hpo_routes import default_hpo_routes
 from .models import (
     Evaluation,
+    ExperimentSpec,
+    ExperimentType,
     RouteSpec,
     RunResult,
     RunStatus,
     Verdict,
+    WorkItem,
     WorkState,
 )
 from .resources import ResourcePolicy
@@ -561,8 +564,6 @@ class BatchSupervisor:
                 job, "HPO study has no canonical completed-trial evidence",
                 recovered=recovered, promoted=promoted,
             )
-        if int(job.get("attempts") or 1) > 1:
-            canonical = canonical[:max(1, len(canonical) // 2)]
         experiment_id = payload["study"]["hpo_experiment_id"]
         request = {
             "schema_version": 1,
@@ -1037,9 +1038,17 @@ class BatchSupervisor:
                 evaluation.verdict is Verdict.PAPER_TRADE_CANDIDATE
                 or (evaluation.verdict is Verdict.PASS and promotion_stage)
             )
+            gate_evidence = normalized
+            if not execution_failed and (
+                promotion_claim
+                or evaluation.verdict is Verdict.HPO_CANDIDATE
+            ):
+                gate_evidence = (
+                    normalized + self._machine_cost_stress_rows(run_row)
+                )
             if not execution_failed and promotion_claim:
                 promotion = evaluate_promotion(
-                    normalized, policy=self.resource_policy,
+                    gate_evidence, policy=self.resource_policy,
                 )
                 if not promotion.allowed:
                     evaluation = replace(
@@ -1058,11 +1067,12 @@ class BatchSupervisor:
                             "cost-stress checks before paper-trade review."
                         ),
                     )
+                self._enqueue_cost_stress(run_row)
             if not execution_failed and (
                 evaluation.verdict is Verdict.HPO_CANDIDATE
             ):
                 hpo_candidate = evaluate_hpo_candidate(
-                    normalized, policy=self.resource_policy,
+                    gate_evidence, policy=self.resource_policy,
                 )
                 if not hpo_candidate.allowed:
                     evaluation = replace(
@@ -1155,6 +1165,62 @@ class BatchSupervisor:
                 limit=max(1, len(finalized)),
             )
         return finalized
+
+    def _machine_cost_stress_rows(self, run_row: dict) -> list:
+        """Return machine-generated cost-stress evidence for this experiment."""
+        return self.database.normalized_evidence_for_experiment(
+            f"{run_row['experiment_id']}-COST2X",
+        )
+
+    def _enqueue_cost_stress(self, run_row: dict) -> str | None:
+        """Schedule a 2x-fee route variant through the normal execution queue.
+
+        Promotion claims must be backed by machine-generated cost-stress
+        evidence, so the stressed run is enqueued like any other backtest
+        instead of trusting a self-reported cost_stress_status. Idempotent:
+        one stress variant per parent experiment.
+        """
+        experiment = json.loads(run_row.get("experiment_json") or "{}")
+        routes = experiment.get("routes")
+        if not isinstance(routes, list) or not routes:
+            return None
+        stress_id = f"{run_row['experiment_id']}-COST2X"
+        if self.database.rows(
+            "SELECT id FROM work_items WHERE id=?", (stress_id,),
+        ):
+            return None
+        base_fee = experiment.get("fee_rate")
+        if base_fee is None:
+            base_fee = 0.0005
+        self.database.upsert_experiment(ExperimentSpec(
+            id=stress_id,
+            strategy_name=str(experiment.get("strategy_name") or "unknown"),
+            experiment_type=ExperimentType.COST_SENSITIVITY,
+            hypothesis=str(experiment.get("hypothesis") or ""),
+            archetype=str(experiment.get("archetype") or ""),
+            target_regime=str(experiment.get("target_regime") or ""),
+            failure_regime=str(experiment.get("failure_regime") or ""),
+            routes=tuple(
+                RouteSpec(**{
+                    key: route[key] for key in (
+                        "exchange", "symbol", "timeframe",
+                        "start_date", "finish_date",
+                    ) if key in route
+                })
+                for route in routes if isinstance(route, dict)
+            ),
+            balance=experiment.get("balance"),
+            leverage=experiment.get("leverage"),
+            leverage_mode=experiment.get("leverage_mode"),
+            fee_rate=float(base_fee) * 2,
+            parent_experiment_id=run_row["experiment_id"],
+        ))
+        self.database.upsert_work_item(WorkItem(
+            id=stress_id, experiment_id=stress_id, priority=100,
+            state=WorkState.SCHEDULED,
+            specification={"operation": "cost_sensitivity"},
+        ))
+        return stress_id
 
     def _analysis_failure(
         self,

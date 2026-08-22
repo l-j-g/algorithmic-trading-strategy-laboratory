@@ -68,7 +68,6 @@ class SynthesisRequest:
         material = "|".join((
             self.entry_fingerprint, self.action, self.source_experiment_id or "",
             self.change_scope, " ".join(self.controlled_change.split()).casefold(),
-            " ".join(self.hypothesis.split()).casefold(),
         ))
         return hashlib.sha256(material.encode()).hexdigest()
 
@@ -310,7 +309,7 @@ def synthesize(
             experiment_type=ExperimentType.SIGNIFICANCE, hypothesis=request.hypothesis,
             archetype=request.archetype, target_regime=request.target_regime,
             failure_regime=request.failure_regime,
-            routes=(request.routes[0],),
+            routes=request.routes,
             success_gates=(GateSpec("p_value", "<", 0.05),),
             failure_gates=(GateSpec("p_value", ">", 0.10),),
             parent_experiment_id=request.source_experiment_id, source_path=source_path,

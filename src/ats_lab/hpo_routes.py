@@ -238,6 +238,7 @@ def _same_market(left: dict[str, str], right: dict[str, str]) -> bool:
 
 
 def _overlap(left: dict[str, str], right: dict[str, str]) -> bool:
+    """Inclusive candle-day overlap: backtests include finish_date."""
     try:
         from datetime import date
 
@@ -247,4 +248,4 @@ def _overlap(left: dict[str, str], right: dict[str, str]) -> bool:
         right_finish = date.fromisoformat(str(right["finish_date"]))
     except (KeyError, TypeError, ValueError):
         return False
-    return left_start < right_finish and right_start < left_finish
+    return left_start <= right_finish and right_start <= left_finish

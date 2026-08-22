@@ -39,7 +39,11 @@ methodology rules are enforced in code:
    rule are stored and visible but never flip baseline readiness; the
    synthesis status output reports which run counted (`run_id`, `p_value`,
    `decided_at`). Re-running significance until p < 0.05 is not a valid
-   path to release.
+   path to release. The significance test sweeps ALL requested routes and
+   is judged on the worst-case (maximum) p-value across them, mirroring
+   how baselines sweep many routes; job identity is derived from the
+   canonical entry rule plus structural fields only — hypothesis prose
+   never mints new jobs for identical science.
 2. **Benjamini-Hochberg FDR control per synthesis cohort.** All entry
    significance p-values inside one synthesis cohort form one hypothesis
    family. Once every member has a binding finished test, the family is
@@ -71,6 +75,15 @@ The default policy uses a 365-day comparison lookback, a 180-day OOS
 lookback, and a 90-day rolling lookback. These are policy examples, not
 mandatory dates. Regime labels and boundaries must be documented with the
 route set or data-derived regime definition.
+
+Windows are half-open [start, finish] date ranges with no shared candle
+days: because backtests include finish_date, each window's stored finish
+date is the day before the next window starts. An explicit anchor date is
+required for relative windows — set `resources.evaluation_windows.as_of_date`
+(recommended: pin one anchor per research cycle so cohorts stay comparable)
+or pass an anchor explicitly. Unanchored resolution is rejected rather than
+falling back to wall-clock today, which would silently break cross-cohort
+comparability.
 
 Never tune on the OOS or rolling validation routes.
 
@@ -120,7 +133,8 @@ Reject if any of these hold:
 - strategy only works on one symbol and fails the others badly
 - one isolated trade or one narrow period explains most profits
 - trade count is too low to evaluate and the thesis needs frequency
-- performance collapses under 2x fee sensitivity
+- performance collapses under 2x fee sensitivity, measured on a
+  machine-generated fee-stressed run rather than a self-reported status
 
 ### Revise
 
@@ -166,7 +180,12 @@ Only after:
   and metrics
 - passing candles-based Monte Carlo/path robustness with route dates and
   numeric path metrics; prose, labels, or arbitrary run names do not count
-- fee/cost stress pass
+- fee/cost stress pass backed by machine-generated evidence: when a
+  promotion claim is evaluated, ATS Lab enqueues a 2x-fee variant of the
+  baseline routes through the normal execution queue
+  (`<experiment>-COST2X`) and the gate consumes only those stressed runs.
+  A legacy self-reported `cost_stress_status` is unverified: it never
+  satisfies the gate and yields an inconclusive verdict instead
 - reasonable drawdown and liquidation buffer
 - explicit research conclusion, not a live recommendation
 

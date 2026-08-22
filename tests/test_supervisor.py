@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
+from ats_lab.hpo import import_optuna_study
 from ats_lab.models import (
     Evaluation,
     ExperimentSpec,
@@ -512,7 +515,6 @@ class BatchSupervisorTests(unittest.TestCase):
             "net_profit_percentage": 10.0,
             "fees": 20.0,
             "trade_count": 100,
-            "cost_stress_status": "pass",
             "route_results": [
                 {
                     "symbol": symbol, "timeframe": "1h",
@@ -527,6 +529,28 @@ class BatchSupervisorTests(unittest.TestCase):
     def test_hpo_candidate_automatically_schedules_hpo_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1-COST2X", strategy_name="Strategy1",
+                experiment_type=ExperimentType.COST_SENSITIVITY,
+                parent_experiment_id="EXP-1",
+            ))
+            database.add_run(RunResult(
+                id="RUN-COST2X", experiment_id="EXP-1-COST2X",
+                work_item_id=None, session_id="session-cost2x",
+                status=RunStatus.FINISHED,
+                route=RouteSpec(
+                    exchange="Binance Perpetual Futures",
+                    symbol="SOL-USDT", timeframe="1h",
+                    start_date="2024-01-01", finish_date="2025-01-01",
+                ),
+                metrics={
+                    "net_profit_percentage": 8.0,
+                    "max_drawdown_percentage": 12.0,
+                    "sharpe_ratio": 1.0, "sortino_ratio": 1.0,
+                    "calmar_ratio": 1.0, "profit_factor": 1.2,
+                    "trade_count": 100, "fees": 40.0,
+                },
+            ))
             metrics = self.hpo_evidence_metrics()
             execution = self.execution_result()
             execution.payload["results"][0]["evidence"]["run"]["metrics"] = dict(metrics)
@@ -554,6 +578,63 @@ class BatchSupervisorTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(work["specification_json"])["operation"], "hpo",
             )
+
+    def test_paper_trade_claim_enqueues_double_fee_stress_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1", strategy_name="Strategy1",
+                routes=(RouteSpec(
+                    exchange="Binance Perpetual Futures",
+                    symbol="BTC-USDT", timeframe="1h",
+                    start_date="2024-01-01", finish_date="2025-01-01",
+                ),),
+            ))
+            analysis = self.analysis_result()
+            analysis.payload["evaluations"][0]["verdict"] = (
+                "paper_trade_candidate"
+            )
+            dispatcher = SequenceDispatcher([
+                self.execution_result(), analysis,
+            ])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            self.assertEqual(supervisor.run_round()["status"], "batch_complete")
+
+            stress_id = "EXP-1-COST2X"
+            work = database.rows(
+                "SELECT state,specification_json FROM work_items WHERE id=?",
+                (stress_id,),
+            )
+            self.assertEqual(len(work), 1)
+            self.assertEqual(work[0]["state"], "scheduled")
+            self.assertEqual(
+                json.loads(work[0]["specification_json"])["operation"],
+                "cost_sensitivity",
+            )
+            experiment = database.rows(
+                "SELECT experiment_type,parent_experiment_id,specification_json "
+                "FROM experiments WHERE id=?",
+                (stress_id,),
+            )[0]
+            self.assertEqual(experiment["experiment_type"], "cost_sensitivity")
+            self.assertEqual(experiment["parent_experiment_id"], "EXP-1")
+            specification = json.loads(experiment["specification_json"])
+            self.assertEqual(specification["fee_rate"], 0.001)
+            self.assertEqual(len(specification["routes"]), 1)
+
+            repeat = supervisor._enqueue_cost_stress({
+                "experiment_id": "EXP-1",
+                "experiment_json": experiment["specification_json"],
+            })
+            self.assertIsNone(repeat)
+            self.assertEqual(database.rows(
+                "SELECT COUNT(*) count FROM work_items WHERE id=?",
+                (stress_id,),
+            )[0]["count"], 1)
 
     def test_hpo_candidate_without_gate_evidence_is_inconclusive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -656,6 +737,129 @@ class BatchSupervisorTests(unittest.TestCase):
                 )[0]["state"],
                 "waiting_retry",
             )
+
+    def test_hpo_analysis_payload_is_attempt_invariant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "optuna.sqlite3"
+            source_conn = sqlite3.connect(source)
+            source_conn.executescript("""
+            CREATE TABLE studies(study_id INTEGER PRIMARY KEY,study_name TEXT);
+            CREATE TABLE study_directions(
+              study_direction_id INTEGER PRIMARY KEY,direction TEXT,
+              study_id INTEGER,objective INTEGER
+            );
+            CREATE TABLE trials(
+              trial_id INTEGER PRIMARY KEY,number INTEGER,study_id INTEGER,
+              state TEXT,datetime_start TEXT,datetime_complete TEXT
+            );
+            CREATE TABLE trial_values(
+              trial_value_id INTEGER PRIMARY KEY,trial_id INTEGER,
+              objective INTEGER,value REAL,value_type TEXT
+            );
+            CREATE TABLE trial_params(
+              param_id INTEGER PRIMARY KEY,trial_id INTEGER,param_name TEXT,
+              param_value REAL,distribution_json TEXT
+            );
+            CREATE TABLE trial_user_attributes(
+              trial_user_attribute_id INTEGER PRIMARY KEY,trial_id INTEGER,
+              key TEXT,value_json TEXT
+            );
+            CREATE TABLE trial_system_attributes(
+              trial_system_attribute_id INTEGER PRIMARY KEY,trial_id INTEGER,
+              key TEXT,value_json TEXT
+            );
+            INSERT INTO studies VALUES (1,'Trend_optuna');
+            INSERT INTO study_directions VALUES (1,'MAXIMIZE',1,0);
+            """)
+            for number in (7, 8):
+                source_conn.execute(
+                    """INSERT INTO trials VALUES (
+                           ?,?,1,'COMPLETE','2026-01-01 00:00:00',
+                           '2026-01-01 00:00:01'
+                       )""",
+                    (number, number),
+                )
+                source_conn.execute(
+                    "INSERT INTO trial_values VALUES (?,?,0,0.5,'FINITE')",
+                    (number, number),
+                )
+                source_conn.execute(
+                    "INSERT INTO trial_params VALUES (?,?, 'period',12,?)",
+                    (number, number, json.dumps({"name": "IntDistribution"})),
+                )
+                source_conn.execute(
+                    """INSERT INTO trial_user_attributes VALUES
+                           (?,?, 'training_metrics',?)""",
+                    (number, number, json.dumps({
+                        "net_profit_percentage": 12, "max_drawdown": -4,
+                        "sharpe_ratio": 1.5, "total_trades": 40,
+                        "sortino_ratio": 1.1, "calmar_ratio": 1.2,
+                        "profit_factor": 1.3,
+                    })),
+                )
+                source_conn.execute(
+                    """INSERT INTO trial_user_attributes VALUES
+                           (?,?, 'testing_metrics',?)""",
+                    (number + 10, number, json.dumps({
+                        "net_profit_percentage": 8, "max_drawdown": -5,
+                        "sharpe_ratio": 1.1, "total_trades": 25,
+                        "sortino_ratio": 1.0, "calmar_ratio": 1.1,
+                        "profit_factor": 1.2,
+                    })),
+                )
+            source_conn.commit()
+            source_conn.close()
+
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-HPO", strategy_name="Trend",
+                experiment_type=ExperimentType.HPO,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="JOB-HPO", experiment_id="EXP-HPO", priority=1,
+                state=WorkState.FINISHED,
+            ))
+            result = import_optuna_study(
+                database, source, study_name="Trend_optuna",
+                parent_experiment_id="EXP-HPO",
+                parent_work_item_id="JOB-HPO", strategy="Trend",
+            )
+            with database.connect() as connection:
+                connection.execute(
+                    "UPDATE hpo_analysis_jobs SET attempts=2 WHERE study_id=?",
+                    (result["study_id"],),
+                )
+            job = dict(database.rows(
+                "SELECT * FROM hpo_analysis_jobs WHERE study_id=?",
+                (result["study_id"],),
+            )[0])
+            supervisor = BatchSupervisor(
+                database, SequenceDispatcher([]), "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+            captured: dict = {}
+
+            def capture(request):
+                captured["request"] = request
+                return DispatchResult(outcome="finished", payload={
+                    "outcome": "finished",
+                    "evaluations": [{
+                        "experiment_id": (
+                            request["executions"][0]["experiment_id"]
+                        ),
+                        "verdict": "revise", "finding": "f",
+                        "next_action": "n",
+                    }],
+                })
+
+            supervisor._dispatch = capture
+
+            outcome = supervisor._analyze_hpo_job(job, recovered=0, promoted=0)
+
+            self.assertIn(outcome["status"], {"terminal", "finished"})
+            evidence = captured["request"]["executions"][0]["evidence"]
+            self.assertEqual(len(evidence), 4)
 
     def test_terminal_hpo_failure_parks_external_trial_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

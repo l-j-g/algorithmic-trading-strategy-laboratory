@@ -43,22 +43,35 @@ def resolve_evaluation_windows(
     *,
     anchor_date: date | str | None = None,
 ) -> EvaluationWindowPlan:
+    """Resolve relative windows as half-open [start, finish] date ranges.
+
+    Adjacent windows share no candle days: each window's stored finish date
+    is the day before the next window's start, because backtests include
+    ``finish_date``. An explicit anchor is mandatory — pass ``anchor_date``
+    or configure ``resources.evaluation_windows.as_of_date`` so cohorts stay
+    comparable; wall-clock today is never used.
+    """
     policy = policy or ResourcePolicy()
     configured = policy.evaluation_windows
     if configured.mode == "explicit":
         raise ValueError(
             "relative evaluation windows disabled; provide explicit route dates"
         )
-    anchor = _coerce_date(anchor_date or configured.as_of_date) or date.today()
+    anchor = _coerce_date(anchor_date or configured.as_of_date)
+    if anchor is None:
+        raise ValueError(
+            "evaluation windows require an explicit anchor date: set "
+            "resources.evaluation_windows.as_of_date or pass anchor_date"
+        )
     oos_start = anchor - timedelta(days=configured.oos_lookback_days)
     rolling_start = oos_start - timedelta(days=configured.rolling_lookback_days)
     hpo_start = rolling_start - timedelta(days=configured.comparison_lookback_days)
     return EvaluationWindowPlan(
         anchor_date=anchor,
         hpo_start=hpo_start,
-        hpo_finish=rolling_start,
+        hpo_finish=rolling_start - timedelta(days=1),
         rolling_start=rolling_start,
-        rolling_finish=oos_start,
+        rolling_finish=oos_start - timedelta(days=1),
         oos_start=oos_start,
         oos_finish=anchor,
     )

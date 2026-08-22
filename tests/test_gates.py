@@ -8,7 +8,13 @@ from ats_lab.evidence import (
     LifecycleStage,
     NormalizedEvidence,
 )
-from ats_lab.gates import evaluate_gates, evaluate_hpo_candidate, evaluate_promotion
+from ats_lab.gates import (
+    _monte_carlo_interpretation_findings,
+    evaluate_gates,
+    evaluate_hpo_candidate,
+    evaluate_promotion,
+    required_trade_count,
+)
 from ats_lab.models import Verdict
 from ats_lab.resources import ResourcePolicy
 
@@ -35,7 +41,13 @@ class GateTests(unittest.TestCase):
 
     def test_all_numeric_and_route_gates_pass(self) -> None:
         decision = evaluate_gates(
-            [self.row()],
+            [
+                self.row(),
+                self.row(
+                    lifecycle_stage=LifecycleStage.COST_SENSITIVITY,
+                    sortino_ratio=1.0, calmar_ratio=1.0,
+                ),
+            ],
             policy=ResourcePolicy(),
             expected_routes=[{
                 "symbol": "BTC-USDT", "timeframe": "1h",
@@ -128,7 +140,6 @@ class GateTests(unittest.TestCase):
                 self.row(
                     evidence_split=EvidenceSplit.OOS,
                     lifecycle_stage=LifecycleStage.OUT_OF_SAMPLE,
-                    cost_stress_status=CostStressStatus.PASS,
                     sortino_ratio=1.0,
                     calmar_ratio=1.0,
                 ),
@@ -146,6 +157,10 @@ class GateTests(unittest.TestCase):
                     sortino_ratio=1.3,
                     monte_carlo_method="candle_based",
                     monte_carlo_scenarios=500,
+                ),
+                self.row(
+                    lifecycle_stage=LifecycleStage.COST_SENSITIVITY,
+                    sortino_ratio=1.0, calmar_ratio=1.0,
                 ),
             ],
             policy=ResourcePolicy(),
@@ -184,10 +199,56 @@ class GateTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertIn("net_profit", decision.failed)
 
+    def test_promotion_ignores_self_reported_cost_stress_status(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(
+                    evidence_split=EvidenceSplit.OOS,
+                    lifecycle_stage=LifecycleStage.OUT_OF_SAMPLE,
+                    cost_stress_status=CostStressStatus.PASS,
+                    sortino_ratio=1.0,
+                    calmar_ratio=1.0,
+                ),
+                self.row(
+                    evidence_split=EvidenceSplit.ROLLING,
+                    lifecycle_stage=LifecycleStage.MULTI_WINDOW,
+                    sortino_ratio=1.0,
+                    calmar_ratio=1.0,
+                    walk_forward_method="rolling",
+                    walk_forward_windows=3,
+                ),
+                self.row(
+                    lifecycle_stage=LifecycleStage.MONTE_CARLO,
+                    calmar_ratio=1.1,
+                    sortino_ratio=1.3,
+                    monte_carlo_method="candle_based",
+                    monte_carlo_scenarios=500,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("fees_cost_sensitivity", decision.missing)
+
+    def test_promotion_fails_on_failed_machine_stress_run(self) -> None:
+        decision = evaluate_promotion(
+            [
+                self.row(
+                    lifecycle_stage=LifecycleStage.COST_SENSITIVITY,
+                    net_profit_percentage=-1,
+                    sortino_ratio=1.0, calmar_ratio=1.0,
+                ),
+            ],
+            policy=ResourcePolicy(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("fees_cost_sensitivity", decision.failed)
+        self.assertNotIn("fees_cost_sensitivity", decision.missing)
+
     def hpo_family(self, **overrides) -> list[NormalizedEvidence]:
         payload = {
             "net_profit_percentage": 10.0, "trade_count": 100,
-            "cost_stress_status": CostStressStatus.PASS,
+            "sortino_ratio": 1.0, "calmar_ratio": 1.0,
         }
         payload.update(overrides)
         rows = []
@@ -199,6 +260,11 @@ class GateTests(unittest.TestCase):
                     symbol=symbol, start_date=start, finish_date=finish,
                     **payload,
                 ))
+        rows.append(self.row(
+            symbol="SOL-USDT", start_date="2024-01-01",
+            finish_date="2024-07-01", lifecycle_stage=LifecycleStage.COST_SENSITIVITY,
+            **payload,
+        ))
         return rows
 
     def test_hpo_candidate_passes_documented_criteria(self) -> None:
@@ -246,8 +312,7 @@ class GateTests(unittest.TestCase):
 
     def test_hpo_candidate_fails_when_fee_stress_destroys_edge(self) -> None:
         decision = evaluate_hpo_candidate(
-            self.hpo_family(cost_stress_status=CostStressStatus.FAIL),
-            policy=ResourcePolicy(),
+            self.hpo_family(net_profit_percentage=-5.0), policy=ResourcePolicy(),
         )
         self.assertFalse(decision.allowed)
         self.assertIn("fees_cost_sensitivity", decision.failed)
@@ -299,6 +364,46 @@ class GateTests(unittest.TestCase):
             policy=ResourcePolicy(),
         )
         self.assertNotIn("oos_training_overlap", decision.failed)
+
+    def test_malformed_window_dates_fail_loudly(self) -> None:
+        row = self.row(start_date="2024-13-01")
+        with self.assertRaisesRegex(ValueError, "unparseable window dates"):
+            required_trade_count(row, ResourcePolicy())
+        decision = evaluate_gates([row], policy=ResourcePolicy())
+        self.assertIn("window_dates_malformed", decision.failed)
+        self.assertEqual(decision.verdict, Verdict.REJECT)
+
+    def test_mc_playbook_flags_original_above_best_tail(self) -> None:
+        failed: list[str] = []
+        _monte_carlo_interpretation_findings([
+            {
+                "net_profit_percentage": 25.0,
+                "monte_carlo_median_net_profit_percentage": 8.0,
+                "monte_carlo_best_5pct_net_profit_percentage": 20.0,
+                "monte_carlo_worst_5pct_net_profit_percentage": -2.0,
+            },
+        ], failed)
+        self.assertIn("mc_original_above_best_tail", failed)
+        self.assertIn("mc_worst_tail_loss", failed)
+
+    def test_mc_playbook_accepts_plausible_original(self) -> None:
+        failed: list[str] = []
+        _monte_carlo_interpretation_findings([
+            {
+                "net_profit_percentage": 9.0,
+                "monte_carlo_median_net_profit_percentage": 8.0,
+                "monte_carlo_best_5pct_net_profit_percentage": 20.0,
+                "monte_carlo_worst_5pct_net_profit_percentage": 0.5,
+            },
+        ], failed)
+        self.assertEqual(failed, [])
+
+    def test_mc_playbook_skips_rows_without_distribution_stats(self) -> None:
+        failed: list[str] = []
+        _monte_carlo_interpretation_findings(
+            [self.row(lifecycle_stage=LifecycleStage.MONTE_CARLO)], failed,
+        )
+        self.assertEqual(failed, [])
 
 
 if __name__ == "__main__":
