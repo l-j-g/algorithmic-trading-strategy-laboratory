@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import timedelta
 
 from ats_lab.evaluation_windows import resolve_evaluation_windows
 from ats_lab.resources import EvaluationWindowPolicy, ResourcePolicy
@@ -17,10 +18,18 @@ class EvaluationWindowTests(unittest.TestCase):
         first = resolve_evaluation_windows(policy)
         second = resolve_evaluation_windows(policy)
         self.assertEqual(first, second)
-        self.assertEqual(first.hpo_finish, first.rolling_start)
-        self.assertEqual(first.rolling_finish, first.oos_start)
+        self.assertEqual(
+            first.hpo_finish, first.rolling_start - timedelta(days=1),
+        )
+        self.assertEqual(
+            first.rolling_finish, first.oos_start - timedelta(days=1),
+        )
+        self.assertEqual(first.oos_start, first.rolling_finish + timedelta(days=1))
         self.assertEqual(first.oos_finish.isoformat(), "2026-08-18")
 
+    def test_unanchored_windows_are_rejected_not_wall_clock(self) -> None:
+        with self.assertRaisesRegex(ValueError, "anchor date"):
+            resolve_evaluation_windows(ResourcePolicy())
 
 if __name__ == "__main__":
     unittest.main()

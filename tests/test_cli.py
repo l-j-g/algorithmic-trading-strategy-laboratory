@@ -2,6 +2,7 @@ import io
 import json
 import tempfile
 import unittest
+from datetime import date, timedelta
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -428,6 +429,11 @@ class CliEvidenceTests(unittest.TestCase):
         )
 
     def test_hpo_defaults_are_visible_and_explicitly_applicable(self) -> None:
+        config_dir = self.root / ".ats-lab"
+        config_dir.mkdir(exist_ok=True)
+        (config_dir / "config.toml").write_text(
+            '[resources.evaluation_windows]\nas_of_date = "2026-04-01"\n',
+        )
         preview = self.invoke("hpo-defaults")
         self.assertIn("->", preview)
         self.assertIn("hpo", preview)
@@ -438,7 +444,11 @@ class CliEvidenceTests(unittest.TestCase):
         self.assertEqual(payload["applied"], [self.study_id])
         self.assertEqual(
             payload["policy"]["rolling"][0]["finish_date"],
-            payload["policy"]["oos"][0]["start_date"],
+            (date.fromisoformat(payload["policy"]["oos"][0]["start_date"])
+             - timedelta(days=1)).isoformat(),
+        )
+        self.assertEqual(
+            payload["policy"]["oos"][0]["finish_date"], "2026-04-01",
         )
 
 

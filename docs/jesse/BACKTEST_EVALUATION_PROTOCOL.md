@@ -72,6 +72,15 @@ lookback, and a 90-day rolling lookback. These are policy examples, not
 mandatory dates. Regime labels and boundaries must be documented with the
 route set or data-derived regime definition.
 
+Windows are half-open [start, finish] date ranges with no shared candle
+days: because backtests include finish_date, each window's stored finish
+date is the day before the next window starts. An explicit anchor date is
+required for relative windows — set `resources.evaluation_windows.as_of_date`
+(recommended: pin one anchor per research cycle so cohorts stay comparable)
+or pass an anchor explicitly. Unanchored resolution is rejected rather than
+falling back to wall-clock today, which would silently break cross-cohort
+comparability.
+
 Never tune on the OOS or rolling validation routes.
 
 ## Baseline Route Set
