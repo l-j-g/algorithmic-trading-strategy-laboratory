@@ -512,7 +512,6 @@ class BatchSupervisorTests(unittest.TestCase):
             "net_profit_percentage": 10.0,
             "fees": 20.0,
             "trade_count": 100,
-            "cost_stress_status": "pass",
             "route_results": [
                 {
                     "symbol": symbol, "timeframe": "1h",
@@ -527,6 +526,28 @@ class BatchSupervisorTests(unittest.TestCase):
     def test_hpo_candidate_automatically_schedules_hpo_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1-COST2X", strategy_name="Strategy1",
+                experiment_type=ExperimentType.COST_SENSITIVITY,
+                parent_experiment_id="EXP-1",
+            ))
+            database.add_run(RunResult(
+                id="RUN-COST2X", experiment_id="EXP-1-COST2X",
+                work_item_id=None, session_id="session-cost2x",
+                status=RunStatus.FINISHED,
+                route=RouteSpec(
+                    exchange="Binance Perpetual Futures",
+                    symbol="SOL-USDT", timeframe="1h",
+                    start_date="2024-01-01", finish_date="2025-01-01",
+                ),
+                metrics={
+                    "net_profit_percentage": 8.0,
+                    "max_drawdown_percentage": 12.0,
+                    "sharpe_ratio": 1.0, "sortino_ratio": 1.0,
+                    "calmar_ratio": 1.0, "profit_factor": 1.2,
+                    "trade_count": 100, "fees": 40.0,
+                },
+            ))
             metrics = self.hpo_evidence_metrics()
             execution = self.execution_result()
             execution.payload["results"][0]["evidence"]["run"]["metrics"] = dict(metrics)
@@ -554,6 +575,63 @@ class BatchSupervisorTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(work["specification_json"])["operation"], "hpo",
             )
+
+    def test_paper_trade_claim_enqueues_double_fee_stress_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1", strategy_name="Strategy1",
+                routes=(RouteSpec(
+                    exchange="Binance Perpetual Futures",
+                    symbol="BTC-USDT", timeframe="1h",
+                    start_date="2024-01-01", finish_date="2025-01-01",
+                ),),
+            ))
+            analysis = self.analysis_result()
+            analysis.payload["evaluations"][0]["verdict"] = (
+                "paper_trade_candidate"
+            )
+            dispatcher = SequenceDispatcher([
+                self.execution_result(), analysis,
+            ])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            self.assertEqual(supervisor.run_round()["status"], "batch_complete")
+
+            stress_id = "EXP-1-COST2X"
+            work = database.rows(
+                "SELECT state,specification_json FROM work_items WHERE id=?",
+                (stress_id,),
+            )
+            self.assertEqual(len(work), 1)
+            self.assertEqual(work[0]["state"], "scheduled")
+            self.assertEqual(
+                json.loads(work[0]["specification_json"])["operation"],
+                "cost_sensitivity",
+            )
+            experiment = database.rows(
+                "SELECT experiment_type,parent_experiment_id,specification_json "
+                "FROM experiments WHERE id=?",
+                (stress_id,),
+            )[0]
+            self.assertEqual(experiment["experiment_type"], "cost_sensitivity")
+            self.assertEqual(experiment["parent_experiment_id"], "EXP-1")
+            specification = json.loads(experiment["specification_json"])
+            self.assertEqual(specification["fee_rate"], 0.001)
+            self.assertEqual(len(specification["routes"]), 1)
+
+            repeat = supervisor._enqueue_cost_stress({
+                "experiment_id": "EXP-1",
+                "experiment_json": experiment["specification_json"],
+            })
+            self.assertIsNone(repeat)
+            self.assertEqual(database.rows(
+                "SELECT COUNT(*) count FROM work_items WHERE id=?",
+                (stress_id,),
+            )[0]["count"], 1)
 
     def test_hpo_candidate_without_gate_evidence_is_inconclusive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -120,7 +120,8 @@ Reject if any of these hold:
 - strategy only works on one symbol and fails the others badly
 - one isolated trade or one narrow period explains most profits
 - trade count is too low to evaluate and the thesis needs frequency
-- performance collapses under 2x fee sensitivity
+- performance collapses under 2x fee sensitivity, measured on a
+  machine-generated fee-stressed run rather than a self-reported status
 
 ### Revise
 
@@ -166,7 +167,12 @@ Only after:
   and metrics
 - passing candles-based Monte Carlo/path robustness with route dates and
   numeric path metrics; prose, labels, or arbitrary run names do not count
-- fee/cost stress pass
+- fee/cost stress pass backed by machine-generated evidence: when a
+  promotion claim is evaluated, ATS Lab enqueues a 2x-fee variant of the
+  baseline routes through the normal execution queue
+  (`<experiment>-COST2X`) and the gate consumes only those stressed runs.
+  A legacy self-reported `cost_stress_status` is unverified: it never
+  satisfies the gate and yields an inconclusive verdict instead
 - reasonable drawdown and liquidation buffer
 - explicit research conclusion, not a live recommendation
 

@@ -93,7 +93,8 @@ class CorrectnessRecoveryTests(unittest.TestCase):
         evaluation = self.database.rows(
             "SELECT verdict,metrics_summary FROM evaluations WHERE experiment_id='EXP-1'"
         )[0]
-        self.assertEqual(evaluation["verdict"], "pass")
+        self.assertEqual(evaluation["verdict"], "inconclusive")
+        self.assertIn("missing=fees_cost_sensitivity", evaluation["metrics_summary"])
         self.assertNotIn(
             "failed=route_completion", evaluation["metrics_summary"],
         )

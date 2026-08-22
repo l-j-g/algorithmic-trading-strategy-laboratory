@@ -150,14 +150,15 @@ def evaluate_promotion(
     cost_rows = tuple(
         row for row in rows
         if row.lifecycle_stage == "cost_sensitivity"
-        or row.cost_stress_status is not None
     )
     if not cost_rows:
         missing.append("fees_cost_sensitivity")
-    elif any(row.cost_stress_status == "fail" for row in cost_rows):
-        failed.append("fees_cost_sensitivity")
-    elif any(row.cost_stress_status is None for row in cost_rows):
-        missing.append("fees_cost_sensitivity")
+    else:
+        states = [_robustness_state(row, policy) for row in cost_rows]
+        if any(state == "failed" for state in states):
+            failed.append("fees_cost_sensitivity")
+        elif any(state == "missing" for state in states):
+            missing.append("fees_cost_sensitivity")
 
     # Stable order makes findings and tests deterministic when rows arrive in
     # different route order.
@@ -263,14 +264,15 @@ def evaluate_hpo_candidate(
     cost_rows = tuple(
         row for row in rows
         if row.lifecycle_stage == "cost_sensitivity"
-        or row.cost_stress_status is not None
     )
     if not cost_rows:
         missing.append("fees_cost_sensitivity")
-    elif any(row.cost_stress_status == "fail" for row in cost_rows):
-        failed.append("fees_cost_sensitivity")
-    elif any(row.cost_stress_status is None for row in cost_rows):
-        missing.append("fees_cost_sensitivity")
+    else:
+        states = [_robustness_state(row, policy) for row in cost_rows]
+        if any(state == "failed" for state in states):
+            failed.append("fees_cost_sensitivity")
+        elif any(state == "missing" for state in states):
+            missing.append("fees_cost_sensitivity")
 
     failed = list(dict.fromkeys(failed))
     missing = list(dict.fromkeys(missing))
@@ -445,20 +447,17 @@ def evaluate_gates(
     cost_rows = [
         row for row in rows
         if row.lifecycle_stage == "cost_sensitivity"
-        or row.cost_stress_status is not None
     ]
-    if cost_rows:
-        statuses = [row.cost_stress_status for row in cost_rows]
-        if any(status == "fail" for status in statuses):
+    if not cost_rows:
+        missing.append("fees_cost_sensitivity")
+    else:
+        states = [_robustness_state(row, policy) for row in cost_rows]
+        if any(state == "failed" for state in states):
             failed.append("fees_cost_sensitivity")
-        elif any(status is None for status in statuses):
+        elif any(state == "missing" for state in states):
             missing.append("fees_cost_sensitivity")
         else:
             passed.append("fees_cost_sensitivity")
-    elif any(row.fees is not None for row in rows):
-        passed.append("fees_cost_sensitivity")
-    else:
-        missing.append("fees_cost_sensitivity")
 
     degradation = _holdout_degradation(rows)
     split_names = {row.evidence_split for row in rows}
