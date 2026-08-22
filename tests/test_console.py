@@ -16,6 +16,7 @@ from ats_lab.console import (
     run_console,
 )
 from ats_lab.database import WorkflowDatabase
+from ats_lab.humanize import human_time
 from ats_lab.models import (
     Evaluation,
     ExperimentSpec,
@@ -259,6 +260,39 @@ class TerminalConsoleTests(unittest.TestCase):
         self.assertIn("requirements_pending", output)
         self.assertIn("validation routes required", output)
         self.assertNotIn("{", output)
+
+
+class HumanTimeTests(unittest.TestCase):
+    def test_timestamps_render_local_minute_precision_without_seconds(self) -> None:
+        from datetime import datetime, timezone
+
+        rendered = human_time("2026-08-11T01:20:37Z")
+
+        self.assertNotIn("T", rendered)
+        self.assertNotIn("Z", rendered)
+        self.assertEqual(rendered.count(":"), 1)
+        parsed = datetime.strptime(rendered, "%Y-%m-%d %H:%M").replace(
+            tzinfo=datetime.now().astimezone().tzinfo,
+        )
+        self.assertEqual(
+            parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H"),
+            "2026-08-11 01",
+        )
+
+    def test_naive_values_are_treated_as_utc_and_invalid_input_passes_through(self) -> None:
+        from datetime import datetime, timezone
+
+        naive = human_time("2026-08-11T01:20:00")
+        explicit = human_time("2026-08-11T01:20:00+00:00")
+        self.assertEqual(naive, explicit)
+        parsed = datetime.strptime(naive, "%Y-%m-%d %H:%M").replace(
+            tzinfo=timezone.utc,
+        )
+        self.assertEqual(parsed.utcoffset(), timezone.utc.utcoffset(parsed))
+
+        self.assertEqual(human_time("not-a-timestamp"), "not-a-timestamp")
+        self.assertEqual(human_time(None), "—")
+        self.assertEqual(human_time(""), "—")
 
 
 if __name__ == "__main__":
