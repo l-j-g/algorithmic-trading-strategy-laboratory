@@ -5,9 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import asdict
+from datetime import date
 from typing import Any, Mapping
 
 from .database_support import _json_object
+from .evidence import evidence_key
 from .models import RouteSpec, utc_now
 
 
