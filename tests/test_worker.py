@@ -4,9 +4,11 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from ats_lab.database import WorkflowDatabase
 from ats_lab.models import ExperimentSpec, ExperimentType, WorkItem, WorkState
+from ats_lab.resources import ResourcePolicy
 from ats_lab.worker import DispatchResult, Worker
 
 
@@ -286,6 +288,35 @@ class WorkerTests(unittest.TestCase):
             dependent = database.rows("SELECT state,specification_json FROM work_items WHERE id='JOB-2'")[0]
             self.assertEqual(dependent["state"], "scheduled")
             self.assertIn("significance_inconclusive", dependent["specification_json"])
+
+    def test_worker_threads_configured_fdr_level_through(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            with database.connect() as connection:
+                connection.execute(
+                    "UPDATE work_items SET specification_json=? WHERE id='JOB-1'",
+                    ('{"operation":"significance"}',),
+                )
+            captured: dict[str, float] = {}
+            original = WorkflowDatabase.reconcile_significance_gate
+
+            def spy(db, work_item_id, p_value, active_limit, **kwargs):
+                captured["fdr_level"] = kwargs.get("fdr_level")
+                return original(db, work_item_id, p_value, active_limit, **kwargs)
+
+            result = self.finished()
+            result.payload["evidence"]["run"]["metrics"]["p_value"] = 0.03
+            result.payload["evidence"]["evaluation"]["verdict"] = "pass"
+            with patch.object(
+                WorkflowDatabase, "reconcile_significance_gate", spy,
+            ):
+                outcome = Worker(
+                    database, FakeDispatcher(result), "worker-1",
+                    resource_policy=ResourcePolicy(significance_fdr_level=0.02),
+                ).run_once()
+
+            self.assertEqual(outcome["status"], "finished")
+            self.assertEqual(captured["fdr_level"], 0.02)
 
 
 if __name__ == "__main__":

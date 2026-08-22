@@ -36,6 +36,16 @@ class CostStressStatus(StrEnum):
     INCONCLUSIVE = "inconclusive"
 
 
+# Experiment-id suffix of the coordinator-enqueued 2x-fee stress variant.
+# Only these machine-generated runs may carry a persisted cost_stress_status;
+# ordinary experiments cannot self-certify fee sensitivity.
+MACHINE_COST_STRESS_SUFFIX = "-COST2X"
+
+
+def _is_machine_cost_stress(experiment_id: object) -> bool:
+    return str(experiment_id or "").endswith(MACHINE_COST_STRESS_SUFFIX)
+
+
 @dataclass(frozen=True)
 class NormalizedEvidence:
     schema_version: int = 2
@@ -74,6 +84,8 @@ class NormalizedEvidence:
     significance_p_value: float | None = None
     monte_carlo_scenarios: int | None = None
     monte_carlo_method: str | None = None
+    monte_carlo_best_5pct_net_profit_percentage: float | None = None
+    monte_carlo_worst_5pct_net_profit_percentage: float | None = None
     walk_forward_windows: int | None = None
     walk_forward_method: str | None = None
     completed_at: str | None = None
@@ -362,7 +374,7 @@ def _normalize_atomic(
 
     cost_status = _normalize_cost_status(_first(
         metrics, spec, names=("cost_stress_status",),
-    ))
+    ) if _is_machine_cost_stress(experiment_id) else None)
     objective = _text(_first(
         metrics, spec, names=("optimizer_objective", "objective"),
     ))
@@ -375,6 +387,14 @@ def _normalize_atomic(
     ))
     if monte_carlo_method is None and metrics.get("candle_based") is True:
         monte_carlo_method = "candle_based"
+    numeric_monte_carlo_best_tail = _number(_first(
+        metrics, spec,
+        names=("monte_carlo_best_5pct_net_profit_percentage",),
+    ))
+    numeric_monte_carlo_worst_tail = _number(_first(
+        metrics, spec,
+        names=("monte_carlo_worst_5pct_net_profit_percentage",),
+    ))
     monte_carlo_scenarios = _integer(_first(
         metrics, spec,
         names=("monte_carlo_scenarios", "n_scenarios", "scenario_count"),
@@ -425,6 +445,8 @@ def _normalize_atomic(
         significance_p_value=numeric["significance_p_value"],
         monte_carlo_scenarios=monte_carlo_scenarios,
         monte_carlo_method=monte_carlo_method,
+        monte_carlo_best_5pct_net_profit_percentage=numeric_monte_carlo_best_tail,
+        monte_carlo_worst_5pct_net_profit_percentage=numeric_monte_carlo_worst_tail,
         walk_forward_windows=walk_forward_windows,
         walk_forward_method=walk_forward_method,
         completed_at=_text(completed_at),

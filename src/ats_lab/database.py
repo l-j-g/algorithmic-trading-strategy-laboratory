@@ -203,6 +203,19 @@ def _migrate_normalized_evidence_backfill(connection: sqlite3.Connection) -> Non
         )
 
 
+def _migrate_evidence_mc_tail_columns(connection: sqlite3.Connection) -> None:
+    _ensure_columns(connection, "normalized_evidence", {
+        "monte_carlo_best_5pct_net_profit_percentage": "REAL",
+        "monte_carlo_worst_5pct_net_profit_percentage": "REAL",
+    })
+    if _table_exists(connection, "runs") and _table_exists(
+        connection, "experiments",
+    ):
+        WorkflowDatabase._backfill_normalized_evidence(
+            connection, record_event=False,
+        )
+
+
 def _migrate_evaluations_append_only(connection: sqlite3.Connection) -> None:
     """Rebuild evaluations as append-only evaluation_history plus a view.
 
@@ -255,6 +268,7 @@ _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (5, _migrate_evidence_leverage_columns),
     (6, _migrate_normalized_evidence_backfill),
     (7, _migrate_evaluations_append_only),
+    (8, _migrate_evidence_mc_tail_columns),
 )
 
 if SCHEMA_VERSION != _MIGRATIONS[-1][0]:

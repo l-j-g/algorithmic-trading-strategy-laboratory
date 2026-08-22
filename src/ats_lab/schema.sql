@@ -149,6 +149,8 @@ CREATE TABLE IF NOT EXISTS normalized_evidence (
     significance_p_value REAL,
     monte_carlo_scenarios INTEGER,
     monte_carlo_method TEXT,
+    monte_carlo_best_5pct_net_profit_percentage REAL,
+    monte_carlo_worst_5pct_net_profit_percentage REAL,
     walk_forward_windows INTEGER,
     walk_forward_method TEXT,
     completed_at TEXT,

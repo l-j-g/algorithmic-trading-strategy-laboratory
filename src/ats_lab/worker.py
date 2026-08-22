@@ -152,6 +152,7 @@ class Worker:
                 self.database.reconcile_significance_gate(
                     claimed["id"], research_evidence["p_value"],
                     self.resource_policy.active_ready_limit,
+                    fdr_level=self.resource_policy.significance_fdr_level,
                 )
         elif result.outcome == "blocked":
             item = self.database.transition_work_item(

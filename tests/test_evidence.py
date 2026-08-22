@@ -276,8 +276,75 @@ class NormalizedEvidenceTests(unittest.TestCase):
         self.assertIsNone(evidence.sharpe_ratio)
         self.assertIsNone(evidence.trade_count)
         self.assertEqual(evidence.evidence_split, EvidenceSplit.OOS)
-        self.assertEqual(evidence.cost_stress_status, CostStressStatus.PASS)
+        self.assertIsNone(evidence.cost_stress_status)
         self.assertIsNone(evidence.completed_at)
+
+    def test_self_reported_cost_stress_status_is_not_persisted(self) -> None:
+        evidence = normalize_run_evidence(
+            experiment_id="EXP-1",
+            run_id="RUN-1",
+            session_id=None,
+            strategy="Trend",
+            lifecycle_stage="baseline",
+            experiment_spec={},
+            route={},
+            metrics={"cost_stress_status": "passed"},
+            completed_at=None,
+        )[0]
+
+        self.assertIsNone(evidence.cost_stress_status)
+
+    def test_machine_cost_stress_rows_persist_their_status(self) -> None:
+        evidence = normalize_run_evidence(
+            experiment_id="EXP-1-COST2X",
+            run_id="RUN-2",
+            session_id=None,
+            strategy="Trend",
+            lifecycle_stage="cost_sensitivity",
+            experiment_spec={"fee_rate": 0.001},
+            route={},
+            metrics={"cost_stress_status": "failed"},
+            completed_at=None,
+        )[0]
+
+        self.assertEqual(evidence.cost_stress_status, CostStressStatus.FAIL)
+
+    def test_monte_carlo_tail_summaries_are_normalized(self) -> None:
+        evidence = normalize_run_evidence(
+            experiment_id="EXP-1",
+            run_id="RUN-3",
+            session_id=None,
+            strategy="Trend",
+            lifecycle_stage="paper_trade",
+            experiment_spec={},
+            route={},
+            metrics={
+                "net_profit_percentage": 18.0,
+                "monte_carlo_best_5pct_net_profit_percentage": 32.5,
+                "monte_carlo_worst_5pct_net_profit_percentage": -4.5,
+            },
+            completed_at=None,
+        )[0]
+        sparse = normalize_run_evidence(
+            experiment_id="EXP-1",
+            run_id="RUN-4",
+            session_id=None,
+            strategy="Trend",
+            lifecycle_stage="paper_trade",
+            experiment_spec={},
+            route={},
+            metrics={"net_profit_percentage": 18.0},
+            completed_at=None,
+        )[0]
+
+        self.assertEqual(
+            evidence.monte_carlo_best_5pct_net_profit_percentage, 32.5,
+        )
+        self.assertEqual(
+            evidence.monte_carlo_worst_5pct_net_profit_percentage, -4.5,
+        )
+        self.assertIsNone(sparse.monte_carlo_best_5pct_net_profit_percentage)
+        self.assertIsNone(sparse.monte_carlo_worst_5pct_net_profit_percentage)
 
     def test_key_is_deterministic_and_display_preserves_zero(self) -> None:
         evidence = NormalizedEvidence(

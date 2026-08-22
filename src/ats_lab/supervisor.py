@@ -14,7 +14,7 @@ from .analysis_input import ExecutionAnalysisInputBuilder
 from .batch_synthesis import apply_batch, build_batch_context
 from .contracts import evaluation_from_payload
 from .database import WorkflowDatabase
-from .evidence import NormalizedEvidence
+from .evidence import MACHINE_COST_STRESS_SUFFIX, NormalizedEvidence
 from .execution_disposition import (
     INFRASTRUCTURE_FAILURE_CODES,
     ExecutionDispositionPolicy,
@@ -1169,7 +1169,7 @@ class BatchSupervisor:
     def _machine_cost_stress_rows(self, run_row: dict) -> list:
         """Return machine-generated cost-stress evidence for this experiment."""
         return self.database.normalized_evidence_for_experiment(
-            f"{run_row['experiment_id']}-COST2X",
+            f"{run_row['experiment_id']}{MACHINE_COST_STRESS_SUFFIX}",
         )
 
     def _enqueue_cost_stress(self, run_row: dict) -> str | None:
@@ -1184,7 +1184,9 @@ class BatchSupervisor:
         routes = experiment.get("routes")
         if not isinstance(routes, list) or not routes:
             return None
-        stress_id = f"{run_row['experiment_id']}-COST2X"
+        stress_id = (
+            f"{run_row['experiment_id']}{MACHINE_COST_STRESS_SUFFIX}"
+        )
         if self.database.rows(
             "SELECT id FROM work_items WHERE id=?", (stress_id,),
         ):
