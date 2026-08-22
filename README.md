@@ -22,7 +22,8 @@ Backtest results are not financial advice.
 - **SQLite as sole authority** — the queue, runs, evaluations, HPO state and
   synthesis cohorts live in one transactional database. No markdown or JSON
   sidecars are authoritative.
-- **Deterministic gates** — statistical significance, out-of-sample and
+- **Deterministic gates** — statistical significance with first-test-wins and
+  Benjamini-Hochberg FDR control per synthesis cohort, out-of-sample and
   cost-stress checks decide `reject` / `revise` / `hpo_candidate` /
   `paper_trade_candidate` verdicts, not vibes.
 - **Batch-first supervisor** — executes research in bounded batches (default
@@ -308,9 +309,15 @@ Gate behavior:
 - `p_value < 0.05`: baseline becomes ready.
 - `0.05 <= p_value <= 0.10`: baseline stays scheduled as inconclusive.
 - `p_value > 0.10`: baseline is archived.
+- First test wins per entry fingerprint: later significance re-tests are
+  stored but never flip baseline readiness.
+- Inside a synthesis cohort, baselines additionally release only when the
+  Benjamini-Hochberg procedure rejects them at
+  `resources.significance_fdr_level` (default 0.05).
 - Promotion to `paper_trade_candidate` requires positive out-of-sample or
-  rolling evidence and an explicit passing cost-stress result. Missing
-  validation is `inconclusive`; failed validation is `reject`.
+  rolling evidence and passing machine-generated doubled-fee (`-COST2X`)
+  cost-stress runs that the laboratory enqueues itself. Missing validation is
+  `inconclusive`; failed validation is `reject`.
 
 Canonical diagram source: [`docs/diagrams/data-flow.md`](docs/diagrams/data-flow.md).
 
@@ -537,6 +544,19 @@ ats-lab recover-claims --stale-after-hours 2 --apply
 ```
 
 Completed executions awaiting analysis are excluded from stale-claim recovery.
+
+### Orphaned replacement reservations
+
+A crash between a replacement-session reservation and its session-id persist
+wedges the work item. Preview and clear the orphaned reservation:
+
+```bash
+ats-lab recover-orphaned-replacements
+ats-lab recover-orphaned-replacements --apply
+```
+
+Inspect the preview before applying; `--apply` clears only reservations that
+never persisted a replacement session id.
 
 ### Analyzer failure
 
