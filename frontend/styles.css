@@ -78,6 +78,16 @@ h3 { margin: 0; font-size: .92rem; }
 .panel { padding: 1.15rem; margin-bottom: 1rem; }
 .section-heading { justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
 .attention-panel { border-left: 2px solid var(--yellow); }
+.heading-actions { display: flex; align-items: center; gap: .55rem; }
+.panel-link { cursor: pointer; border: 0; padding: 0; background: transparent; color: var(--cyan); font: inherit; font-size: .72rem; font-weight: 800; white-space: nowrap; }
+.panel-link:hover, .panel-link:focus-visible { text-decoration: underline; }
+.activity-panel { border-left: 2px solid var(--cyan); }
+.activity-list { display: grid; gap: 0; padding: 0; margin: 0; list-style: none; }
+.activity-item { display: flex; align-items: baseline; gap: .65rem; min-width: 0; padding: .5rem .25rem; border-bottom: 1px solid var(--line); font-size: .78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.activity-item:last-child { border-bottom: 0; }
+.activity-item time { flex: 0 0 auto; color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; }
+.activity-item strong { flex: 0 0 auto; font-weight: 750; }
+.activity-item span { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; }
 .attention-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; padding: 0; margin: 0; list-style: none; }
 .attention-item { display: flex; gap: .65rem; min-height: 4.1rem; padding: .75rem; border: 1px solid var(--line); border-radius: .6rem; background: var(--surface-soft); }
 .attention-item::before { content: ""; flex: 0 0 .45rem; width: .45rem; height: .45rem; margin-top: .35rem; border-radius: 50%; background: var(--attention-color, var(--yellow)); box-shadow: 0 0 8px var(--attention-color, var(--yellow)); }
@@ -126,6 +136,14 @@ td strong { display: block; font-size: .82rem; } td small { color: var(--muted);
 .stat-card strong { display: block; font-size: 1.2rem; }
 .stat-card span { color: var(--muted); font-size: .7rem; }
 .lane-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .7rem; margin-bottom: 1rem; }
+.top-ranking { display: grid; gap: 0; padding: 0; margin: 0; list-style: none; }
+.top-ranking li { display: flex; align-items: baseline; gap: .7rem; min-width: 0; padding: .5rem .25rem; border-bottom: 1px solid var(--line); font-size: .8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.top-ranking li:hover, .top-ranking li:focus-visible { background: rgba(89, 216, 232, .06); }
+.top-ranking li em { flex: 0 0 1.4rem; color: var(--muted); font-style: normal; font-variant-numeric: tabular-nums; }
+.top-ranking li strong { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.top-ranking li span { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--muted); font-size: .72rem; text-overflow: ellipsis; }
+.top-ranking li output { flex: 0 0 auto; color: var(--green); font-weight: 800; font-variant-numeric: tabular-nums; }
+.top-ranking li:first-child output { color: var(--cyan); }
 .lane-card { padding: .8rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--surface-soft); }
 .lane-card > div:first-child { display: flex; justify-content: space-between; gap: .5rem; }
 .lane-card strong { text-transform: capitalize; }
@@ -141,7 +159,16 @@ td strong { display: block; font-size: .82rem; } td small { color: var(--muted);
 .hypothesis-panel p:last-child { margin-bottom: 0; }
 .detail-table tbody tr[data-view], .attention-item[data-view], .hpo-item[data-view] { cursor: pointer; }
 .detail-table tbody tr[data-view]:hover { background: rgba(89, 216, 232, .06); }
-.detail-table td { max-width: 18rem; overflow-wrap: anywhere; }
+.detail-table td { max-width: 24rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.detail-table td strong { display: inline; }
+.detail-table td strong + small::before { content: " · "; }
+.row-expand { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 1.35rem; height: 1.35rem; margin-right: .5rem; padding: 0; border: 1px solid var(--line-strong); border-radius: .35rem; background: var(--surface-raised); color: var(--muted); font: inherit; font-size: .78rem; font-weight: 800; line-height: 1; vertical-align: middle; }
+.row-expand:hover, .row-expand:focus-visible { border-color: var(--cyan); color: var(--cyan); }
+.row-expand:focus-visible { outline: 3px solid rgba(89, 216, 232, .35); outline-offset: 2px; }
+.row-expand[aria-expanded="true"] { border-color: var(--cyan); color: var(--cyan); }
+tr.row-detail > td { max-width: none; overflow: hidden; white-space: normal; overflow-wrap: anywhere; background: rgba(15, 21, 28, .75); color: var(--muted); font-size: .74rem; }
+tr.row-detail div { display: flex; gap: .55rem; padding: .12rem 0; }
+tr.row-detail div strong { flex: 0 0 7.5rem; color: var(--text); font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; }
 .resolution-form { display: grid; gap: .65rem; max-width: 42rem; padding: .9rem; border: 1px solid var(--line); border-radius: .6rem; background: var(--surface-soft); }
 .resolution-form label { display: grid; gap: .3rem; color: var(--muted); font-size: .75rem; font-weight: 800; }
 .resolution-form textarea { min-height: 5rem; resize: vertical; }
@@ -151,6 +178,9 @@ td strong { display: block; font-size: .82rem; } td small { color: var(--muted);
 .timeline-list li:last-child { border-bottom: 0; }
 .timeline-list span { color: var(--muted); text-align: right; }
 .json-view { max-height: 28rem; overflow: auto; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: var(--surface-soft); color: var(--muted); font-size: .72rem; white-space: pre-wrap; }
+.json-details { margin-top: 1rem; }
+.json-details summary { cursor: pointer; color: var(--muted); font-size: .74rem; font-weight: 800; }
+.json-details[open] summary { color: var(--cyan); }
 .command-output { max-height: 12rem; min-height: 1.4rem; margin: .85rem 0 0; overflow: auto; color: var(--muted); font-size: .78rem; white-space: pre-wrap; }
 .page-footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem clamp(1rem, 4vw, 4rem) 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .72rem; }
 .empty-state { padding: 1.25rem .7rem; color: var(--muted); font-size: .8rem; text-align: center; }

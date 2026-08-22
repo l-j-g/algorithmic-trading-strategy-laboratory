@@ -594,7 +594,7 @@ def build_parser() -> AtsLabArgumentParser:
     supervisor.add_argument("--max-rounds", type=int)
     dashboard = sub.add_parser("dashboard", help="Serve the local read-only operator dashboard.")
     dashboard.add_argument("--host", default="127.0.0.1")
-    dashboard.add_argument("--port", type=int, default=8765)
+    dashboard.add_argument("--port", type=int, default=8799)
     backend = sub.add_parser(
         "backend", help="Serve the local read-only backend API for CLI/web clients."
     )

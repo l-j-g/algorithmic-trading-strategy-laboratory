@@ -1,5 +1,9 @@
 # Operator dashboard
 
+> **Deprecated.** The Control Room (`ats-lab web`, <http://127.0.0.1:8765>)
+> is the primary operator surface. This server-rendered dashboard remains
+> available and now defaults to port 8799 to avoid conflicting with it.
+
 The local dashboard shows the SQLite laboratory database: active work, running
 and blocked counts, research candidates, canonical normalized evidence and
 dashboard links. Pages and JSON GET endpoints are read-only; the only state
@@ -11,10 +15,10 @@ the tab is visible; the header controls can pause it or select 15/30 seconds.
 Start it from the repository root:
 
 ```bash
-ats-lab dashboard --host 127.0.0.1 --port 8765
+ats-lab dashboard --host 127.0.0.1 --port 8799
 ```
 
-Open <http://127.0.0.1:8765>. Use a different database or port when needed:
+Open <http://127.0.0.1:8799>. Use a different database or port when needed:
 
 ```bash
 python3 -m ats_lab.dashboard \

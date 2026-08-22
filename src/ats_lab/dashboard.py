@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .console import distinct_candidate_evidence
 from .database import WorkflowDatabase
+from .humanize import human_time
 from .status import hpo_detail_snapshot, hpo_lifecycle_snapshot
 
 
@@ -635,7 +636,7 @@ def _render_hpo_table(rows: list[dict]) -> str:
             "<details><summary>standardized</summary><dl>"
             + "".join(
                 f"<dt>{html.escape(label)}</dt>"
-                f"<dd>{html.escape(str(row.get(key) or '—'))}</dd>"
+                f"<dd>{html.escape(human_time(row.get(key)) if key.endswith('_at') else str(row.get(key) or '—'))}</dd>"
                 for label, key in (
                     ("parent experiment", "parent_experiment_id"),
                     ("parent job", "parent_work_item_id"),
@@ -750,8 +751,8 @@ def _render_hpo_detail(detail: Mapping[str, Any]) -> str:
             f'<td>{html.escape(str(row.get("state") or "—"))}</td>'
             f'<td>{html.escape(_duration_text(row.get("duration_seconds")))}</td>'
             f'<td>{html.escape(str(row.get("outcome") or "—"))}</td>'
-            f'<td>{html.escape(str(row.get("started_at") or "—"))}</td>'
-            f'<td>{html.escape(str(row.get("completed_at") or "—"))}</td>'
+            f'<td>{html.escape(human_time(row.get("started_at")))}</td>'
+            f'<td>{html.escape(human_time(row.get("completed_at")))}</td>'
             "</tr>"
         )
     timing_table = (
@@ -773,7 +774,7 @@ def _render_hpo_detail(detail: Mapping[str, Any]) -> str:
     )
     study_metadata = "".join(
         f"<dt>{html.escape(label)}</dt>"
-        f"<dd>{html.escape(str(study.get(key) or '—'))}</dd>"
+        f"<dd>{html.escape(human_time(study.get(key)) if key.endswith('_at') else str(study.get(key) or '—'))}</dd>"
         for label, key in (
             ("study", "study_id"), ("name", "name"),
             ("objective", "objective_name"), ("direction", "direction"),
@@ -919,7 +920,9 @@ def _render_evidence_details(row: Mapping[str, Any]) -> str:
     items = []
     for label, key, suffix in fields:
         value = row.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if key.endswith("_at"):
+            shown = human_time(value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
             shown = f"{value:,.2f}{suffix}"
         else:
             shown = "—" if value in (None, "") else f"{value}{suffix}"
@@ -1228,7 +1231,7 @@ def make_handler(
     return DashboardHandler
 
 
-def serve(database: WorkflowDatabase, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(database: WorkflowDatabase, host: str = "127.0.0.1", port: int = 8799) -> None:
     database.initialize()
     server = ThreadingHTTPServer(
         (host, port),
@@ -1251,7 +1254,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, default=Path(".ats-lab/laboratory.sqlite3"))
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=8799)
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
@@ -1394,6 +1397,13 @@ DASHBOARD_JS = r"""
     const metric = document.querySelector('[name=metric]').value.replaceAll('_', ' ');
     const number = (value, suffix = '') => value == null ? '—' : `<span class="${value > 0 ? 'positive' : value < 0 ? 'negative' : ''}">${Number(value).toFixed(2)}${suffix}</span>`;
     const shown = value => value == null || value === '' ? '—' : escapeHtml(value);
+    const fmtTime = value => {
+      if (value == null || value === '') return '—';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return escapeHtml(value);
+      const pad = n => String(n).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    };
     const details = row => {
       const fields = [
         ['experiment',row.experiment_id],['run',row.run_id],['session',row.session_id],
@@ -1403,7 +1413,7 @@ DASHBOARD_JS = r"""
         ['risk / trade',row.risk_per_trade_percentage],
         ['optimizer objective',row.optimizer_objective],
         ['cost stress',row.cost_stress_status],
-        ['significance p',row.significance_p_value],['completed',row.completed_at],
+        ['significance p',row.significance_p_value],['completed',fmtTime(row.completed_at)],
       ];
       return `<details><summary>standardized</summary><dl>${fields.map(([label,value]) => `<dt>${escapeHtml(label)}</dt><dd>${shown(value)}</dd>`).join('')}</dl></details>`;
     };

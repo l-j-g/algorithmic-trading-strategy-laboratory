@@ -712,15 +712,21 @@ Canonical diagram source: [`docs/diagrams/deployment.md`](docs/diagrams/deployme
 
 ## Dashboard
 
-Start the web dashboard on a separate terminal (loopback only — it has no
-authentication):
+Start the Control Room web interface on a separate terminal (loopback only —
+it has no authentication):
 
 ```bash
-ats-lab dashboard --host 127.0.0.1 --port 8765
+ats-lab web --host 127.0.0.1 --port 8765
 ```
 
-Open <http://127.0.0.1:8765>. Jesse's own dashboard stays available at
+Open <http://127.0.0.1:8765>. The Overview view is the command centre: queue
+and HPO lanes, operator attention items, the live audit-activity feed, and
+supervisor controls. Jesse's own dashboard stays available at
 <http://127.0.0.1:9000> for inspecting individual backtest sessions.
+
+The legacy server-rendered operator dashboard (`ats-lab dashboard`) is
+deprecated. It now defaults to port 8799 so it can run alongside the Control
+Room; use the Control Room for daily operations.
 
 ## Reference documentation
 

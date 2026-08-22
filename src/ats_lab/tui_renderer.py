@@ -4,6 +4,7 @@ from __future__ import annotations
 import curses
 from typing import Any, Protocol
 
+from .humanize import human_time
 from .terminal_table import FittedTable
 from .tui_tables import (
     ACTIVE_COLUMNS,
@@ -99,7 +100,7 @@ def _header(model: dict[str, Any], state: TuiState, width: int) -> list[TuiLine]
         (progress, 12),
         (f"supervisor:{runtime.get('phase') or 'not_reported'}", 24),
         (f"control:{control.get('desired_state') or 'running'}", 22),
-        (snapshot.get("checked_at"), max(0, width - 71)),
+        (human_time(snapshot.get("checked_at")), max(0, width - 71)),
     ], width)
     tabs = "  ".join(
         f"[{view.value + 1} {view.label}]" if view == state.view

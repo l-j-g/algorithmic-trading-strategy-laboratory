@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Callable, Iterable, Mapping, TextIO
 
 from .database import WorkflowDatabase
+from .humanize import human_time
 from .status import operator_status
 from .terminal_table import Alignment, FittedTable, TableColumn
 
@@ -302,7 +303,7 @@ def _render_live_monitor(
         if timing else "idle"
     )
     width = width or shutil.get_terminal_size((120, 20)).columns
-    title = _fit_line(f"ATS LAB LIVE  {snapshot['checked_at']}", width)
+    title = _fit_line(f"ATS LAB LIVE  {human_time(snapshot['checked_at'])}", width)
     status = _fit_line(
         f"STATUS {progress}  control={desired_value}  stage={phase_value} "
         f"heartbeat={_age(runtime.get('heartbeat_at'))}", width,
@@ -372,7 +373,7 @@ def render_monitor(
         "healthy" if snapshot["healthy"] else "attention"
     )).upper()
     lines = [
-        f"ATS LAB  {snapshot['checked_at']}",
+        f"ATS LAB  {human_time(snapshot['checked_at'])}",
         (
             f"CONTROL {control['desired_state']}  "
             f"SUPERVISOR {runtime['phase'] if runtime else 'not_reported'}  "
