@@ -24,6 +24,25 @@ Gate behavior:
 - no result: significance remains the executable job.
 - `exit_only`, `sizing_only`, `risk_only`, or `refactor`: significance is skipped.
 
+Two controls apply on top of these raw-p gates:
+
+- **First test wins.** For one canonical entry fingerprint, the earliest
+  finished significance run is binding. Later re-tests are stored and visible
+  but reported as superseded; they never flip baseline readiness.
+- **Benjamini-Hochberg FDR per synthesis cohort.** All entry-significance
+  p-values in one cohort form one hypothesis family, evaluated once every
+  member has a binding finished test at `resources.significance_fdr_level`
+  (default 0.05). A baseline releases only when its raw p < 0.05 AND the
+  procedure rejects it; raw-significant but non-rejected members stay
+  `scheduled` (`significance_withheld_bh_fdr`). Rank, threshold, family size,
+  and rejection flag persist on the dependent work item as `gate_findings`.
+  Cohorts with unfinished members wait (`awaiting_cohort_fdr`). Tests outside
+  a synthesis cohort keep the single-test raw-p gates above.
+
+Inconclusive results never archive anything: dependent baselines stay
+`scheduled` pending more evidence, and archiving remains a manual operator
+action for that case.
+
 Example input:
 
 ```json
@@ -84,6 +103,7 @@ child-ID collisions.
 Executor turn returns run evidence. Separate analyzer turn evaluates completed
 batch. Separate synthesis turn replenishes only at low watermark, so SQLite
 serves as both execution history and iterative learning repository. Significance
-passes release their baseline locally; inconclusive or failed gates archive the
-dependent baseline without another execution turn. Invalid synthesis output
-fails its cohort and respects configured retry cooldown.
+passes release their baseline locally; inconclusive gates keep it scheduled
+pending more evidence, and only failed gates archive it — all without another
+execution turn. Invalid synthesis output fails its cohort and respects the
+configured retry cooldown.
