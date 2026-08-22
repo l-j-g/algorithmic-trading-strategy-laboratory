@@ -8,15 +8,23 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .resources import (
+    ANALYZER_TIMEOUT_MAX_SECONDS,
+    ANALYZER_TIMEOUT_MIN_SECONDS,
+)
+
 
 DEFAULT_CONFIG = Path(".ats-lab/config.toml")
 MAX_REQUEST_BYTES = 1_000_000
+MAX_PERSISTED_DETAIL_CHARS = 1000
+_TELEMETRY_LOCK = threading.Lock()
 REASONING_LEVELS = frozenset({
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 })
@@ -233,18 +241,18 @@ def _model_for_task(
 
 def build_command(
     config: AgentLauncherConfig,
-    prompt: str,
     *,
     task_type: str | None = None,
     usage_path: Path | None = None,
 ) -> list[str]:
+    """Build argv for one agent turn; the prompt travels over stdin."""
     executable = shutil.which(config.executable)
     if executable is None:
         raise FileNotFoundError(f"Agent executable not found: {config.executable}")
     command = [executable]
     if config.profile:
         command.extend(("-p", config.profile))
-    command.extend(("--oneshot", prompt))
+    command.extend(("--oneshot", "-"))
     model, provider = _model_for_task(config, task_type)
     if model:
         command.extend(("--model", model))
@@ -321,11 +329,12 @@ def _write_transport_telemetry(
     }
     try:
         config.telemetry_path.parent.mkdir(parents=True, exist_ok=True)
-        with config.telemetry_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(
-                record, separators=(",", ":"), sort_keys=True,
-            ))
-            handle.write("\n")
+        with _TELEMETRY_LOCK:
+            with config.telemetry_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(
+                    record, separators=(",", ":"), sort_keys=True,
+                ))
+                handle.write("\n")
     except OSError:
         pass
 
@@ -369,6 +378,7 @@ def _run_bounded_process(
     cwd: Path,
     environment: Mapping[str, str],
     timeout: float,
+    input: str,
 ) -> subprocess.CompletedProcess[str]:
     """Run Agent in a killable process group with a hard timeout."""
     process = subprocess.Popen(
@@ -376,12 +386,13 @@ def _run_bounded_process(
         cwd=cwd,
         env=dict(environment),
         text=True,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -424,14 +435,22 @@ def launch(
     if request.get("task_type") == "prepare_strategies":
         timeout = min(timeout, config.preparation_timeout_seconds)
     if request.get("task_type") in {"analyze_batch", "analyze_hpo"}:
-        requested_timeout = float(
-            request.get("analyzer_timeout_seconds", 900)
-        )
-        if not 600 <= requested_timeout <= 900:
+        requested_timeout = float(request.get(
+            "analyzer_timeout_seconds", ANALYZER_TIMEOUT_MAX_SECONDS,
+        ))
+        if not (
+            ANALYZER_TIMEOUT_MIN_SECONDS
+            <= requested_timeout
+            <= ANALYZER_TIMEOUT_MAX_SECONDS
+        ):
             return {
                 "outcome": "retry",
                 "blocker_code": "invalid_analyzer_timeout",
-                "detail": "Analyzer timeout must be between 600 and 900 seconds",
+                "detail": (
+                    "Analyzer timeout must be between "
+                    f"{ANALYZER_TIMEOUT_MIN_SECONDS} and "
+                    f"{ANALYZER_TIMEOUT_MAX_SECONDS} seconds"
+                ),
             }
         timeout = min(timeout, requested_timeout)
     usage_handle = tempfile.NamedTemporaryFile(
@@ -442,9 +461,7 @@ def launch(
     completed = None
     failure = None
     try:
-        command = build_command(
-            config, prompt, task_type=task_type, usage_path=usage_path,
-        )
+        command = build_command(config, task_type=task_type, usage_path=usage_path)
         launch_environment = dict(environment or os.environ)
         if runner is subprocess.run:
             completed = _run_bounded_process(
@@ -452,6 +469,7 @@ def launch(
                 cwd=config.repository,
                 environment=launch_environment,
                 timeout=timeout,
+                input=prompt,
             )
         else:
             completed = runner(
@@ -462,6 +480,7 @@ def launch(
                 capture_output=True,
                 check=False,
                 timeout=timeout,
+                input=prompt,
             )
     except subprocess.TimeoutExpired:
         failure = {
@@ -491,7 +510,11 @@ def launch(
     assert completed is not None
     if completed.returncode:
         detail = completed.stderr.strip() or f"Agent exited {completed.returncode}"
-        return {"outcome": "retry", "blocker_code": "executor_failed", "detail": detail}
+        return {
+            "outcome": "retry",
+            "blocker_code": "executor_failed",
+            "detail": detail[:MAX_PERSISTED_DETAIL_CHARS],
+        }
     try:
         result = _decode_first_json_object(completed.stdout)
     except json.JSONDecodeError as error:

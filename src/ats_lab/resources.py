@@ -7,6 +7,10 @@ from datetime import date, timedelta
 from pathlib import Path
 
 
+ANALYZER_TIMEOUT_MIN_SECONDS = 600
+ANALYZER_TIMEOUT_MAX_SECONDS = 900
+
+
 @dataclass(frozen=True)
 class EvaluationWindowPolicy:
     """Configurable window defaults resolved into explicit route dates.
@@ -150,9 +154,15 @@ class ResourcePolicy:
             )
         if self.analysis_parallelism > 4:
             raise ValueError("resources.analysis_parallelism must be at most 4")
-        if not 600 <= self.analyzer_timeout_seconds <= 900:
+        if not (
+            ANALYZER_TIMEOUT_MIN_SECONDS
+            <= self.analyzer_timeout_seconds
+            <= ANALYZER_TIMEOUT_MAX_SECONDS
+        ):
             raise ValueError(
-                "resources.analyzer_timeout_seconds must be between 600 and 900"
+                "resources.analyzer_timeout_seconds must be between "
+                f"{ANALYZER_TIMEOUT_MIN_SECONDS} and "
+                f"{ANALYZER_TIMEOUT_MAX_SECONDS}"
             )
         if self.analyzer_retry_limit != 1:
             raise ValueError("resources.analyzer_retry_limit must equal 1")

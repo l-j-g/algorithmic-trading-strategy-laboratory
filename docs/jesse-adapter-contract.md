@@ -9,8 +9,8 @@ metrics, terminal status, and structured error evidence.
 
 ## Session configuration snapshot
 
-Every backtest, significance, and Monte Carlo draft receives an explicit
-session exchange snapshot:
+Every draft created through `ats_lab.direct_mcp_executor` — backtest and
+significance operations — receives an explicit session exchange snapshot:
 
 ```json
 {

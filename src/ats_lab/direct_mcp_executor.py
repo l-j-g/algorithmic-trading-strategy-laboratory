@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 import tomllib
@@ -245,6 +246,17 @@ def classify_jesse_session(
 
 def _text(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
+
+
+def _json_safe(value: Any) -> Any:
+    """Replace non-finite floats with null so json.dumps stays strict JSON."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def _route_violations(routes: Any) -> list[str]:
@@ -594,13 +606,6 @@ class DashboardClient:
             raise McpError(f"dashboard API {path} transport failed: {error}") from error
         return json.loads(body) if body.strip() else {}
 
-    def get_config(self) -> dict[str, Any]:
-        response = self.post("/config/get", {"current_config": {}})
-        config = response.get("data", {}).get("data") if isinstance(response, dict) else None
-        if not isinstance(config, dict) or not isinstance(config.get("backtest"), dict):
-            raise McpError("dashboard config response missing backtest config")
-        return config
-
     def get_session(self, session_id: str) -> dict[str, Any]:
         response = self.post(f"/backtest/sessions/{session_id}", {})
         return DirectMcpDispatcher._session(response)
@@ -611,13 +616,12 @@ class DashboardClient:
         form = state.get("form")
         if not isinstance(form, dict):
             raise McpError(f"dashboard session {session_id} missing form state")
-        config = self.get_config()["backtest"]
         payload = {
             "id": session_id,
             "exchange": form["exchange"],
             "routes": form["routes"],
             "data_routes": form.get("data_routes", []),
-            "config": config,
+            "config": form.get("config", {}),
             "balance": form.get("balance"),
             "fee": form.get("fee"),
             "futures_leverage": form.get("futures_leverage"),
@@ -672,8 +676,13 @@ class DirectMcpDispatcher:
                 outcome="retry", blocker_code="invalid_direct_batch",
                 detail="execute_batch requires requests array",
             )
-        direct = [item for item in requests if self._mechanical_backtest(item)]
-        delegated = [item for item in requests if item not in direct]
+        direct: list[dict[str, Any]] = []
+        delegated: list[dict[str, Any]] = []
+        for item in requests:
+            if self._mechanical_backtest(item):
+                direct.append(item)
+            else:
+                delegated.append(item)
         results: list[dict[str, Any]] = []
         contract_valid: list[dict[str, Any]] = []
         for item in direct:
@@ -794,12 +803,9 @@ class DirectMcpDispatcher:
                         "blocker_code": delegated_result.blocker_code,
                         "detail": delegated_result.detail,
                     })
-        overall = "finished" if all(
-            item.get("outcome") in {"finished", "blocked", "retry"} for item in results
-        ) else "retry"
         return DispatchResult(
-            outcome=overall,
-            payload={"outcome": overall, "results": results},
+            outcome="finished",
+            payload={"outcome": "finished", "results": results},
         )
 
     def _strategy_readiness(
@@ -884,9 +890,15 @@ class DirectMcpDispatcher:
                 session_id, replacement, created_now = self._create_or_resume_session(
                     client, request, plan,
                 )
-                self._save_checkpoint(
-                    work_item_id, experiment_id, session_id, fingerprint, "draft",
-                )
+                try:
+                    self._save_checkpoint(
+                        work_item_id, experiment_id, session_id, fingerprint, "draft",
+                    )
+                except Exception:
+                    self._record_orphaned_draft(
+                        work_item_id, experiment_id, session_id,
+                    )
+                    raise
                 if replacement:
                     with self.database.connect() as connection:
                         connection.execute(
@@ -939,7 +951,7 @@ class DirectMcpDispatcher:
                         session,
                     )
                 if classification.state == "terminal_success":
-                    metrics = _metrics(session, _results(session))
+                    metrics = _json_safe(_metrics(session, _results(session)))
                     if not isinstance(metrics, dict):
                         return self._record_and_return(
                             client, work_item_id, polls, "retry",
@@ -1136,15 +1148,13 @@ class DirectMcpDispatcher:
         state = session.get("state") if isinstance(session.get("state"), dict) else {}
         return str(session.get("status") or state.get("status") or "unknown")
 
-    def _create(
-        self, client: McpClient, request: dict[str, Any], plan: ExecutionPlan,
-    ) -> str:
-        if plan.operation == "significance":
-            return self._create_significance(client, request)
-        experiment = request["experiment"]
+    @staticmethod
+    def _shared_route_window(
+        experiment: dict[str, Any], label: str,
+    ) -> tuple[str, str, str, list[dict[str, Any]]]:
         routes = experiment.get("routes")
         if not isinstance(routes, list) or not routes:
-            raise ValueError("direct backtest requires experiment.routes")
+            raise ValueError(f"direct {label} requires experiment.routes")
         windows = {
             (route.get("start_date"), route.get("finish_date"))
             for route in routes if isinstance(route, dict)
@@ -1154,7 +1164,7 @@ class DirectMcpDispatcher:
         }
         if len(windows) != 1 or len(exchanges) != 1:
             raise ValueError(
-                "direct aggregate backtest requires one shared exchange/date window"
+                f"direct {label} requires one shared exchange/date window"
             )
         start_date, finish_date = next(iter(windows))
         strategy = experiment.get("strategy_name")
@@ -1162,15 +1172,25 @@ class DirectMcpDispatcher:
             "exchange": route["exchange"], "strategy": strategy,
             "symbol": route["symbol"], "timeframe": route["timeframe"],
         } for route in routes]
+        return next(iter(exchanges)), start_date, finish_date, mcp_routes
+
+    def _create(
+        self, client: McpClient, request: dict[str, Any], plan: ExecutionPlan,
+    ) -> str:
+        if plan.operation == "significance":
+            return self._create_significance(client, request)
+        exchange, start_date, finish_date, mcp_routes = (
+            self._shared_route_window(request["experiment"], "backtest")
+        )
         work_item = request.get("work_item", {})
-        experiment_data_routes = experiment.get("data_routes", [])
+        experiment_data_routes = request["experiment"].get("data_routes", [])
         work_data_routes = work_item.get("data_routes", [])
         data_routes = work_data_routes or experiment_data_routes or []
         if not isinstance(data_routes, list):
             raise ValueError("data_routes must be a list")
-        session_config = self._session_exchange_config(experiment)
+        session_config = self._session_exchange_config(request["experiment"])
         draft = client.call_tool("create_backtest_draft", {
-            "exchange": next(iter(exchanges)),
+            "exchange": exchange,
             "routes": json.dumps(mcp_routes, separators=(",", ":")),
             "data_routes": json.dumps(data_routes, separators=(",", ":")),
             "start_date": start_date, "finish_date": finish_date,
@@ -1189,27 +1209,9 @@ class DirectMcpDispatcher:
         return str(session_id)
 
     def _create_significance(self, client: McpClient, request: dict[str, Any]) -> str:
-        experiment = request["experiment"]
-        routes = experiment.get("routes")
-        if not isinstance(routes, list) or not routes:
-            raise ValueError("direct significance test requires experiment.routes")
-        windows = {
-            (route.get("start_date"), route.get("finish_date"))
-            for route in routes if isinstance(route, dict)
-        }
-        exchanges = {
-            route.get("exchange") for route in routes if isinstance(route, dict)
-        }
-        if len(windows) != 1 or len(exchanges) != 1:
-            raise ValueError(
-                "direct significance test requires one shared exchange/date window"
-            )
-        start_date, finish_date = next(iter(windows))
-        strategy = experiment.get("strategy_name")
-        mcp_routes = [{
-            "exchange": route["exchange"], "strategy": strategy,
-            "symbol": route["symbol"], "timeframe": route["timeframe"],
-        } for route in routes]
+        exchange, start_date, finish_date, mcp_routes = (
+            self._shared_route_window(request["experiment"], "significance test")
+        )
         parameters = request.get("work_item", {}).get("parameters") or {}
         n_simulations = parameters.get("n_simulations")
         if n_simulations is None:
@@ -1217,7 +1219,7 @@ class DirectMcpDispatcher:
                 "significance work item requires parameters.n_simulations"
             )
         payload: dict[str, Any] = {
-            "exchange": next(iter(exchanges)),
+            "exchange": exchange,
             "routes": json.dumps(mcp_routes, separators=(",", ":")),
             "data_routes": "[]",
             "start_date": start_date, "finish_date": finish_date,
@@ -1225,7 +1227,7 @@ class DirectMcpDispatcher:
             "debug_mode": False, "export_csv": False, "export_json": False,
             "export_chart": True, "export_tradingview": False,
             "fast_mode": False, "benchmark": True,
-            **self._session_exchange_config(experiment),
+            **self._session_exchange_config(request["experiment"]),
             "title": f"ATS Lab significance {request['work_item_id']}",
             "description": "ATS Lab deterministic significance-test execution.",
         }
@@ -1499,7 +1501,7 @@ class DirectMcpDispatcher:
         result: dict[str, Any],
     ) -> None:
         response_bytes = len(json.dumps(
-            result, separators=(",", ":"), sort_keys=True,
+            _json_safe(result), separators=(",", ":"), sort_keys=True,
         ).encode())
         with self.database.connect() as connection:
             connection.execute(
@@ -1513,6 +1515,29 @@ class DirectMcpDispatcher:
                     polls, utc_now(),
                 ),
             )
+
+    def _record_orphaned_draft(
+        self, work_item_id: str, experiment_id: str, session_id: str,
+    ) -> None:
+        """Audit a Jesse draft whose local checkpoint failed to persist.
+
+        The Jesse tool surface exposes no draft-cancel operation, so the
+        orphaned session is recorded for reconciliation and the next bounded
+        dispatch creates a fresh draft.
+        """
+        try:
+            with self.database.connect() as connection:
+                connection.execute(
+                    """INSERT INTO events(aggregate_type,aggregate_id,event_type,
+                           payload_json,occurred_at) VALUES(
+                           'work_item',?,'direct_execution_draft_orphaned',?,?)""",
+                    (work_item_id, json.dumps({
+                        "experiment_id": experiment_id,
+                        "session_id": session_id,
+                    }, sort_keys=True), utc_now()),
+                )
+        except Exception:
+            pass
 
     def _checkpoint(self, work_item_id: str) -> dict[str, Any] | None:
         rows = self.database.rows(
@@ -1660,7 +1685,7 @@ class DirectMcpDispatcher:
                        error_text=excluded.error_text,updated_at=excluded.updated_at""",
                 (
                     work_item_id, experiment_id, session_id, fingerprint, state,
-                    json.dumps(metrics, separators=(",", ":"), sort_keys=True)
+                    json.dumps(_json_safe(metrics), separators=(",", ":"), sort_keys=True)
                     if metrics is not None else None,
                     error, now, now,
                 ),

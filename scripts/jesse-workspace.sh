@@ -61,7 +61,10 @@ repo_summary() {
     printf '%-10s missing  %s\n' "$name" "$path"
     return
   fi
-  require_git_repo "$path"
+  if [[ ! -d "$path/.git" && ! -f "$path/.git" ]]; then
+    printf '%-10s %-7s %-12s %-16s %s\n' "$name" "not-git" "-" "-" "$path"
+    return
+  fi
   local branch commit state
   branch="$(git -C "$path" branch --show-current)"
   commit="$(git -C "$path" rev-parse --short=12 HEAD)"
@@ -171,15 +174,16 @@ stack_up() {
   esac
   local tag
   tag="$(image_tag)"
-  docker image inspect "$tag" >/dev/null 2>&1 || image_build --no-update >/dev/null
+  docker image inspect "$tag" >/dev/null 2>&1 || image_build --no-update
   JESSE_IMAGE="$tag" stack_compose up -d
   echo "Jesse stack running from $tag"
 }
 
 stack_down() {
-  ensure_upstream_repo
-  local tag
-  tag="$(image_tag)"
+  # Stopping the stack must not require the upstream checkout or an image
+  # matching current HEAD; compose only needs a resolvable JESSE_IMAGE value.
+  # image_build always leaves the moving alias tag behind, so prefer it.
+  local tag="${JESSE_IMAGE:-$image_repository:upstream}"
   JESSE_IMAGE="$tag" stack_compose down
 }
 
@@ -200,8 +204,8 @@ worktree_create() {
   git -C "$script_root" show-ref --verify --quiet "refs/heads/$branch" && die "ATS branch exists: $branch"
   git -C "$research_repo" show-ref --verify --quiet "refs/heads/$branch" && die "Jesse branch exists: $branch"
   mkdir -p "$(dirname "$ats_path")" "$(dirname "$jesse_path")"
-  git -C "$script_root" worktree add -b "$branch" "$ats_path" "$base_ref"
-  if ! git -C "$research_repo" worktree add -b "$branch" "$jesse_path" HEAD; then
+  git -C "$script_root" worktree add -b "$branch" -- "$ats_path" "$base_ref"
+  if ! git -C "$research_repo" worktree add -b "$branch" -- "$jesse_path" HEAD; then
     git -C "$script_root" worktree remove "$ats_path"
     git -C "$script_root" branch -D "$branch"
     die "Jesse worktree creation failed; ATS worktree rolled back"
@@ -300,10 +304,10 @@ status() {
     runtime_provenance
   fi
   echo "ATS worktrees:"
-  git -C "$script_root" worktree list --porcelain | awk '/^worktree / {print "  " $2}'
+  git -C "$script_root" worktree list --porcelain | sed -n 's/^worktree /  /p'
   echo "Jesse worktrees:"
   if [[ -d "$research_repo/.git" || -f "$research_repo/.git" ]]; then
-    git -C "$research_repo" worktree list --porcelain | awk '/^worktree / {print "  " $2}'
+    git -C "$research_repo" worktree list --porcelain | sed -n 's/^worktree /  /p'
   fi
 }
 
