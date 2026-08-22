@@ -11,9 +11,8 @@ Status values: `open` → `in_progress` → `resolved` (or `wontfix` with reason
 
 ## Resolution summary (2026-08-22)
 
-All issues are resolved on `main` except RVW-013 (god-class split — approved
-to run after the fixes land; it is next). 450 tests pass, up from 344 at
-review time. Highlights:
+All issues are resolved on `main`. 453 tests pass, up from 344 at review
+time. Highlights:
 
 - Data-layer cluster (RVW-008..012): guarded queue upserts, provenance-clean
   evidence normalization, append-only verdict history (`evaluation_history`
@@ -51,7 +50,7 @@ review time. Highlights:
 | [RVW-010](#rvw-010) | major | data layer | Batch finalization selects work item by recency, not identity | resolved |
 | [RVW-011](#rvw-011) | major | data layer | Evaluations delete-before-insert destroys verdict history | resolved |
 | [RVW-012](#rvw-012) | major | data layer | Ad-hoc migration strategy can drift fresh vs migrated DBs | resolved |
-| [RVW-013](#rvw-013) | major | data layer | `WorkflowDatabase` is a ~3,000-line god class | open (next) |
+| [RVW-013](#rvw-013) | major | data layer | `WorkflowDatabase` is a ~3,000-line god class | resolved |
 | [RVW-014](#rvw-014) | major | execution | Replacement-reservation crash leaves permanent wedge state | resolved |
 | [RVW-015](#rvw-015) | major | execution | MCP client lacks JSON-RPC id correlation and session teardown | resolved |
 | [RVW-016](#rvw-016) | major | execution | Versioned JSON schemas are dead artifacts on the execution path | resolved |
@@ -237,7 +236,7 @@ source of truth; idempotent guarded DDL; document the concurrency contract.
 
 ### RVW-013
 
-**Severity:** major · **Area:** data layer · **Status:** open (next)
+**Severity:** major · **Area:** data layer · **Status:** resolved
 
 `WorkflowDatabase` accreted into a ~2,900-line god class spanning queue, HPO
 lifecycle, synthesis leasing, telemetry, and evidence. Worst offenders:
@@ -250,6 +249,11 @@ triplicated; `_remaining_chain_count` duplicated verbatim at `:2711-2743` vs
 Resolution direction: split along seams (queue, HPO lifecycle, synthesis
 leasing, evidence/telemetry) behind the existing public API so callers do not
 change.
+
+Resolution: extracted queue lifecycle, HPO lifecycle, synthesis leasing, and
+evidence persistence into mixins behind the unchanged `WorkflowDatabase` API.
+Shared schema and database helpers remain in dedicated support modules. Full
+suite passes with 453 tests.
 
 ### RVW-014
 
