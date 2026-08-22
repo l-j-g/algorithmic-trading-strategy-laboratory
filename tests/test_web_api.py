@@ -130,6 +130,54 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(evidence["experiment"]["id"], "EXP-1")
         self.assertEqual(evidence["evidence"][0]["hypothesis"], "Pullbacks continue after a controlled trend reclaim.")
 
+    def test_backtest_period_filters_bound_route_dates_inclusively(self) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                """INSERT INTO normalized_evidence(
+                       evidence_key,schema_version,experiment_id,strategy,
+                       lifecycle_stage,verdict,start_date,finish_date,
+                       trade_count,net_profit_percentage,updated_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "undated", 2, "EXP-1", "SafeStrategy", "baseline", "pass",
+                    None, None, 5, 1.0, "2026-08-11T00:00:00Z",
+                ),
+            )
+        api = ReadOnlyApi(self.database)
+
+        included = api.backtest_snapshot({"started_on_or_after": "2026-01-01"})
+        self.assertEqual([row["run_id"] for row in included["rows"]], ["RUN-1"])
+        self.assertEqual(included["filters"]["started_on_or_after"], "2026-01-01")
+
+        self.assertEqual(
+            [row["run_id"] for row in api.backtest_snapshot({"started_on_or_after": "2026-01-02"})["rows"]],
+            [],
+        )
+
+        included = api.backtest_snapshot({"finished_on_or_before": "2026-01-31"})
+        self.assertEqual([row["run_id"] for row in included["rows"]], ["RUN-1"])
+        self.assertEqual(included["filters"]["finished_on_or_before"], "2026-01-31")
+
+        self.assertEqual(
+            [row["run_id"] for row in api.backtest_snapshot({"finished_on_or_before": "2026-01-30"})["rows"]],
+            [],
+        )
+
+        window = api.backtest_snapshot({
+            "started_on_or_after": "2025-12-01",
+            "finished_on_or_before": "2026-02-28",
+        })
+        self.assertEqual([row["run_id"] for row in window["rows"]], ["RUN-1"])
+
+        undated = api.backtest_snapshot({"started_on_or_after": "2020-01-01"})
+        self.assertNotIn("undated", json.dumps(undated))
+
+        with self.assertRaises(ValueError):
+            api.backtest_snapshot({"started_on_or_after": "not-a-date"})
+        with self.assertRaises(ValueError):
+            api.backtest_snapshot({"finished_on_or_before": "2026-13-40"})
+
+
     def test_http_surface_is_get_only_and_returns_json_snapshots(self) -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.database))
         thread = threading.Thread(target=server.serve_forever, daemon=True)

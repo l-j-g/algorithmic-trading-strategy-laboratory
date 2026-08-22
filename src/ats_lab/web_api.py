@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import sqlite3
+from datetime import date
 from math import inf
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -303,6 +304,29 @@ class ReadOnlyApi:
             minimum_trades = max(0, min(int(params.get("minimum_trades", "0")), 1_000_000))
         except ValueError:
             minimum_trades = 0
+        period_bounds: dict[str, str] = {}
+        for key in ("started_on_or_after", "finished_on_or_before"):
+            raw = params.get(key, "").strip()
+            if not raw:
+                continue
+            try:
+                period_bounds[key] = date.fromisoformat(raw).isoformat()
+            except ValueError as error:
+                raise ValueError(f"{key} must be an ISO date (YYYY-MM-DD)") from error
+
+        def _within_period(row: dict[str, object]) -> bool:
+            start = str(row.get("start_date") or "")
+            if "started_on_or_after" in period_bounds and (
+                not start or start < period_bounds["started_on_or_after"]
+            ):
+                return False
+            finish = str(row.get("finish_date") or "")
+            if "finished_on_or_before" in period_bounds and (
+                not finish or finish > period_bounds["finished_on_or_before"]
+            ):
+                return False
+            return True
+
         searchable = (
             "strategy", "experiment_id", "run_id", "session_id", "finding", "next_action",
             "hypothesis", "test_type",
@@ -316,6 +340,8 @@ class ReadOnlyApi:
             if any(str(row.get(key) or "") != value for key, value in exact_filters.items()):
                 continue
             if minimum_trades and _as_int(row.get("trade_count")) < minimum_trades:
+                continue
+            if not _within_period(row):
                 continue
             filtered.append(row)
         sort = params.get("sort", "newest")
@@ -357,6 +383,8 @@ class ReadOnlyApi:
                 **exact_filters, "q": params.get("q", "").strip()[:200],
                 "strategy": params.get("strategy", "").strip(),
                 "minimum_trades": str(minimum_trades), "sort": sort,
+                "started_on_or_after": period_bounds.get("started_on_or_after", ""),
+                "finished_on_or_before": period_bounds.get("finished_on_or_before", ""),
             },
             "statistics": statistics,
             "options": self._backtest_options(rows),
