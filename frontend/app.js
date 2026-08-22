@@ -169,6 +169,44 @@
     return `<span class="status-pill" data-status="${statusClass(value)}">${escapeHtml(value || "unknown")}</span>`;
   }
 
+  const expandedRows = new Set();
+
+  function expandButton(key) {
+    const open = expandedRows.has(key);
+    return `<button class="row-expand" type="button" data-row-expand="${escapeHtml(key)}" aria-expanded="${open}" aria-label="Toggle row details">${open ? "−" : "+"}</button>`;
+  }
+
+  function detailRowHtml(key, entries, colspan) {
+    const body = entries
+      .filter(([, value]) => value !== null && value !== undefined && value !== "")
+      .map(([label, value]) => `<div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`)
+      .join("");
+    return `<tr class="row-detail" data-row-key="${escapeHtml(key)}" hidden><td colspan="${colspan}">${body || "<em>No extra detail recorded.</em>"}</td></tr>`;
+  }
+
+  function toggleRowDetail(button) {
+    const mainRow = button.closest("tr");
+    const detailRow = mainRow && mainRow.nextElementSibling;
+    if (!detailRow || !detailRow.classList.contains("row-detail")) return;
+    const open = !detailRow.hidden;
+    detailRow.hidden = open;
+    button.setAttribute("aria-expanded", String(!open));
+    button.textContent = open ? "+" : "−";
+    if (open) expandedRows.delete(button.dataset.rowExpand);
+    else expandedRows.add(button.dataset.rowExpand);
+  }
+
+  function restoreExpanded() {
+    document.querySelectorAll("[data-row-expand]").forEach((button) => {
+      if (!expandedRows.has(button.dataset.rowExpand)) return;
+      const detailRow = button.closest("tr")?.nextElementSibling;
+      if (!detailRow || !detailRow.classList.contains("row-detail")) return;
+      detailRow.hidden = false;
+      button.setAttribute("aria-expanded", "true");
+      button.textContent = "−";
+    });
+  }
+
   function formatTime(value, fallback = "—") {
     if (!value) return fallback;
     const date = new Date(value);
@@ -238,11 +276,23 @@
   }
 
   function queueRows(rows, empty = "No queue items returned.") {
-    return rows.length ? rows.map((item) => `<tr data-detail-work-item="${escapeHtml(item.id)}"><td><strong>${escapeHtml(item.id)}</strong><small>${escapeHtml(item.stage)}</small></td><td>${statusPill(item.state)}${item.canonical_state ? `<small title="Canonical SQLite state">DB: ${escapeHtml(item.canonical_state)}</small>` : ""}</td><td><strong>${escapeHtml(item.strategy)}</strong><small>${escapeHtml(item.route)}</small></td><td>${escapeHtml(item.priority ?? "—")}</td><td>${escapeHtml(item.state_detail || item.next_action)}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="5">${escapeHtml(empty)}</td></tr>`;
+    if (!rows.length) return `<tr><td class="empty-state" colspan="5">${escapeHtml(empty)}</td></tr>`;
+    return rows.map((item) => {
+      const key = `wi-${item.id}`;
+      const detail = detailRowHtml(key, [
+        ["Next action", item.state_detail || item.next_action],
+        ["Canonical DB state", item.canonical_state],
+        ["Route", item.route],
+        ["Priority", item.priority ?? null],
+        ["Work item", item.id],
+      ], 5);
+      return `<tr data-detail-work-item="${escapeHtml(item.id)}"><td>${expandButton(key)}<strong>${escapeHtml(item.id)}</strong><small>${escapeHtml(item.stage)}</small></td><td>${statusPill(item.state)}${item.canonical_state ? `<small title="Canonical SQLite state">DB: ${escapeHtml(item.canonical_state)}</small>` : ""}</td><td><strong>${escapeHtml(item.strategy)}</strong><small>${escapeHtml(item.route)}</small></td><td>${escapeHtml(item.priority ?? "—")}</td><td>${escapeHtml(item.state_detail || item.next_action)}</td></tr>${detail}`;
+    }).join("");
   }
 
   function renderQueue(snapshot) {
     $("#queue-table-body").innerHTML = queueRows(snapshot.queue.slice(0, 12));
+    restoreExpanded();
   }
 
   function hpoCards(studies) {
@@ -295,9 +345,11 @@
     const applyFilter = () => {
       const needle = $("#queue-filter").value.trim().toLowerCase();
       $("#detail-queue-body").innerHTML = queueRows(filtered.filter((row) => `${row.id} ${row.strategy} ${row.route}`.toLowerCase().includes(needle)));
+      restoreExpanded();
     };
     $("#queue-filter").addEventListener("input", applyFilter);
     $("[data-filter-queue]").addEventListener("click", applyFilter);
+    restoreExpanded();
   }
 
   function renderHpoView(studies) {
@@ -306,16 +358,44 @@
 
   function renderCandidatesView(rows) {
     const candidates = rows.filter((row) => ["paper_trade_candidate", "hpo_candidate", "candidate"].includes(String(row.verdict || "").toLowerCase()) || String(row.lifecycle_stage || "").toLowerCase() === "paper_trade");
-    const body = candidates.length ? candidates.map((row) => `<tr data-detail-evidence="${escapeHtml(row.run_id || "")}"><td><strong>${escapeHtml(row.strategy)}</strong><small>${escapeHtml(row.experiment_id)}</small></td><td>${statusPill(row.verdict || row.lifecycle_stage)}</td><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${escapeHtml(row.next_action || "Review evidence")}</td></tr>`).join("") : `<tr><td class="empty-state" colspan="5">No candidate evidence returned.</td></tr>`;
+    if (!candidates.length) {
+      $("#detail-view").innerHTML = `${detailHeader("Evidence lane", "Candidates", "Candidate rows remain provisional until train, out-of-sample, rolling, and promotion gates pass.")}<div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Strategy / experiment</th><th>Verdict</th><th>Route</th><th>Profit</th><th>Next action</th></tr></thead><tbody><tr><td class="empty-state" colspan="5">No candidate evidence returned.</td></tr></tbody></table></div></div>`;
+      return;
+    }
+    const body = candidates.map((row) => {
+      const key = `cand-${row.run_id || row.experiment_id}`;
+      const detail = detailRowHtml(key, [
+        ["Hypothesis", row.hypothesis],
+        ["Experiment", row.experiment_id],
+        ["Lifecycle stage", row.lifecycle_stage],
+        ["Sharpe", row.sharpe_ratio],
+        ["Trades", row.trade_count],
+        ["Next action", row.next_action],
+      ], 5);
+      return `<tr data-detail-evidence="${escapeHtml(row.run_id || "")}" tabindex="0"><td>${expandButton(key)}<strong>${escapeHtml(row.strategy)}</strong><small>${escapeHtml(row.experiment_id)}</small></td><td>${statusPill(row.verdict || row.lifecycle_stage)}</td><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${escapeHtml(row.next_action || "Review evidence")}</td></tr>${detail}`;
+    }).join("");
     $("#detail-view").innerHTML = `${detailHeader("Evidence lane", "Candidates", "Candidate rows remain provisional until train, out-of-sample, rolling, and promotion gates pass.")}<div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Strategy / experiment</th><th>Verdict</th><th>Route</th><th>Profit</th><th>Next action</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
+    restoreExpanded();
   }
 
   function renderAttentionView(items) {
-    const body = items.length ? items.map((item) => {
+    if (!items.length) {
+      $("#detail-view").innerHTML = `${detailHeader("Operator lane", "Needs attention", "Each item leads to a bounded inspection or resolution path.")}<div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Severity</th><th>Item</th><th>Detail</th><th>Next action</th></tr></thead><tbody><tr><td class="empty-state" colspan="4">No operator attention items.</td></tr></tbody></table></div></div>`;
+      return;
+    }
+    const body = items.map((item, index) => {
       const action = item.work_item_id ? ` data-detail-work-item="${escapeHtml(item.work_item_id)}"` : "";
-      return `<tr${action}><td>${statusPill(item.severity)}</td><td><strong>${escapeHtml(item.title || "Attention")}</strong><small>${escapeHtml(item.kind || "operator")}</small></td><td>${escapeHtml(item.detail || "—")}</td><td>${escapeHtml(item.next_action || item.resolution || "Review")}</td></tr>`;
-    }).join("") : `<tr><td class="empty-state" colspan="4">No operator attention items.</td></tr>`;
+      const key = `att-${item.work_item_id || item.id || index}`;
+      const detail = detailRowHtml(key, [
+        ["Kind", item.kind],
+        ["Work item", item.work_item_id],
+        ["Detail", item.detail],
+        ["Resolution", item.resolution],
+      ], 4);
+      return `<tr${action}><td>${expandButton(key)}${statusPill(item.severity)}</td><td><strong>${escapeHtml(item.title || "Attention")}</strong><small>${escapeHtml(item.kind || "operator")}</small></td><td>${escapeHtml(item.detail || "—")}</td><td>${escapeHtml(item.next_action || item.resolution || "Review")}</td></tr>${detail}`;
+    }).join("");
     $("#detail-view").innerHTML = `${detailHeader("Operator lane", "Needs attention", "Each item leads to a bounded inspection or resolution path.")}<div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Severity</th><th>Item</th><th>Detail</th><th>Next action</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
+    restoreExpanded();
   }
 
   function statCard(label, value) { return `<div class="stat-card"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`; }
@@ -366,17 +446,28 @@
     const options = payload.options || {};
     const rows = payload.rows || [];
     const select = (name, label, values) => `<label>${label}<select name="${name}"><option value="">Any</option>${(values || []).map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}</select></label>`;
+    const dateInput = (name, label) => `<label>${label} <input name="${name}" type="date" value="${escapeHtml(payload.filters?.[name] || "")}"></label>`;
     const body = rows.length ? rows.map((row) => {
       const type = row.experiment_type || row.lifecycle_stage || "unknown";
       const testType = row.test_type || type;
-      const hypothesis = hypothesisLabel(row);
-      const strategy = row.dashboard_url ? `<a class="jesse-link hypothesis-hover" href="${escapeHtml(row.dashboard_url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(hypothesis)}">${escapeHtml(row.strategy || "—")} ↗</a>` : `<strong class="hypothesis-hover" title="${escapeHtml(hypothesis)}">${escapeHtml(row.strategy || "—")}</strong>`;
-      return `<tr data-detail-experiment="${escapeHtml(row.experiment_id || "")}" tabindex="0"><td>${strategy}<small>${escapeHtml(row.experiment_id || "—")}</small></td><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td><strong title="${escapeHtml(testTypeHelp[testType] || "Persisted Jesse test type.")}">${escapeHtml(experimentTypeLabel(testType))}</strong><small title="${escapeHtml(experimentTypeHelp[type] || "Experiment lifecycle role.")}">Role: ${escapeHtml(experimentTypeLabel(type))}</small></td><td>${formatMetric(row.trade_count)}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${formatMetric(row.sharpe_ratio)}</td><td>${formatMetric(row.max_drawdown_percentage, "%")}</td><td>${statusPill(row.verdict || "reported")}</td></tr>`;
-    }).join("") : `<tr><td class="empty-state" colspan="8">No backtest evidence matches these filters.</td></tr>`;
-    $("#detail-view").innerHTML = `${detailHeader("Research database", "Backtests / DB", "Click strategy or experiment for hypothesis, all evidence, and Jesse links.")}<form class="filter-bar" id="backtest-filters"><label>Search <input name="q" type="search" value="${escapeHtml(payload.filters?.q || "")}" placeholder="strategy, run, finding"></label>${select("test_type", "Test type", options.test_types)}${select("strategy", "Strategy", options.strategies)}${select("verdict", "Verdict", options.verdicts)}${select("symbol", "Symbol", options.symbols)}${select("timeframe", "Timeframe", options.timeframes)}${select("evidence_split", "Split", options.splits)}<label>Min trades <input name="minimum_trades" type="number" min="0" step="1" value="${escapeHtml(payload.filters?.minimum_trades || "0")}"></label><label>Sort <select name="sort"><option value="newest">Newest</option><option value="profit">Profit</option><option value="sharpe">Sharpe</option><option value="trades">Trades</option><option value="drawdown">Drawdown</option></select></label><button type="submit">Apply filters</button></form><div class="stat-grid">${statCard("Reported runs", formatMetric(stats.reported_runs))}${statCard("Metric runs", formatMetric(stats.metric_runs))}${statCard("Total trades", formatMetric(stats.total_trades))}${statCard("Best profit", formatMetric(stats.best_profit_percentage, "%"))}${statCard("Worst drawdown", formatMetric(stats.worst_drawdown_percentage, "%"))}${statCard("Average Sharpe", formatMetric(stats.average_sharpe_ratio))}</div><div class="notice backtest-legend"><strong>How to read rows:</strong> &mdash; means no metric was produced. A terminal failure can still have verdict revise or reject; that is a disposition, not proof strategy completed successfully. <span title="${escapeHtml(experimentTypeHelp.baseline)}">Baseline</span> = experiment role. <span title="${escapeHtml(testTypeHelp.significance)}">Significance</span> = Jesse test type. Lanes are evidence types, not guaranteed order.</div>${testLaneCards(payload.test_type_summary)}<div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Strategy / experiment</th><th>Route</th><th>Test type / role</th><th>Trades</th><th>Profit</th><th>Sharpe</th><th>Drawdown</th><th>Verdict</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
+      const key = `bt-${row.run_id || row.experiment_id}`;
+      const strategy = row.dashboard_url ? `<a class="jesse-link" href="${escapeHtml(row.dashboard_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.strategy || "—")} ↗</a>` : `<strong>${escapeHtml(row.strategy || "—")}</strong>`;
+      const detail = detailRowHtml(key, [
+        ["Hypothesis", hypothesisLabel(row)],
+        ["Finding", row.finding],
+        ["Route period", [row.start_date, row.finish_date].filter(Boolean).join(" → ")],
+        ["Evidence split", row.evidence_split],
+        ["Lifecycle role", experimentTypeLabel(type)],
+        ["Run / session", [row.run_id, row.session_id].filter(Boolean).join(" · ")],
+        ["Completed", formatTime(row.completed_at)],
+      ], 9);
+      return `<tr data-detail-experiment="${escapeHtml(row.experiment_id || "")}" tabindex="0"><td>${expandButton(key)}${strategy}<small>${escapeHtml(row.experiment_id || "—")}</small></td><td>${escapeHtml(row.symbol || "—")} · ${escapeHtml(row.timeframe || "—")}</td><td><strong title="${escapeHtml(testTypeHelp[testType] || "Persisted Jesse test type.")}">${escapeHtml(experimentTypeLabel(testType))}</strong><small title="${escapeHtml(experimentTypeHelp[type] || "Experiment lifecycle role.")}">Role: ${escapeHtml(experimentTypeLabel(type))}</small></td><td>${formatMetric(row.trade_count)}</td><td>${formatMetric(row.net_profit_percentage, "%")}</td><td>${formatMetric(row.sharpe_ratio)}</td><td>${formatMetric(row.max_drawdown_percentage, "%")}</td><td>${escapeHtml(formatTime(row.completed_at))}</td><td>${statusPill(row.verdict || "reported")}</td></tr>${detail}`;
+    }).join("") : `<tr><td class="empty-state" colspan="9">No backtest evidence matches these filters.</td></tr>`;
+    $("#detail-view").innerHTML = `${detailHeader("Research database", "Backtests / DB", "Click strategy or experiment for lineage. Expand a row for hypothesis, finding, and route period.")}<form class="filter-bar" id="backtest-filters"><label>Search <input name="q" type="search" value="${escapeHtml(payload.filters?.q || "")}" placeholder="strategy, run, finding"></label>${select("test_type", "Test type", options.test_types)}${select("strategy", "Strategy", options.strategies)}${select("verdict", "Verdict", options.verdicts)}${select("symbol", "Symbol", options.symbols)}${select("timeframe", "Timeframe", options.timeframes)}${select("evidence_split", "Split", options.splits)}${dateInput("started_on_or_after", "Route start ≥")}${dateInput("finished_on_or_before", "Route end ≤")}<label>Min trades <input name="minimum_trades" type="number" min="0" step="1" value="${escapeHtml(payload.filters?.minimum_trades || "0")}"></label><label>Sort <select name="sort"><option value="newest">Newest</option><option value="profit">Profit</option><option value="sharpe">Sharpe</option><option value="trades">Trades</option><option value="drawdown">Drawdown</option></select></label><button type="submit">Apply filters</button></form><div class="stat-grid">${statCard("Reported runs", formatMetric(stats.reported_runs))}${statCard("Metric runs", formatMetric(stats.metric_runs))}${statCard("Total trades", formatMetric(stats.total_trades))}${statCard("Best profit", formatMetric(stats.best_profit_percentage, "%"))}${statCard("Worst drawdown", formatMetric(stats.worst_drawdown_percentage, "%"))}${statCard("Average Sharpe", formatMetric(stats.average_sharpe_ratio))}</div><div class="notice backtest-legend"><strong>How to read rows:</strong> &mdash; means no metric was produced. A terminal failure can still have verdict revise or reject; that is a disposition, not proof strategy completed successfully. <span title="${escapeHtml(experimentTypeHelp.baseline)}">Baseline</span> = experiment role. <span title="${escapeHtml(testTypeHelp.significance)}">Significance</span> = Jesse test type. Lanes are evidence types, not guaranteed order.</div>${testLaneCards(payload.test_type_summary)}<div class="panel"><div class="table-wrap"><table class="detail-table"><thead><tr><th>Strategy / experiment</th><th>Route</th><th>Test type / role</th><th>Trades</th><th>Profit</th><th>Sharpe</th><th>Drawdown</th><th>Completed</th><th>Verdict</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
     const form = $("#backtest-filters");
     for (const [name, value] of Object.entries(payload.filters || {})) if (form.elements[name]) form.elements[name].value = value;
     form.addEventListener("submit", (event) => { event.preventDefault(); loadBacktests(new URLSearchParams(new FormData(form))); });
+    restoreExpanded();
   }
 
   function renderExperimentDetail(payload) {
@@ -512,6 +603,8 @@
 
   function bindEvents() {
     document.addEventListener("click", (event) => {
+      const expand = event.target.closest("[data-row-expand]");
+      if (expand) { toggleRowDetail(expand); return; }
       const viewTarget = event.target.closest("[data-view]");
       if (viewTarget && !event.target.closest(".detail-table")) { setView(viewTarget.dataset.view); return; }
       const workItem = event.target.closest("[data-detail-work-item]"); if (workItem) { openWorkItem(workItem.dataset.detailWorkItem); return; }
