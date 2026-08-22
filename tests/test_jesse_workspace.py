@@ -126,6 +126,75 @@ class JesseWorkspaceStatusTests(unittest.TestCase):
         self.assertIn("canonical target was not compared", output)
         self.assertNotIn("provenance_status=canonical", output)
 
+    def test_status_survives_non_git_sibling_directory(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.research)
+        self.research.mkdir()
+        (self.research / "notes.txt").write_text("plain\n", encoding="utf-8")
+
+        output = self.run_status(
+            "running|ats-lab/fixture:historical|" + "7" * 40,
+        )
+
+        self.assertIn("not-git", output)
+        self.assertIn(f"canonical_image=ats-lab/fixture:{self.short_revision}", output)
+
+    def test_status_lists_worktree_paths_containing_spaces(self) -> None:
+        spaced_parent = self.root / "space dir"
+        spaced_parent.mkdir()
+        worktree_path = spaced_parent / "feature one"
+        self.run_git(
+            "-C", str(self.research), "worktree", "add",
+            "-b", "task/spaced-fixture", "--", str(worktree_path), "HEAD",
+        )
+
+        output = self.run_status("")
+
+        self.assertIn(str(worktree_path), output)
+
+    def test_stack_down_does_not_require_upstream_repository(self) -> None:
+        import shutil
+
+        log = self.root / "docker-calls.log"
+        self.fake_docker.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'printf "%s\\n" "$*" >> "$FAKE_DOCKER_LOG"\n',
+            encoding="utf-8",
+        )
+        self.fake_docker.chmod(0o755)
+        shutil.rmtree(self.upstream)
+        compose_dir = self.research / "docker"
+        compose_dir.mkdir()
+        (compose_dir / "docker-compose.yml").write_text(
+            "services:\n  jesse:\n    image: ${JESSE_IMAGE}\n",
+            encoding="utf-8",
+        )
+
+        environment = os.environ.copy()
+        environment.update({
+            "PATH": f"{self.docker_bin}{os.pathsep}{environment['PATH']}",
+            "JESSE_UPSTREAM_REPOSITORY": str(self.upstream),
+            "JESSE_RESEARCH_REPOSITORY": str(self.research),
+            "JESSE_IMAGE_REPOSITORY": "ats-lab/fixture",
+            "FAKE_DOCKER_LOG": str(log),
+        })
+        result = subprocess.run(
+            [str(SCRIPT), "stack", "down"],
+            cwd=REPOSITORY_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        calls = log.read_text().strip().splitlines()
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith("compose "))
+        self.assertTrue(calls[0].endswith(" down"))
+
 
 if __name__ == "__main__":
     unittest.main()
