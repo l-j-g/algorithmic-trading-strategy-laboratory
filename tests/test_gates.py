@@ -8,7 +8,13 @@ from ats_lab.evidence import (
     LifecycleStage,
     NormalizedEvidence,
 )
-from ats_lab.gates import evaluate_gates, evaluate_hpo_candidate, evaluate_promotion
+from ats_lab.gates import (
+    _monte_carlo_interpretation_findings,
+    evaluate_gates,
+    evaluate_hpo_candidate,
+    evaluate_promotion,
+    required_trade_count,
+)
 from ats_lab.models import Verdict
 from ats_lab.resources import ResourcePolicy
 
@@ -358,6 +364,46 @@ class GateTests(unittest.TestCase):
             policy=ResourcePolicy(),
         )
         self.assertNotIn("oos_training_overlap", decision.failed)
+
+    def test_malformed_window_dates_fail_loudly(self) -> None:
+        row = self.row(start_date="2024-13-01")
+        with self.assertRaisesRegex(ValueError, "unparseable window dates"):
+            required_trade_count(row, ResourcePolicy())
+        decision = evaluate_gates([row], policy=ResourcePolicy())
+        self.assertIn("window_dates_malformed", decision.failed)
+        self.assertEqual(decision.verdict, Verdict.REJECT)
+
+    def test_mc_playbook_flags_original_above_best_tail(self) -> None:
+        failed: list[str] = []
+        _monte_carlo_interpretation_findings([
+            {
+                "net_profit_percentage": 25.0,
+                "monte_carlo_median_net_profit_percentage": 8.0,
+                "monte_carlo_best_5pct_net_profit_percentage": 20.0,
+                "monte_carlo_worst_5pct_net_profit_percentage": -2.0,
+            },
+        ], failed)
+        self.assertIn("mc_original_above_best_tail", failed)
+        self.assertIn("mc_worst_tail_loss", failed)
+
+    def test_mc_playbook_accepts_plausible_original(self) -> None:
+        failed: list[str] = []
+        _monte_carlo_interpretation_findings([
+            {
+                "net_profit_percentage": 9.0,
+                "monte_carlo_median_net_profit_percentage": 8.0,
+                "monte_carlo_best_5pct_net_profit_percentage": 20.0,
+                "monte_carlo_worst_5pct_net_profit_percentage": 0.5,
+            },
+        ], failed)
+        self.assertEqual(failed, [])
+
+    def test_mc_playbook_skips_rows_without_distribution_stats(self) -> None:
+        failed: list[str] = []
+        _monte_carlo_interpretation_findings(
+            [self.row(lifecycle_stage=LifecycleStage.MONTE_CARLO)], failed,
+        )
+        self.assertEqual(failed, [])
 
 
 if __name__ == "__main__":

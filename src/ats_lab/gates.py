@@ -132,6 +132,7 @@ def evaluate_promotion(
             missing.append("monte_carlo_scenarios")
         elif any(value < policy.monte_carlo_scenarios for value in scenarios):
             failed.append("monte_carlo_scenarios")
+        _monte_carlo_interpretation_findings(monte_carlo, failed)
 
     walk_forward = tuple(
         row for row in rows
@@ -217,6 +218,8 @@ def evaluate_hpo_candidate(
 
     if not rows or any(row.trade_count is None for row in rows):
         missing.append("hpo_activity_floor")
+    elif any(_window_dates_are_malformed(row) for row in rows):
+        failed.append("window_dates_malformed")
     elif any(
         int(row.trade_count) < required_trade_count(row, policy)
         for row in rows
@@ -319,6 +322,29 @@ def _overlaps_training(row: object, training_rows: Iterable[object]) -> bool:
     return False
 
 
+def _monte_carlo_interpretation_findings(
+    rows: tuple[object, ...],
+    failed: list[str],
+) -> None:
+    """Encode the playbook Monte Carlo interpretation rules as findings.
+
+    STRATEGY_CONCEPT_PLAYBOOK: an original result above the best 5% tail is
+    a suspicious/lucky path (reject), and an unacceptable worst-5% tail loss
+    rejects regardless of median behavior. The rules need per-scenario
+    distribution summaries on the row; rows without them are skipped.
+    """
+    for row in rows:
+        original = _value(row, "net_profit_percentage")
+        if original is None:
+            continue
+        best_tail = _value(row, "monte_carlo_best_5pct_net_profit_percentage")
+        if best_tail is not None and float(original) > float(best_tail):
+            failed.append("mc_original_above_best_tail")
+        worst_tail = _value(row, "monte_carlo_worst_5pct_net_profit_percentage")
+        if worst_tail is not None and float(worst_tail) < 0:
+            failed.append("mc_worst_tail_loss")
+
+
 def _value(row: object, name: str, default: Any = None) -> Any:
     if isinstance(row, Mapping):
         return row.get(name, default)
@@ -378,12 +404,18 @@ def _robustness_state(row: object, policy: ResourcePolicy) -> str:
         return "missing"
     if _value(row, "verdict") in {"reject", "infrastructure_failure"}:
         return "failed"
+    if _window_dates_are_malformed(row):
+        return "failed"
+    try:
+        trade_floor = required_trade_count(row, policy)
+    except ValueError:
+        return "failed"
     if (
         float(_value(row, "net_profit_percentage")) <= 0
         or float(_value(row, "max_drawdown_percentage")) > policy.maximum_drawdown_percentage
         or float(_value(row, "sharpe_ratio")) < policy.minimum_sharpe_ratio
         or float(_value(row, "profit_factor")) < policy.minimum_profit_factor
-        or int(_value(row, "trade_count")) < required_trade_count(row, policy)
+        or int(_value(row, "trade_count")) < trade_floor
     ):
         return "failed"
     return "passed"
@@ -521,10 +553,25 @@ def required_trade_count(row: object, policy: ResourcePolicy) -> int:
                 - date.fromisoformat(str(start))
             ).days,
         )
-    except ValueError:
-        return int(policy.minimum_trades)
+    except ValueError as error:
+        raise ValueError(
+            f"unparseable window dates: {start}..{finish}"
+        ) from error
     annualized = ceil(int(policy.minimum_trades_per_year) * days / 365.25)
     return max(int(policy.minimum_trade_floor), annualized)
+
+
+def _window_dates_are_malformed(row: object) -> bool:
+    start = _value(row, "start_date")
+    finish = _value(row, "finish_date")
+    if not start or not finish:
+        return False
+    try:
+        date.fromisoformat(str(start))
+        date.fromisoformat(str(finish))
+    except ValueError:
+        return True
+    return False
 
 
 def _minimum_trade_gate(
@@ -534,6 +581,9 @@ def _minimum_trade_gate(
     failed: list[str],
     missing: list[str],
 ) -> None:
+    if any(_window_dates_are_malformed(row) for row in rows):
+        failed.append("window_dates_malformed")
+        return
     values = [row.trade_count for row in rows]
     if not values or any(value is None for value in values):
         missing.append("minimum_trades")
