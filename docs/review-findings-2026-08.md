@@ -9,31 +9,57 @@ Engineering backlog only. Never import these entries into ATS research
 
 Status values: `open` → `in_progress` → `resolved` (or `wontfix` with reason).
 
+## Resolution summary (2026-08-22)
+
+All issues are resolved on `main` except RVW-013 (god-class split — approved
+to run after the fixes land; it is next). 450 tests pass, up from 344 at
+review time. Highlights:
+
+- Data-layer cluster (RVW-008..012): guarded queue upserts, provenance-clean
+  evidence normalization, append-only verdict history (`evaluation_history`
+  + compatibility view), ordered guarded migrations as single versioning
+  mechanism.
+- Methodology cluster (RVW-001..007): explicit HPO mappings only,
+  Benjamini-Hochberg FDR across cohort significance families,
+  first-test-wins per entry fingerprint, deterministic `hpo_candidate` gate,
+  machine-generated 2x-fee cost-stress runs gating promotion (self-reported
+  status no longer persisted outside `-COST2X` experiments), date-verified
+  OOS disjointness, unified keep-scheduled inconclusive semantics.
+- Execution cluster (RVW-014..019): JSON-RPC id correlation + session
+  teardown, wired contract validators, infrastructure circuit breaker with
+  policy-injected threshold, preflight subset check, asynchronous-start
+  tolerance, orphaned-reservation recovery CLI.
+- Interfaces cluster (RVW-020/021): loopback-gated dashboard mutations,
+  table-dispatched CLI with uniform exit-code contract, Host-header
+  validation, redirect auth stripping.
+- All minors MIN-01..MIN-24 resolved; MIN-15 activated by persisting MC
+  tail-summary fields (schema v8) consumed by the encoded playbook rules.
+
 ## Index
 
 | ID | Sev | Area | Title | Status |
 |---|---|---|---|---|
-| [RVW-001](#rvw-001) | critical | methodology | Hardcoded historical HPO verdicts applied by study-name prefix | open |
-| [RVW-002](#rvw-002) | major | methodology | No multiple-comparison control across concept cohorts | open |
-| [RVW-003](#rvw-003) | major | methodology | Optional stopping: latest-p-wins significance semantics | open |
-| [RVW-004](#rvw-004) | major | methodology | `hpo_candidate` verdict bypasses deterministic gates | open |
-| [RVW-005](#rvw-005) | major | methodology | Cost-stress check is self-reported, never machine-generated | open |
-| [RVW-006](#rvw-006) | major | methodology | OOS status is a trusted label, not verified at gate time | open |
-| [RVW-007](#rvw-007) | major | methodology | Inconclusive semantics contradict between gate paths | open |
-| [RVW-008](#rvw-008) | major | data layer | `upsert_work_item` overwrites live state without guard | open |
-| [RVW-009](#rvw-009) | major | data layer | Evidence normalization silently distorts canonical metrics | open |
-| [RVW-010](#rvw-010) | major | data layer | Batch finalization selects work item by recency, not identity | open |
-| [RVW-011](#rvw-011) | major | data layer | Evaluations delete-before-insert destroys verdict history | open |
-| [RVW-012](#rvw-012) | major | data layer | Ad-hoc migration strategy can drift fresh vs migrated DBs | open |
-| [RVW-013](#rvw-013) | major | data layer | `WorkflowDatabase` is a ~3,000-line god class | open |
-| [RVW-014](#rvw-014) | major | execution | Replacement-reservation crash leaves permanent wedge state | open |
-| [RVW-015](#rvw-015) | major | execution | MCP client lacks JSON-RPC id correlation and session teardown | open |
-| [RVW-016](#rvw-016) | major | execution | Versioned JSON schemas are dead artifacts on the execution path | open |
-| [RVW-017](#rvw-017) | major | execution | Harness defects loop forever as uncharged infrastructure retries | open |
-| [RVW-018](#rvw-018) | major | execution | Preflight exact-table-set equality bricks after upstream refresh | open |
-| [RVW-019](#rvw-019) | major | execution | TOCTOU double-start race in dashboard-start fallback | open |
-| [RVW-020](#rvw-020) | major | interfaces | Legacy dashboard serves mutations regardless of bind host | open |
-| [RVW-021](#rvw-021) | major | interfaces | `cli.main()` is a ~1,200-line dispatch chain; inconsistent errors | open |
+| [RVW-001](#rvw-001) | critical | methodology | Hardcoded historical HPO verdicts applied by study-name prefix | resolved |
+| [RVW-002](#rvw-002) | major | methodology | No multiple-comparison control across concept cohorts | resolved |
+| [RVW-003](#rvw-003) | major | methodology | Optional stopping: latest-p-wins significance semantics | resolved |
+| [RVW-004](#rvw-004) | major | methodology | `hpo_candidate` verdict bypasses deterministic gates | resolved |
+| [RVW-005](#rvw-005) | major | methodology | Cost-stress check is self-reported, never machine-generated | resolved |
+| [RVW-006](#rvw-006) | major | methodology | OOS status is a trusted label, not verified at gate time | resolved |
+| [RVW-007](#rvw-007) | major | methodology | Inconclusive semantics contradict between gate paths | resolved |
+| [RVW-008](#rvw-008) | major | data layer | `upsert_work_item` overwrites live state without guard | resolved |
+| [RVW-009](#rvw-009) | major | data layer | Evidence normalization silently distorts canonical metrics | resolved |
+| [RVW-010](#rvw-010) | major | data layer | Batch finalization selects work item by recency, not identity | resolved |
+| [RVW-011](#rvw-011) | major | data layer | Evaluations delete-before-insert destroys verdict history | resolved |
+| [RVW-012](#rvw-012) | major | data layer | Ad-hoc migration strategy can drift fresh vs migrated DBs | resolved |
+| [RVW-013](#rvw-013) | major | data layer | `WorkflowDatabase` is a ~3,000-line god class | open (next) |
+| [RVW-014](#rvw-014) | major | execution | Replacement-reservation crash leaves permanent wedge state | resolved |
+| [RVW-015](#rvw-015) | major | execution | MCP client lacks JSON-RPC id correlation and session teardown | resolved |
+| [RVW-016](#rvw-016) | major | execution | Versioned JSON schemas are dead artifacts on the execution path | resolved |
+| [RVW-017](#rvw-017) | major | execution | Harness defects loop forever as uncharged infrastructure retries | resolved |
+| [RVW-018](#rvw-018) | major | execution | Preflight exact-table-set equality bricks after upstream refresh | resolved |
+| [RVW-019](#rvw-019) | major | execution | TOCTOU double-start race in dashboard-start fallback | resolved |
+| [RVW-020](#rvw-020) | major | interfaces | Legacy dashboard serves mutations regardless of bind host | resolved |
+| [RVW-021](#rvw-021) | major | interfaces | `cli.main()` is a ~1,200-line dispatch chain; inconsistent errors | resolved |
 
 Minor findings are tracked in the [minor register](#minor-register) without
 individual sections.
@@ -42,7 +68,7 @@ individual sections.
 
 ### RVW-001
 
-**Severity:** critical · **Area:** methodology · **Status:** open
+**Severity:** critical · **Area:** methodology · **Status:** resolved
 
 `EMA_V7_CLASSIFICATIONS` (`src/ats_lab/hpo.py:45-78`, applied at `:366-373`)
 maps frozen trial numbers to verdicts ("likely_overfit", "validation_candidate")
@@ -57,7 +83,7 @@ study-name prefix.
 
 ### RVW-002
 
-**Severity:** major · **Area:** methodology · **Status:** open
+**Severity:** major · **Area:** methodology · **Status:** resolved
 
 No multiple-comparison control anywhere in the repository (no Bonferroni,
 Holm, Benjamini-Hochberg, SPA, or deflated Sharpe). Cohorts mint up to 25
@@ -72,7 +98,7 @@ protocol), with the effective threshold surfaced in gate findings.
 
 ### RVW-003
 
-**Severity:** major · **Area:** methodology · **Status:** open
+**Severity:** major · **Area:** methodology · **Status:** resolved
 
 Optional stopping via "latest p wins": `_latest_p_value`
 (`synthesis.py:196-206`) orders by `finished_at DESC` and takes the newest;
@@ -86,7 +112,7 @@ test against the same hypothesis).
 
 ### RVW-004
 
-**Severity:** major · **Area:** methodology · **Status:** open
+**Severity:** major · **Area:** methodology · **Status:** resolved
 
 `hpo_candidate` is not deterministically gated: `supervisor.py:1009-1035`
 forces REJECT only on `gates.failed`; `gates.missing` does not block an
@@ -102,7 +128,7 @@ no single dominant route); missing evidence ⇒ `inconclusive`.
 
 ### RVW-005
 
-**Severity:** major · **Area:** methodology · **Status:** open
+**Severity:** major · **Area:** methodology · **Status:** resolved
 
 Cost-stress is self-reported and dilutable: no code path creates a
 fee-stressed run (only fee forwarding exists, `direct_mcp_executor.py:1042`),
@@ -118,7 +144,7 @@ gates consume only machine-generated stress results.
 
 ### RVW-006
 
-**Severity:** major · **Area:** methodology · **Status:** open
+**Severity:** major · **Area:** methodology · **Status:** resolved
 
 OOS status is a trusted label outside the HPO flow: `gates.py:76-83` accepts
 any row tagged `evidence_split="oos"` into the promotion lane; no date
@@ -131,7 +157,7 @@ for all promotion lanes, not just configured validation routes.
 
 ### RVW-007
 
-**Severity:** major · **Area:** methodology · **Status:** open
+**Severity:** major · **Area:** methodology · **Status:** resolved
 
 Inconclusive semantics contradict between paths: `database.py:2895-2897`
 archives dependent baselines on p≤0.10 (`significance_inconclusive`) while
@@ -144,7 +170,7 @@ vs archive as terminal-inconclusive) and encode it once.
 
 ### RVW-008
 
-**Severity:** major · **Area:** data layer · **Status:** open
+**Severity:** major · **Area:** data layer · **Status:** resolved
 
 `upsert_work_item` (`database.py:1947-1962`, caller `cli.py:1184`) blindly
 overwrites `state`, `attempts`, `blocker_code` with no state guard.
@@ -157,7 +183,7 @@ rows; refuse or no-op on state regression.
 
 ### RVW-009
 
-**Severity:** major · **Area:** data layer · **Status:** open
+**Severity:** major · **Area:** data layer · **Status:** resolved
 
 Evidence normalization can silently distort canonical numbers:
 parent-metric merge `{**raw_metrics, **child_metrics}` lets experiment-level
@@ -174,7 +200,7 @@ disentangled alias lists.
 
 ### RVW-010
 
-**Severity:** major · **Area:** data layer · **Status:** open
+**Severity:** major · **Area:** data layer · **Status:** resolved
 
 `finalize_batch_evaluation` picks the awaiting work item by
 `experiment_id ... ORDER BY updated_at DESC LIMIT 1` rather than identity
@@ -186,7 +212,7 @@ evaluation context.
 
 ### RVW-011
 
-**Severity:** major · **Area:** data layer · **Status:** open
+**Severity:** major · **Area:** data layer · **Status:** resolved
 
 Evaluations are delete-before-insert per evaluator (`database.py:2048`,
 `:2091`, `:2313`; `schema.sql:170`), destroying verdict history — a research
@@ -198,7 +224,7 @@ sequence column; readers take the latest.
 
 ### RVW-012
 
-**Severity:** major · **Area:** data layer · **Status:** open
+**Severity:** major · **Area:** data layer · **Status:** resolved
 
 Migration strategy is nominal: single version row (`SCHEMA_VERSION=6`),
 inline ALTER dicts whose column definitions duplicate `schema.sql`
@@ -211,7 +237,7 @@ source of truth; idempotent guarded DDL; document the concurrency contract.
 
 ### RVW-013
 
-**Severity:** major · **Area:** data layer · **Status:** open
+**Severity:** major · **Area:** data layer · **Status:** open (next)
 
 `WorkflowDatabase` accreted into a ~2,900-line god class spanning queue, HPO
 lifecycle, synthesis leasing, telemetry, and evidence. Worst offenders:
@@ -227,7 +253,7 @@ change.
 
 ### RVW-014
 
-**Severity:** major · **Area:** execution · **Status:** open
+**Severity:** major · **Area:** execution · **Status:** resolved
 
 Crash between the replacement-reservation UPDATE and session-id persist
 leaves `replacement_reserved=1` with NULL `replacement_session_id` permanently
@@ -241,7 +267,7 @@ session exists.
 
 ### RVW-015
 
-**Severity:** major · **Area:** execution · **Status:** open
+**Severity:** major · **Area:** execution · **Status:** resolved
 
 `McpClient.post` returns the first SSE `data:` line and never correlates the
 JSON-RPC response `id` to the request `id` (`direct_mcp_executor.py:295-328`);
@@ -255,7 +281,7 @@ mismatch; DELETE session teardown on terminal/final poll.
 
 ### RVW-016
 
-**Severity:** major · **Area:** execution · **Status:** open
+**Severity:** major · **Area:** execution · **Status:** resolved
 
 The versioned JSON schemas (`src/ats_lab/schemas/*.json`) and
 `jesse_contracts` types are dead artifacts: nothing loads them (stdlib-only,
@@ -269,7 +295,7 @@ schemas and fix the docs to describe the real envelope checks.
 
 ### RVW-017
 
-**Severity:** major · **Area:** execution · **Status:** open
+**Severity:** major · **Area:** execution · **Status:** resolved
 
 Harness bugs (KeyError/TypeError/ValueError from malformed lab-built
 requests) surface as `direct_mcp_error` infrastructure retries with
@@ -284,7 +310,7 @@ transport flake from structurally malformed requests.
 
 ### RVW-018
 
-**Severity:** major · **Area:** execution · **Status:** open
+**Severity:** major · **Area:** execution · **Status:** resolved
 
 Preflight public-tables check uses exact set equality
 (`stack_preflight.py:83-92`); any table added by a routine upstream refresh
@@ -296,7 +322,7 @@ unknown extras).
 
 ### RVW-019
 
-**Severity:** major · **Area:** execution · **Status:** open
+**Severity:** major · **Area:** execution · **Status:** resolved
 
 TOCTOU race in `_start_and_verify` (`direct_mcp_executor.py:882-907`): MCP
 start may land asynchronously after `_has_started` is checked, then the
@@ -307,7 +333,7 @@ tolerance window) or serialize fallback behind a persisted started-flag.
 
 ### RVW-020
 
-**Severity:** major · **Area:** interfaces · **Status:** open
+**Severity:** major · **Area:** interfaces · **Status:** resolved
 
 Legacy `ats-lab dashboard` serves state-mutating POST
 `/api/work-items/{id}/retry|rectify` regardless of bind host
@@ -322,7 +348,7 @@ legacy surface; correct the doc.
 
 ### RVW-021
 
-**Severity:** major · **Area:** interfaces · **Status:** open
+**Severity:** major · **Area:** interfaces · **Status:** resolved
 
 `cli.main()` is a ~1,200-line if/elif dispatch chain (`cli.py:197-1410`);
 error handling is inconsistent — `enqueue` raises uncaught ValueError
