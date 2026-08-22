@@ -744,6 +744,53 @@ class DirectMcpExecutorTests(unittest.TestCase):
             self.assertEqual(row["replacement_reserved"], 1)
             self.assertEqual(row["replacement_session_id"], "jesse-session-1")
 
+    def test_terminal_metrics_sanitize_non_finite_floats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, database = self.make_dispatcher(tmp, server)
+            server.http.metrics = {
+                "net_profit_percentage": float("nan"),
+                "sharpe_ratio": float("inf"),
+                "total": 10,
+                "route_runs": [{"session_id": "route-a", "fee": float("-inf")}],
+            }
+            result = dispatcher.dispatch(batch_request())
+            run = result.payload["results"][0]["evidence"]["run"]
+            self.assertIsNone(run["metrics"]["net_profit_percentage"])
+            self.assertIsNone(run["metrics"]["sharpe_ratio"])
+            self.assertEqual(run["metrics"]["total"], 10)
+            self.assertIsNone(run["metrics"]["route_runs"][0]["fee"])
+            checkpoint = database.rows(
+                "SELECT metrics_json FROM direct_execution_sessions "
+                "WHERE work_item_id='JOB-1'"
+            )[0]
+            self.assertNotIn("NaN", checkpoint["metrics_json"])
+            self.assertNotIn("Infinity", checkpoint["metrics_json"])
+            self.assertIn('"net_profit_percentage":null', checkpoint["metrics_json"])
+
+    def test_checkpoint_save_failure_records_orphaned_draft_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, database = self.make_dispatcher(tmp, server)
+            with patch.object(
+                dispatcher, "_save_checkpoint",
+                side_effect=OSError("database is locked"),
+            ):
+                result = dispatcher.dispatch(batch_request())
+            item_result = result.payload["results"][0]
+            self.assertEqual(item_result["blocker_code"], "direct_mcp_error")
+            events = database.rows(
+                """SELECT payload_json FROM events WHERE aggregate_id='JOB-1'
+                   AND event_type='direct_execution_draft_orphaned'""",
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                json.loads(events[0]["payload_json"]),
+                {"experiment_id": "EXP-1", "session_id": "jesse-session-1"},
+            )
+
     def test_backtest_forwards_work_item_data_routes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["running", "finished"]
@@ -1115,8 +1162,8 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 "fee": 0.001,
                 "futures_leverage": 3,
                 "futures_leverage_mode": "isolated",
+                "config": {"balance": 5_000},
             }}}}}),
-            Response({"data": {"data": {"backtest": {"balance": 10_000}}}}),
             Response({"status": "started"}),
         ]
         requests = []
@@ -1135,7 +1182,7 @@ class DirectMcpExecutorTests(unittest.TestCase):
         self.assertEqual(requests[-1].full_url, "http://127.0.0.1:9000/backtest")
         payload = json.loads(requests[-1].data)
         self.assertEqual(payload["id"], "session-1")
-        self.assertEqual(payload["config"], {"balance": 10_000})
+        self.assertEqual(payload["config"], {"balance": 5_000})
         self.assertEqual({
             key: payload[key] for key in (
                 "balance", "fee", "futures_leverage", "futures_leverage_mode",
