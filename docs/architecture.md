@@ -62,10 +62,14 @@ progression.
 
 Promotion has one additional deterministic boundary: an explicit
 `paper_trade_candidate` (or a validation-stage `pass`) must include positive
-OOS/rolling evidence and an explicit passing cost-stress result. Missing
+OOS/rolling evidence and passing cost-stress runs that the laboratory itself
+enqueues as doubled-fee (`-COST2X`) experiments; self-reported stress status
+is never persisted or trusted. Missing
 validation is `inconclusive`; failed validation is `reject`. Baseline and HPO
 evidence remain eligible for analysis and optimization, but cannot be mistaken
-for paper-trade readiness.
+for paper-trade readiness. An agent-assigned `hpo_candidate` label is likewise
+re-checked by the deterministic `evaluate_hpo_candidate` gate before any
+optimization cycle is unlocked.
 
 ## Storage
 
@@ -82,7 +86,11 @@ strategy source. See [Jesse workspace integration](workspace-integration.md).
 
 The CLI emits JSON and performs one bounded operation per invocation. It can be
 called by an orchestrator, cron, CI or another automation. No agent-specific
-memory format is required.
+memory format is required. Commands are dispatched through one handler table
+with a uniform exit-code contract: contract violations (bad input, unknown
+ids, storage errors) print one `ats-lab: error:` line and exit `2`; health
+commands (`doctor`, `preflight`) also exit `2` when unhealthy. Unexpected
+errors surface as tracebacks instead of being masked.
 
 The optional [agent launcher](agent-launcher.md) provides a
 bounded subprocess adapter while preserving these ownership boundaries.
