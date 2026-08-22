@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -10,6 +11,7 @@ from unittest.mock import Mock, patch
 from ats_lab.agent_launcher import (
     AgentLauncherConfig,
     _decode_first_json_object,
+    _write_transport_telemetry,
     build_command,
     build_prompt,
     launch,
@@ -218,23 +220,54 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertEqual(kwargs["env"], {"SAFE": "1"})
 
     @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
+    def test_prompt_travels_over_stdin_not_argv(self, _which) -> None:
+        seen = {}
+
+        def runner(command, **kwargs):
+            seen["command"] = list(command)
+            seen["input"] = kwargs["input"]
+            return subprocess.CompletedProcess(
+                command, 0, '{"outcome":"finished","results":[]}', "",
+            )
+
+        result = launch(
+            {"task_type": "execute_batch", "requests": []},
+            AgentLauncherConfig(Path("/tmp")),
+            runner=runner,
+            environment={"SAFE": "1"},
+        )
+        self.assertEqual(result["outcome"], "finished")
+        command = seen["command"]
+        oneshot = command[command.index("--oneshot") + 1]
+        self.assertEqual(oneshot, "-")
+        for argument in command:
+            self.assertNotIn("work_item_id", str(argument))
+        self.assertIn("Laboratory request:", seen["input"])
+        self.assertIn("execute_batch", seen["input"])
+
+    @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
+    def test_persisted_stderr_detail_is_bounded(self, _which) -> None:
+        runner = Mock(return_value=subprocess.CompletedProcess(
+            [], 2, "", "x" * 5000,
+        ))
+        result = launch(
+            {}, AgentLauncherConfig(Path("/tmp")), runner=runner,
+        )
+        self.assertEqual(result["blocker_code"], "executor_failed")
+        self.assertEqual(len(result["detail"]), 1000)
+
+    @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
     def test_command_restricts_toolsets_by_task_type(self, _which) -> None:
         config = AgentLauncherConfig(
             Path("/tmp/jesse"), profile="ats-lab", reasoning_effort="high",
         )
         usage = Path("/tmp/usage.json")
 
-        execution = build_command(
-            config, "prompt", task_type="execute_batch", usage_path=usage,
-        )
-        analysis = build_command(
-            config, "prompt", task_type="analyze_batch", usage_path=usage,
-        )
-        hpo = build_command(
-            config, "prompt", task_type="analyze_hpo", usage_path=usage,
-        )
+        execution = build_command(config, task_type="execute_batch", usage_path=usage)
+        analysis = build_command(config, task_type="analyze_batch", usage_path=usage)
+        hpo = build_command(config, task_type="analyze_hpo", usage_path=usage)
         synthesis = build_command(
-            config, "prompt", task_type="synthesize_batch", usage_path=usage,
+            config, task_type="synthesize_batch", usage_path=usage,
         )
 
         self.assertIn("jesse", execution)
@@ -419,6 +452,35 @@ class AgentLauncherTests(unittest.TestCase):
             AgentLauncherConfig(Path("/tmp")),
         )
         self.assertEqual(result["blocker_code"], "invalid_analyzer_timeout")
+
+    def test_concurrent_telemetry_appends_stay_parseable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            telemetry = Path(tmp) / "transport.jsonl"
+            config = AgentLauncherConfig(
+                Path("/tmp"), telemetry_path=telemetry,
+            )
+
+            def write_records(worker: int) -> None:
+                for index in range(10):
+                    _write_transport_telemetry(
+                        config, task_type=f"task-{worker}-{index}",
+                        request_bytes=1, response_bytes=2, usage={},
+                    )
+
+            threads = [
+                threading.Thread(target=write_records, args=(worker,))
+                for worker in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            lines = telemetry.read_text().strip().splitlines()
+            self.assertEqual(len(lines), 80)
+            for line in lines:
+                record = json.loads(line)
+                self.assertTrue(record["task_type"].startswith("task-"))
 
     @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
     def test_non_json_output_becomes_retry(self, _which) -> None:
