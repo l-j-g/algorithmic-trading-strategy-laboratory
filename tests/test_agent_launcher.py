@@ -245,6 +245,35 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertIn("Laboratory request:", seen["input"])
         self.assertIn("execute_batch", seen["input"])
 
+    @patch(
+        "ats_lab.agent_launcher.shutil.which",
+        return_value="/Users/lg/.hermes/hermes-agent/venv/bin/hermes",
+    )
+    def test_hermes_prompt_stays_on_stdin_and_uses_bridge(self, _which) -> None:
+        seen = {}
+
+        def runner(command, **kwargs):
+            seen["command"] = list(command)
+            seen["input"] = kwargs["input"]
+            return subprocess.CompletedProcess(
+                command, 0, '{"outcome":"finished","results":[]}', "",
+            )
+
+        result = launch(
+            {"task_type": "execute_batch", "requests": []},
+            AgentLauncherConfig(Path("/tmp"), profile="hjesse"),
+            runner=runner,
+        )
+        self.assertEqual(result["outcome"], "finished")
+        command = seen["command"]
+        self.assertIn("hermes_stdin_bridge.py", command[1])
+        self.assertIn("--profile", command)
+        self.assertIn("hjesse", command)
+        self.assertNotIn("--oneshot", command)
+        for argument in command:
+            self.assertNotIn("work_item_id", str(argument))
+        self.assertIn("Laboratory request:", seen["input"])
+
     @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
     def test_persisted_stderr_detail_is_bounded(self, _which) -> None:
         runner = Mock(return_value=subprocess.CompletedProcess(

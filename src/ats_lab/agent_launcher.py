@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import shutil
 import subprocess
@@ -249,10 +250,9 @@ def build_command(
     executable = shutil.which(config.executable)
     if executable is None:
         raise FileNotFoundError(f"Agent executable not found: {config.executable}")
-    command = [executable]
-    if config.profile:
-        command.extend(("-p", config.profile))
-    command.extend(("--oneshot", "-"))
+    command = _build_executable_command(executable, config.profile)
+    if not _is_hermes_executable(executable):
+        command.extend(("--oneshot", "-"))
     model, provider = _model_for_task(config, task_type)
     if model:
         command.extend(("--model", model))
@@ -268,6 +268,57 @@ def build_command(
     )))
     if usage_path is not None:
         command.extend(("--usage-file", str(usage_path)))
+    return command
+
+
+def _is_hermes_executable(executable: str) -> bool:
+    return Path(executable).name == "hermes"
+
+
+def _hermes_python_command(executable: str) -> list[str]:
+    """Resolve Hermes' Python interpreter through its small launcher scripts."""
+    current = Path(executable)
+    seen: set[Path] = set()
+    for _ in range(4):
+        current = current.resolve()
+        if current in seen:
+            break
+        seen.add(current)
+        try:
+            lines = current.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            break
+        if lines and lines[0].startswith("#!"):
+            shebang = shlex.split(lines[0][2:].strip())
+            if any("python" in part for part in shebang):
+                return shebang
+        target = next(
+            (
+                shlex.split(line)[1]
+                for line in lines[:12]
+                if line.strip().startswith("exec ")
+                and len(shlex.split(line)) >= 2
+            ),
+            None,
+        )
+        if not target:
+            break
+        current = Path(target)
+    raise FileNotFoundError(
+        f"Could not resolve Hermes Python interpreter: {executable}"
+    )
+
+
+def _build_executable_command(executable: str, profile: str | None) -> list[str]:
+    if not _is_hermes_executable(executable):
+        command = [executable]
+        if profile:
+            command.extend(("-p", profile))
+        return command
+    bridge = Path(__file__).with_name("hermes_stdin_bridge.py")
+    command = [*_hermes_python_command(executable), str(bridge)]
+    if profile:
+        command.extend(("--profile", profile))
     return command
 
 
