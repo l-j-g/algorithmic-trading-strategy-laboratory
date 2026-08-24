@@ -1115,6 +1115,35 @@ class BatchSupervisorTests(unittest.TestCase):
                 database.supervisor_runtime_status()["phase"], "stopped",
             )
 
+    def test_stop_request_precedes_pending_batch_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            claimed = database.claim_batch("batch-worker", 8)
+            for index, item in enumerate(claimed, 1):
+                database.add_run(RunResult(
+                    id=f"RUN-{index}",
+                    experiment_id=item["experiment_id"],
+                    work_item_id=item["id"],
+                    session_id=f"session-{index}",
+                    status=RunStatus.FINISHED,
+                    metrics={"net_profit_percentage": float(index)},
+                ))
+                database.mark_awaiting_evaluation(item["id"], "BATCH-STOP")
+            database.set_control_state("stop_requested", updated_by="test")
+            dispatcher = SequenceDispatcher([])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            result = supervisor.run_round()
+
+            self.assertEqual(result["status"], "stop_requested")
+            self.assertEqual(dispatcher.requests, [])
+            self.assertEqual(
+                len(database.pending_batch_evaluation("batch-worker")), 2,
+            )
+
     def test_pause_prevents_pending_batch_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)

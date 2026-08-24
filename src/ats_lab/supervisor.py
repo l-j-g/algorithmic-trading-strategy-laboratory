@@ -138,16 +138,18 @@ class BatchSupervisor:
                 "operator": operator_status(self.database),
             }
 
-        pending = self.database.pending_batch_evaluation(self.worker_id)
-        if pending:
-            return self._analyze_pending(pending, recovered=0, promoted=0)
-
+        # Stop must win over pending analysis so a broken analyzer provider
+        # cannot prevent graceful supervisor shutdown indefinitely.
         if desired_state == "stop_requested":
             self._runtime("stopping")
             return {
                 "status": "stop_requested",
                 "operator": operator_status(self.database),
             }
+
+        pending = self.database.pending_batch_evaluation(self.worker_id)
+        if pending:
+            return self._analyze_pending(pending, recovered=0, promoted=0)
 
         if self.preflight is not None:
             infrastructure = self.preflight()
