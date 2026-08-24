@@ -838,11 +838,20 @@ class BatchSupervisor:
         )
         if not valid:
             if dispatch.blocker_code in INFRASTRUCTURE_BLOCKERS:
+                retry_after = resolve_retry_after(
+                    None, default_seconds=max(1.0, self.retry_delay_seconds),
+                )
                 for row in rows:
                     self._record_stage(
                         row["work_item_id"], "analysis",
                         duration_ms=analysis_ms, state="infrastructure_retry",
                         analyzer_attempt=attempt, cohort_id=cohort_id,
+                    )
+                    self.database.defer_batch_analysis_retry(
+                        row["work_item_id"],
+                        blocker_code=dispatch.blocker_code or "analyzer_failure",
+                        blocker_detail=detail,
+                        retry_after=retry_after,
                     )
                 return {
                     "status": "infrastructure_retry",
@@ -922,7 +931,7 @@ class BatchSupervisor:
     def _deterministic_analysis_payload(self, row: dict) -> dict[str, Any] | None:
         """Build a complete evaluation when lifecycle gates are authoritative."""
         if row.get("run_status") != RunStatus.FINISHED.value:
-            return None
+            return self._deterministic_failure_analysis_payload(row)
         try:
             evidence, gates = self._gated_evidence(row)
             verdict = self._deterministic_verdict(evidence)
@@ -944,6 +953,45 @@ class BatchSupervisor:
                 self.analysis_input_builder.metrics_summary(row, evidence),
                 separators=(",", ":"), sort_keys=True,
             ),
+            "evaluator": "ats-lab-deterministic-analyzer",
+        }
+
+    def _deterministic_failure_analysis_payload(
+        self, row: dict,
+    ) -> dict[str, Any] | None:
+        """Close terminal strategy failures without another analyzer turn."""
+        try:
+            raw_error = json.loads(row.get("error_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_error = {}
+        if not isinstance(raw_error, dict):
+            return None
+        if str(raw_error.get("kind") or "") != "strategy_or_harness":
+            return None
+        code = str(raw_error.get("code") or "execution_failed")[:96]
+        detail = " ".join(
+            str(raw_error.get("detail") or "terminal execution failure").split()
+        )[:240]
+        revision_codes = {
+            "missing_exit_framework",
+            "source_strategy_not_found",
+        }
+        verdict = (
+            Verdict.REVISE if code in revision_codes else Verdict.REJECT
+        )
+        next_action = (
+            "Apply one bounded harness or strategy correction, then rerun."
+            if verdict is Verdict.REVISE
+            else "Discard terminal failure; no performance evidence supports promotion."
+        )
+        return {
+            "experiment_id": row["experiment_id"],
+            "verdict": verdict.value,
+            "finding": (
+                f"Terminal strategy or harness failure ({code}); "
+                f"no performance evidence. {detail}"
+            ),
+            "next_action": next_action,
             "evaluator": "ats-lab-deterministic-analyzer",
         }
 

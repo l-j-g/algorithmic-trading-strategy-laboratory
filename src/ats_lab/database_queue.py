@@ -146,18 +146,63 @@ class QueueMixin:
                    JOIN runs r ON r.work_item_id=w.id
                    WHERE w.state='running'
                      AND w.blocker_code='awaiting_batch_evaluation'
+                     AND (w.retry_after IS NULL OR w.retry_after<=?)
                      AND r.id=(
                          SELECT latest.id FROM runs latest
                          WHERE latest.work_item_id=w.id
                          ORDER BY COALESCE(latest.finished_at,'' ) DESC,
                                   latest.rowid DESC LIMIT 1
                      )"""
-        parameters: tuple = ()
+        parameters: tuple = (utc_now(),)
         if worker_id:
             query += " AND w.claimed_by=?"
-            parameters = (worker_id,)
+            parameters += (worker_id,)
         query += " ORDER BY w.blocker_detail,w.priority,w.created_at,w.id"
         return self.rows(query, parameters)
+
+    def defer_batch_analysis_retry(
+        self, work_item_id: str, *, blocker_code: str,
+        blocker_detail: str, retry_after: str,
+    ) -> dict:
+        """Back off analyzer transport failures without releasing execution evidence."""
+        now = utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE id=?", (work_item_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown work item: {work_item_id}")
+            if (
+                row["state"] != WorkState.RUNNING.value
+                or row["blocker_code"] != "awaiting_batch_evaluation"
+            ):
+                raise ValueError(
+                    "work item is not awaiting batch evaluation: "
+                    f"{work_item_id}"
+                )
+            connection.execute(
+                "UPDATE work_items SET retry_after=?,updated_at=? WHERE id=?",
+                (retry_after, now, work_item_id),
+            )
+            connection.execute(
+                """INSERT INTO events(
+                       aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                   ) VALUES('work_item',?,'analysis_retry_deferred',?,?)""",
+                (
+                    work_item_id,
+                    json.dumps({
+                        "blocker_code": blocker_code,
+                        "detail": blocker_detail,
+                        "retry_after": retry_after,
+                        "attempt_charged": False,
+                    }, sort_keys=True),
+                    now,
+                ),
+            )
+            return dict(connection.execute(
+                "SELECT * FROM work_items WHERE id=?", (work_item_id,)
+            ).fetchone())
 
     def archive_scheduled_dependents(
         self, work_item_id: str, *, reason: str,

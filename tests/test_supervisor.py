@@ -1233,6 +1233,77 @@ class BatchSupervisorTests(unittest.TestCase):
             )
             self.assertEqual(failure["evidence"], [])
 
+    def test_terminal_strategy_failures_finalize_without_model_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            execution = self.execution_result()
+            for result in execution.payload["results"]:
+                result.update({
+                    "outcome": "blocked",
+                    "blocker_code": "jesse_execution_stopped",
+                    "detail": "terminal strategy or harness failure",
+                })
+            dispatcher = SequenceDispatcher([execution])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            result = supervisor.run_round()
+
+            self.assertEqual(result["status"], "batch_complete")
+            self.assertEqual(
+                [request["task_type"] for request in dispatcher.requests],
+                ["execute_batch"],
+            )
+            self.assertEqual(
+                database.rows(
+                    "SELECT verdict,COUNT(*) count FROM evaluations GROUP BY verdict"
+                ),
+                [{"verdict": "reject", "count": 2}],
+            )
+
+    def test_analyzer_infrastructure_failure_backs_off_pending_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            dispatcher = SequenceDispatcher([
+                self.execution_result(),
+                DispatchResult(
+                    outcome="retry",
+                    blocker_code="executor_provider_failed",
+                    detail="provider unavailable",
+                ),
+            ])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                retry_delay_seconds=60,
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            result = supervisor.run_round()
+
+            self.assertEqual(result["status"], "analysis_failed")
+            self.assertEqual(
+                database.pending_batch_evaluation("batch-worker"), [],
+            )
+            deferred = database.rows(
+                """SELECT state,blocker_code,retry_after FROM work_items
+                   WHERE state='running' ORDER BY id"""
+            )
+            self.assertEqual(len(deferred), 2)
+            self.assertTrue(all(row["retry_after"] for row in deferred))
+            self.assertTrue(all(
+                row["blocker_code"] == "awaiting_batch_evaluation"
+                for row in deferred
+            ))
+            self.assertEqual(
+                database.rows(
+                    """SELECT COUNT(*) count FROM events
+                       WHERE event_type='analysis_retry_deferred'"""
+                )[0]["count"],
+                2,
+            )
+
     def test_legacy_retry_limit_is_recovered_into_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
@@ -1249,19 +1320,7 @@ class BatchSupervisorTests(unittest.TestCase):
                        blocker_detail='strategy has no explicit exit'
                        WHERE id='JOB-2'"""
                 )
-            analysis = DispatchResult(outcome="finished", payload={
-                "outcome": "finished",
-                "evaluations": [{
-                    "experiment_id": "EXP-1", "verdict": "reject",
-                    "finding": "Execution harness is not viable.",
-                    "next_action": "Discard this strategy chain.",
-                }, {
-                    "experiment_id": "EXP-2", "verdict": "revise",
-                    "finding": "One bounded exit implementation is viable.",
-                    "next_action": "Add one explicit exit framework.",
-                }],
-            })
-            dispatcher = SequenceDispatcher([analysis])
+            dispatcher = SequenceDispatcher([])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
                 resource_policy=ResourcePolicy(
@@ -1284,14 +1343,7 @@ class BatchSupervisorTests(unittest.TestCase):
                 {"experiment_id": "EXP-1", "verdict": "reject"},
                 {"experiment_id": "EXP-2", "verdict": "revise"},
             ])
-            self.assertEqual(
-                dispatcher.requests[0]["executions"][0]["execution"]["failure"]["code"],
-                "jesse_execution_stopped",
-            )
-            self.assertEqual(
-                dispatcher.requests[0]["executions"][1]["execution"]["failure"]["code"],
-                "missing_exit_framework",
-            )
+            self.assertEqual(dispatcher.requests, [])
 
     def test_analysis_cohorts_are_balanced_four_to_eight_and_split_hpo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
