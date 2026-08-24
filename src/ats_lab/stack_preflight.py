@@ -105,8 +105,10 @@ class StackPreflight:
             ),
             (
                 "jesse_candle_data",
-                self._psql_command("SELECT COUNT(*) FROM candle;"),
-                lambda output: output.strip().isdigit() and int(output) > 0,
+                self._psql_command(
+                    "SELECT EXISTS (SELECT * FROM candle);"
+                ),
+                lambda output: output.strip().lower() == "t",
                 "Jesse candle table contains no data",
             ),
         )

@@ -25,8 +25,8 @@ class StackPreflightTests(unittest.TestCase):
                 stdout = "1"
             elif "pg_catalog.pg_tables" in command[-1]:
                 stdout = "backtestsession\ncandle\nsignificancetestsession\n"
-            elif "COUNT(*)" in command[-1]:
-                stdout = "42"
+            elif "EXISTS (SELECT * FROM candle)" in command[-1]:
+                stdout = "t"
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
         def probe(name, url, kind):
@@ -109,8 +109,8 @@ class StackPreflightTests(unittest.TestCase):
                 stdout = "1"
             if "pg_catalog.pg_tables" in command[-1]:
                 stdout = "backtestsession\ncandle\nsignificancetestsession\n"
-            if "COUNT(*)" in command[-1]:
-                stdout = "42"
+            if "EXISTS (SELECT * FROM candle)" in command[-1]:
+                stdout = "t"
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
         result = StackPreflight(
@@ -141,8 +141,8 @@ class StackPreflightTests(unittest.TestCase):
                     "backtestsession\ncandle\nsignificancetestsession\n"
                     "strategy_notes\n"
                 )
-            elif "COUNT(*)" in command[-1]:
-                stdout = "42"
+            elif "EXISTS (SELECT * FROM candle)" in command[-1]:
+                stdout = "t"
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
         result = StackPreflight(
@@ -190,8 +190,8 @@ class StackPreflightTests(unittest.TestCase):
                 stdout = "1"
             elif "pg_catalog.pg_tables" in command[-1]:
                 stdout = "backtestsession\ncandle\nsignificancetestsession\n"
-            elif "COUNT(*)" in command[-1]:
-                stdout = "42"
+            elif "EXISTS (SELECT * FROM candle)" in command[-1]:
+                stdout = "t"
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
         def probe(name, url, _kind):
@@ -217,8 +217,8 @@ class StackPreflightTests(unittest.TestCase):
                 stdout = "1"
             elif "pg_catalog.pg_tables" in command[-1]:
                 stdout = "backtestsession\ncandle\nsignificancetestsession\n"
-            elif "COUNT(*)" in command[-1]:
-                stdout = "0"
+            elif "EXISTS (SELECT * FROM candle)" in command[-1]:
+                stdout = "f"
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
         result = StackPreflight(command_runner=run).check()
@@ -291,8 +291,8 @@ class McpProbeTests(unittest.TestCase):
                 stdout = "1"
             elif "pg_catalog.pg_tables" in command[-1]:
                 stdout = "backtestsession\ncandle\nsignificancetestsession\n"
-            elif "COUNT(*)" in command[-1]:
-                stdout = "42"
+            elif "EXISTS (SELECT * FROM candle)" in command[-1]:
+                stdout = "t"
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
         preflight = StackPreflight(
