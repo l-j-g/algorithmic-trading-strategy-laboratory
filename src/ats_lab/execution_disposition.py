@@ -30,6 +30,7 @@ INFRASTRUCTURE_FAILURE_CODES = frozenset({
     "direct_mcp_error", "malformed_jesse_session",
     "invalid_jesse_metrics", "jesse_execution_deferred",
     "jesse_draft_not_started", "jesse_start_recovery_failed",
+    "jesse_missing_session_recovered",
     "jesse_zombie_recovery_pending", "jesse_zombie_recovery_required",
     "memory_unavailable", "memory_delivery_failed", "memory_recall_failed",
 })

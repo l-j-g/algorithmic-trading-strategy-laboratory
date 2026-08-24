@@ -1069,6 +1069,19 @@ class DirectMcpDispatcher:
             )
         except (KeyError, TypeError, ValueError, McpError, OSError) as error:
             checkpoint = self._checkpoint(work_item_id)
+            if checkpoint and self._is_missing_session_error(error):
+                if self._recover_missing_session_checkpoint(
+                    work_item_id, checkpoint["session_id"], str(error),
+                ):
+                    return self._record_and_return(
+                        client, work_item_id, polls, "retry",
+                        blocker_code="jesse_missing_session_recovered",
+                        detail=(
+                            f"session {checkpoint['session_id']} unavailable; "
+                            "checkpoint removed and one replacement session allowed"
+                        ),
+                        attempt_charged=False,
+                    )
             if checkpoint and checkpoint["state"] == "draft":
                 self._save_checkpoint(
                     work_item_id, experiment_id, checkpoint["session_id"],
@@ -1628,6 +1641,74 @@ class DirectMcpDispatcher:
                 ),
             )
         return classification
+
+    @staticmethod
+    def _is_missing_session_error(error: Exception) -> bool:
+        detail = str(error).lower()
+        return (
+            "failed to retrieve session" in detail
+            or "session not found" in detail
+            or "unknown session" in detail
+        )
+
+    def _recover_missing_session_checkpoint(
+        self, work_item_id: str, session_id: str, reason: str,
+    ) -> bool:
+        """Allow one replacement after Jesse lost a nonterminal checkpoint."""
+        now = utc_now()
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            checkpoint = connection.execute(
+                """SELECT state FROM direct_execution_sessions
+                   WHERE work_item_id=? AND session_id=?""",
+                (work_item_id, session_id),
+            ).fetchone()
+            if checkpoint is None or checkpoint["state"] != "start_recovery_failed":
+                return False
+            if connection.execute(
+                "SELECT 1 FROM runs WHERE work_item_id=? LIMIT 1",
+                (work_item_id,),
+            ).fetchone() is not None:
+                return False
+            if connection.execute(
+                "SELECT 1 FROM direct_execution_recoveries WHERE work_item_id=?",
+                (work_item_id,),
+            ).fetchone() is not None:
+                return False
+            connection.execute(
+                """INSERT INTO direct_execution_recoveries(
+                       work_item_id,old_session_id,old_state,reason,
+                       replacement_allowed,created_at,updated_at
+                   ) VALUES (?,?,?,?,1,?,?)""",
+                (
+                    work_item_id, session_id, checkpoint["state"],
+                    f"Jesse session unavailable: {reason}"[:1000], now, now,
+                ),
+            )
+            deleted = connection.execute(
+                """DELETE FROM direct_execution_sessions
+                   WHERE work_item_id=? AND session_id=?
+                     AND state='start_recovery_failed'""",
+                (work_item_id, session_id),
+            )
+            if deleted.rowcount != 1:
+                raise McpError("missing session checkpoint changed during recovery")
+            connection.execute(
+                """INSERT INTO events(
+                       aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                   ) VALUES ('work_item',?,'missing_jesse_session_recovered',?,?)""",
+                (
+                    work_item_id,
+                    json.dumps({
+                        "old_session_id": session_id,
+                        "old_state": checkpoint["state"],
+                        "reason": reason,
+                        "replacement_allowance": 1,
+                    }, sort_keys=True),
+                    now,
+                ),
+            )
+        return True
 
     def _mark_recovery_attempted(self, work_item_id: str) -> None:
         with self.database.connect() as connection:

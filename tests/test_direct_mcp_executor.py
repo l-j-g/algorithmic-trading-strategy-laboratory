@@ -769,6 +769,52 @@ class DirectMcpExecutorTests(unittest.TestCase):
             self.assertNotIn("Infinity", checkpoint["metrics_json"])
             self.assertIn('"net_profit_percentage":null', checkpoint["metrics_json"])
 
+    def test_missing_start_recovery_session_allows_one_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running"]
+        ) as server:
+            dispatcher, database = self.make_dispatcher(tmp, server)
+            request = batch_request()["requests"][0]
+            fingerprint = dispatcher._fingerprint(request)
+            with database.connect() as connection:
+                connection.execute(
+                    """INSERT INTO direct_execution_sessions(
+                           work_item_id,experiment_id,session_id,
+                           request_fingerprint,state,created_at,updated_at
+                       ) VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        "JOB-1", "EXP-1", "lost-session", fingerprint,
+                        "start_recovery_failed",
+                        "2026-08-24T00:00:00Z", "2026-08-24T00:00:00Z",
+                    ),
+                )
+            with patch.object(
+                dispatcher, "_fetch_session",
+                side_effect=McpError(
+                    "get_backtest_session failed: Failed to retrieve session: "
+                    "Internal Server Error"
+                ),
+            ):
+                result = dispatcher.dispatch(batch_request())
+            item = result.payload["results"][0]
+            self.assertEqual(item["outcome"], "retry")
+            self.assertEqual(
+                item["blocker_code"], "jesse_missing_session_recovered",
+            )
+            self.assertEqual(
+                database.rows("SELECT * FROM direct_execution_sessions"), [],
+            )
+            recovery = database.rows(
+                "SELECT * FROM direct_execution_recoveries WHERE work_item_id='JOB-1'"
+            )[0]
+            self.assertEqual(recovery["old_session_id"], "lost-session")
+            self.assertEqual(recovery["replacement_allowed"], 1)
+            events = database.rows(
+                """SELECT event_type FROM events WHERE aggregate_id='JOB-1'
+                   AND event_type='missing_jesse_session_recovered'""",
+            )
+            self.assertEqual(len(events), 1)
+
     def test_checkpoint_save_failure_records_orphaned_draft_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["running", "finished"]
