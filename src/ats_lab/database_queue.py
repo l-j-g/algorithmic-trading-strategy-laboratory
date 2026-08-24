@@ -655,6 +655,7 @@ class QueueMixin:
         """Fill ready capacity from scheduled work whose dependencies finished."""
         if active_limit < 1:
             raise ValueError("active_limit must be positive")
+        self.reconcile_scheduled_dependencies()
         now = utc_now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -689,6 +690,149 @@ class QueueMixin:
                 (now, *ids),
             )
             return len(ids)
+
+    def reconcile_scheduled_dependencies(self, *, limit: int = 1000) -> dict[str, list[str]]:
+        """Resolve scheduled children whose dependency state cannot progress.
+
+        Missing or archived parents make a child impossible and archive it.
+        Blocked parents block a child explicitly. Children blocked only by this
+        dependency rule reopen to ``scheduled`` once every parent finishes.
+        Repeat passes close dependency chains in one call.
+        """
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        result = {"archived": [], "blocked": [], "released": []}
+        while sum(len(ids) for ids in result.values()) < limit:
+            changed = False
+            with self.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute(
+                    """SELECT child.id AS child_id,child.state AS child_state,
+                              child.blocker_code,
+                              dependency.value AS dependency_id,
+                              parent.state AS dependency_state
+                       FROM work_items child
+                       JOIN json_each(child.dependencies_json) dependency
+                       LEFT JOIN work_items parent
+                         ON parent.id=dependency.value
+                       WHERE child.state IN ('scheduled','blocked')
+                       ORDER BY child.id,dependency.value"""
+                ).fetchall()
+                dependencies: dict[str, dict] = {}
+                for row in rows:
+                    item = dependencies.setdefault(row["child_id"], {
+                        "state": row["child_state"],
+                        "blocker_code": row["blocker_code"],
+                        "missing": [],
+                        "archived": [],
+                        "blocked": [],
+                        "unfinished": [],
+                    })
+                    dependency_id = row["dependency_id"]
+                    dependency_state = row["dependency_state"]
+                    if dependency_state is None:
+                        item["missing"].append(dependency_id)
+                    elif dependency_state == WorkState.ARCHIVED.value:
+                        item["archived"].append(dependency_id)
+                    elif dependency_state == WorkState.BLOCKED.value:
+                        item["blocked"].append(dependency_id)
+                    elif dependency_state != WorkState.FINISHED.value:
+                        item["unfinished"].append(dependency_id)
+
+                for child_id, item in dependencies.items():
+                    if sum(len(ids) for ids in result.values()) >= limit:
+                        break
+                    row = connection.execute(
+                        "SELECT * FROM work_items WHERE id=?", (child_id,)
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    missing = item["missing"]
+                    archived = item["archived"]
+                    blocked = item["blocked"]
+                    if missing or archived:
+                        reason_code = (
+                            "missing_dependency" if missing
+                            else "dependency_archived"
+                        )
+                        detail = (
+                            "Dependency work item is missing: "
+                            + ", ".join(missing)
+                            if missing else
+                            "Dependency work item is archived: "
+                            + ", ".join(archived)
+                        )
+                        self._transition_work_item_row(
+                            connection, row, WorkState.ARCHIVED,
+                            allowed_from=(WorkState.SCHEDULED, WorkState.BLOCKED),
+                            blocker_code=reason_code,
+                            blocker_detail=detail,
+                        )
+                        connection.execute(
+                            """INSERT INTO events(
+                                   aggregate_type,aggregate_id,event_type,
+                                   payload_json,occurred_at
+                               ) VALUES ('work_item',?,
+                                         'dependency_reconciled',?,?)""",
+                            (child_id, json.dumps({
+                                "action": "archived",
+                                "reason": reason_code,
+                                "dependencies": missing or archived,
+                            }, sort_keys=True), utc_now()),
+                        )
+                        result["archived"].append(child_id)
+                        changed = True
+                    elif blocked and row["state"] == WorkState.SCHEDULED.value:
+                        detail = (
+                            "Dependency work item is blocked: "
+                            + ", ".join(blocked)
+                        )
+                        self._transition_work_item_row(
+                            connection, row, WorkState.BLOCKED,
+                            allowed_from=(WorkState.SCHEDULED,),
+                            blocker_code="dependency_blocked",
+                            blocker_detail=detail,
+                        )
+                        connection.execute(
+                            """INSERT INTO events(
+                                   aggregate_type,aggregate_id,event_type,
+                                   payload_json,occurred_at
+                               ) VALUES ('work_item',?,
+                                         'dependency_reconciled',?,?)""",
+                            (child_id, json.dumps({
+                                "action": "blocked",
+                                "reason": "dependency_blocked",
+                                "dependencies": blocked,
+                            }, sort_keys=True), utc_now()),
+                        )
+                        result["blocked"].append(child_id)
+                        changed = True
+                    elif (
+                        row["state"] == WorkState.BLOCKED.value
+                        and row["blocker_code"] == "dependency_blocked"
+                        and not blocked
+                        and not item["unfinished"]
+                    ):
+                        self._transition_work_item_row(
+                            connection, row, WorkState.SCHEDULED,
+                            allowed_from=(WorkState.BLOCKED,),
+                        )
+                        connection.execute(
+                            """INSERT INTO events(
+                                   aggregate_type,aggregate_id,event_type,
+                                   payload_json,occurred_at
+                               ) VALUES ('work_item',?,
+                                         'dependency_reconciled',?,?)""",
+                            (child_id, json.dumps({
+                                "action": "released",
+                                "reason": "dependencies_finished",
+                            }, sort_keys=True), utc_now()),
+                        )
+                        result["released"].append(child_id)
+                        changed = True
+            if not changed:
+                break
+        return result
 
     def mark_unroutable_hpo_requirements_pending(self) -> int:
         """Keep HPO jobs without routes out of execution claims."""

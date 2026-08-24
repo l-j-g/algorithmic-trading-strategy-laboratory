@@ -87,6 +87,13 @@ class HpoPersistenceTests(unittest.TestCase):
         )
         self.assertEqual(retry["state"], "waiting_retry")
         claimed = self.database.claim_hpo_analysis("analyzer")
+        with self.assertRaises(ValueError):
+            self.database.terminalize_hpo_analysis(
+                claimed["id"],
+                disposition="paper_trade_candidate",
+                finding="Unsafe direct promotion.",
+                next_action="Run validation.",
+            )
         final = self.database.terminalize_hpo_analysis(
             claimed["id"],
             disposition="revise",

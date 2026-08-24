@@ -1312,7 +1312,7 @@ class HpoMixin:
         finding: str,
         next_action: str,
     ) -> dict:
-        if disposition not in {"paper_trade_candidate", "revise", "reject"}:
+        if disposition not in {"revise", "reject"}:
             raise ValueError("invalid HPO disposition")
         now = utc_now()
         with self.connect() as connection:

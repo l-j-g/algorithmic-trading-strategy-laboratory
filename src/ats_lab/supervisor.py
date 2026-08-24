@@ -631,6 +631,22 @@ class BatchSupervisor:
             "paper_trade_candidate", "revise", "reject",
         }:
             verdict_value = "revise"
+        validation_numbers = [
+            number for number, selection in selected_by_number.items()
+            if selection.get("classification") in {
+                "validation_candidate", "selected",
+            }
+        ]
+        if verdict_value == "paper_trade_candidate":
+            finding = (
+                f"{finding} HPO promotion claim held until validation "
+                "evidence is complete."
+            )
+            next_action = (
+                f"{next_action} Do not promote before OOS and rolling "
+                "validation."
+            )
+            verdict_value = "revise"
         self.database.add_evaluation(Evaluation(
             experiment_id=experiment_id,
             verdict=Verdict(verdict_value),
@@ -641,12 +657,6 @@ class BatchSupervisor:
             next_step=next_action,
             evaluator="ats-lab-hpo-analyzer",
         ))
-        validation_numbers = [
-            number for number, selection in selected_by_number.items()
-            if selection.get("classification") in {
-                "validation_candidate", "selected",
-            }
-        ]
         if validation_numbers:
             validations = self.database.schedule_hpo_validations(
                 study_id, validation_numbers,

@@ -222,6 +222,85 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(states["PENDING"], "scheduled")
             self.assertEqual(states["RUNNABLE"], "ready")
 
+    def test_dependency_reconciliation_closes_dead_paths_and_releases_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            for experiment_id in (
+                "ARCHIVED-PARENT", "ARCHIVED-CHILD", "ARCHIVED-GRANDCHILD",
+                "BLOCKED-PARENT", "BLOCKED-CHILD", "MISSING-CHILD",
+            ):
+                database.upsert_experiment(ExperimentSpec(
+                    id=experiment_id, strategy_name="Test",
+                ))
+            database.upsert_work_item(WorkItem(
+                id="ARCHIVED-PARENT", experiment_id="ARCHIVED-PARENT",
+                priority=1, state=WorkState.ARCHIVED,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="ARCHIVED-CHILD", experiment_id="ARCHIVED-CHILD",
+                priority=1, state=WorkState.SCHEDULED,
+                dependencies=("ARCHIVED-PARENT",),
+            ))
+            database.upsert_work_item(WorkItem(
+                id="ARCHIVED-GRANDCHILD", experiment_id="ARCHIVED-GRANDCHILD",
+                priority=1, state=WorkState.SCHEDULED,
+                dependencies=("ARCHIVED-CHILD",),
+            ))
+            database.upsert_work_item(WorkItem(
+                id="BLOCKED-PARENT", experiment_id="BLOCKED-PARENT",
+                priority=1, state=WorkState.BLOCKED,
+                blocker_code="operator_required",
+            ))
+            database.upsert_work_item(WorkItem(
+                id="BLOCKED-CHILD", experiment_id="BLOCKED-CHILD",
+                priority=1, state=WorkState.SCHEDULED,
+                dependencies=("BLOCKED-PARENT",),
+            ))
+            database.upsert_work_item(WorkItem(
+                id="MISSING-CHILD", experiment_id="MISSING-CHILD",
+                priority=1, state=WorkState.SCHEDULED,
+                dependencies=("MISSING-PARENT",),
+            ))
+
+            first = database.reconcile_scheduled_dependencies()
+
+            self.assertEqual(
+                set(first["archived"]),
+                {"ARCHIVED-CHILD", "ARCHIVED-GRANDCHILD", "MISSING-CHILD"},
+            )
+            self.assertEqual(first["blocked"], ["BLOCKED-CHILD"])
+            states = {
+                row["id"]: row["state"]
+                for row in database.rows("SELECT id,state FROM work_items")
+            }
+            self.assertEqual(states["ARCHIVED-GRANDCHILD"], "archived")
+            self.assertEqual(states["BLOCKED-CHILD"], "blocked")
+
+            database.transition_work_item(
+                "BLOCKED-PARENT", WorkState.FINISHED,
+                allowed_from=(WorkState.BLOCKED,),
+            )
+            second = database.reconcile_scheduled_dependencies()
+
+            self.assertEqual(second["released"], ["BLOCKED-CHILD"])
+            self.assertEqual(
+                database.rows(
+                    "SELECT state,blocker_code FROM work_items "
+                    "WHERE id='BLOCKED-CHILD'"
+                )[0],
+                {"state": "scheduled", "blocker_code": None},
+            )
+            events = database.rows(
+                "SELECT event_type FROM events WHERE aggregate_id='BLOCKED-CHILD' "
+                "ORDER BY rowid"
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["state_changed", "dependency_reconciled", "state_changed",
+                 "dependency_reconciled"],
+            )
+
     def test_hpo_without_routes_is_held_for_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")

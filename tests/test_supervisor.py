@@ -848,7 +848,7 @@ class BatchSupervisorTests(unittest.TestCase):
                         "experiment_id": (
                             request["executions"][0]["experiment_id"]
                         ),
-                        "verdict": "revise", "finding": "f",
+                        "verdict": "paper_trade_candidate", "finding": "f",
                         "next_action": "n",
                     }],
                 })
@@ -858,6 +858,16 @@ class BatchSupervisorTests(unittest.TestCase):
             outcome = supervisor._analyze_hpo_job(job, recovered=0, promoted=0)
 
             self.assertIn(outcome["status"], {"terminal", "finished"})
+            self.assertEqual(outcome["disposition"], "revise")
+            detail = database.hpo_study_detail(result["study_id"])
+            self.assertEqual(detail["lifecycle_state"], "revise")
+            self.assertEqual(
+                database.rows(
+                    "SELECT verdict FROM evaluations "
+                    "WHERE evaluator='ats-lab-hpo-analyzer'"
+                )[0]["verdict"],
+                "revise",
+            )
             evidence = captured["request"]["executions"][0]["evidence"]
             self.assertEqual(len(evidence), 4)
 
