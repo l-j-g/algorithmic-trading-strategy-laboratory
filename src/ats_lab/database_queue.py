@@ -656,6 +656,9 @@ class QueueMixin:
         if active_limit < 1:
             raise ValueError("active_limit must be positive")
         self.reconcile_scheduled_dependencies()
+        reconcile_hpo = getattr(self, "reconcile_hpo_validation_jobs", None)
+        if reconcile_hpo is not None:
+            reconcile_hpo()
         now = utc_now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")

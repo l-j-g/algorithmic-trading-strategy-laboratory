@@ -262,6 +262,41 @@ class HpoMixin:
         })
         return studies[0]
 
+    def reconcile_hpo_validation_jobs(self, *, limit: int = 1000) -> int:
+        """Keep HPO validation projections aligned with queue work state."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        terminal_states = {"finished", "archived"}
+        changed = 0
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT v.id,v.state AS validation_state,v.completed_at,
+                          w.state AS work_state,w.updated_at AS work_updated_at
+                   FROM hpo_validation_jobs v
+                   JOIN work_items w ON w.id=v.work_item_id
+                   WHERE v.state!=w.state
+                      OR (w.state IN ('finished','archived')
+                          AND v.completed_at IS NULL)
+                      OR (w.state NOT IN ('finished','archived')
+                          AND v.completed_at IS NOT NULL)
+                   ORDER BY v.id LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            for row in rows:
+                completed_at = (
+                    row["work_updated_at"]
+                    if row["work_state"] in terminal_states
+                    else None
+                )
+                connection.execute(
+                    """UPDATE hpo_validation_jobs
+                       SET state=?,completed_at=? WHERE id=?""",
+                    (row["work_state"], completed_at, row["id"]),
+                )
+                changed += 1
+        return changed
+
     def hpo_studies_needing_default_routes(self) -> list[dict]:
         """Return scheduled HPO studies with no operator route choices.
 

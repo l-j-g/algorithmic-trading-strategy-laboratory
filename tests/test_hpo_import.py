@@ -341,6 +341,21 @@ class OptunaImportTests(unittest.TestCase):
                 execution["experiment"]["routes"][0]["timeframe"], "1h",
             )
 
+        validation_id = validations[0]["work_item_id"]
+        self.database.transition_work_item(
+            validation_id, WorkState.FINISHED,
+            allowed_from=(WorkState.SCHEDULED,),
+        )
+        self.assertEqual(self.database.reconcile_hpo_validation_jobs(), 1)
+        projected = self.database.rows(
+            "SELECT state,completed_at FROM hpo_validation_jobs "
+            "WHERE work_item_id=?",
+            (validation_id,),
+        )[0]
+        self.assertEqual(projected["state"], "finished")
+        self.assertIsNotNone(projected["completed_at"])
+        self.assertEqual(self.database.reconcile_hpo_validation_jobs(), 0)
+
     def test_validation_requires_each_requested_split_route(self) -> None:
         result = import_optuna_study(
             self.database,
