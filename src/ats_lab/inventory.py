@@ -5,13 +5,11 @@ from pathlib import Path
 
 
 REPLACE = {
-    "research/TEST_JOB_QUEUE.md": "active_queue database view",
-    "research/RESEARCH_JOURNAL.md": "evaluation history database view",
-    "research/automation/job_state.json": "work_items and runs tables",
-    "research/automation/promotion_state.json": "work item retry fields",
-    "research/automation/candidate_dashboard.html": "generated candidate view",
-    "research/automation/LAST_SESSION_HANDOFF.md": "operational status query",
-    "research/automation/PROGRESS_LOG.md": "events table",
+    "research/automation/job_state.json": "canonical SQLite",
+    "research/automation/headless_runs/*.json": "canonical evidence rows",
+    "candidate_dashboard.html": "web dashboard + /candidates",
+    "LAST_SESSION_HANDOFF.md": "events table",
+    "PROGRESS_LOG.md": "events table",
 }
 REMOVE_PATTERNS = (
     "research/automation/run_next_job.sh",

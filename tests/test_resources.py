@@ -27,8 +27,8 @@ monte_carlo_scenarios = 500
 synthesis_inspect_limit = 25
 synthesis_generate_limit = 25
 synthesis_low_watermark = 5
-synthesis_min_new_concepts = 5
-synthesis_max_improvements = 20
+synthesis_min_new_concepts = 10
+synthesis_max_improvements = 15
 synthesis_retry_cooldown_seconds = 300
 synthesis_lease_seconds = 3600
 active_ready_limit = 3
@@ -50,7 +50,7 @@ rolling_lookback_days = 90
             self.assertEqual(policy.hpo_trials_per_parameter, 300)
             self.assertEqual(policy.synthesis_generate_limit, 25)
             self.assertEqual(policy.synthesis_low_watermark, 5)
-            self.assertEqual(policy.synthesis_min_new_concepts, 5)
+            self.assertEqual(policy.synthesis_min_new_concepts, 10)
             self.assertEqual(policy.analysis_parallelism, 2)
             self.assertEqual(policy.analyzer_timeout_seconds, 720)
             self.assertEqual(policy.monte_carlo_scenarios, 500)

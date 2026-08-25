@@ -20,19 +20,12 @@ read-only until their evidence is verified in SQLite.
 - candidate HTML -> database candidate view.
 - handoff/progress logs -> events and operational-status view.
 
-## Compatibility-only; do not operate
+## Legacy cleanup complete
 
-- Markdown queue mutation scripts.
-- JSON operational sidecars superseded by SQLite.
-- duplicate starter/analyzer/promotion shell loops.
-- archived inline prompt variants and obsolete plans.
-- redundant experiment logging/review skills.
-- obsolete orchestration-framework references and artifacts.
+Markdown/JSON sidecars, migrate-legacy, legacy_adapter/import removed.
+All state is in SQLite. Historical references archived in docs only.
 
-Jesse legacy loop code and operational sidecars are retired from the active
-`jesse-src` tree. Historical queue/journal files and raw headless evidence
-remain read-only because experiment records link them. New queue, run,
-evaluation and synthesis writes must go through `ats-lab supervisor`.
+New operations via supervisor only.
 
 ## Keep outside database
 

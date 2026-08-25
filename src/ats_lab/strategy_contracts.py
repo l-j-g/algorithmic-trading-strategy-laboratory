@@ -119,22 +119,23 @@ class StrategyContractValidator:
                     "risk_to_qty sizing must cap entry notional at 95% available_margin",
                 ))
 
-        entry_rule = experiment.get("entry_rule")
-        if isinstance(entry_rule, Mapping):
-            for name in ("stop_loss", "take_profit"):
-                if name not in entry_rule:
-                    continue
-                value = entry_rule[name]
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    issues.append(ContractIssue(
-                        "scalar_exit_target",
-                        f"{name} must be a Jesse quantity/price sequence, not a scalar",
-                    ))
-                elif isinstance(value, str):
-                    issues.append(ContractIssue(
-                        "scalar_exit_target",
-                        f"{name} must be a Jesse quantity/price sequence, not text",
-                    ))
+        # Scan entry_rule and top-level for stop_loss/take_profit (exits may be declared outside go_long)
+        for container in (experiment, experiment.get("entry_rule") or {}):
+            if isinstance(container, Mapping):
+                for name in ("stop_loss", "take_profit"):
+                    if name not in container:
+                        continue
+                    value = container[name]
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        issues.append(ContractIssue(
+                            "scalar_exit_target",
+                            f"{name} must be a Jesse quantity/price sequence, not a scalar",
+                        ))
+                    elif isinstance(value, str):
+                        issues.append(ContractIssue(
+                            "scalar_exit_target",
+                            f"{name} must be a Jesse quantity/price sequence, not text",
+                        ))
         return tuple(issues)
 
     def validate_readiness(self, entry: Mapping[str, Any]) -> ReadinessValidation:

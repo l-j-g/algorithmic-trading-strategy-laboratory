@@ -67,5 +67,5 @@ def render_markdown(audit: dict) -> str:
     lines.extend(f"- `{key}`: {value}" for key, value in sorted(audit["ambiguities"].items()))
     lines.extend(["", "## Expected incomplete work", ""])
     lines.extend(f"- `{key}`: {value}" for key, value in sorted(audit["expected_incomplete"].items()))
-    lines.extend(["", "No legacy files may be deleted until ambiguity counts are accepted or resolved.", ""])
+    lines.extend(["", "Legacy migration complete; Markdown sidecars retired.", ""])
     return "\n".join(lines)

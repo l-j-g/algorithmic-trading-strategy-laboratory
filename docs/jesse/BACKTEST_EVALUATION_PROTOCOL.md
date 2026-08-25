@@ -129,7 +129,7 @@ Record per run and, when possible, per route:
 Reject if any of these hold:
 
 - negative expectancy after fees across the main comparison window
-- drawdown above 30% at 1x without exceptional route robustness
+  - drawdown above 30% at 1x (leverage-aware using configured_futures_leverage from session snapshot) without exceptional route robustness
 - strategy only works on one symbol and fails the others badly
 - one isolated trade or one narrow period explains most profits
 - trade count is too low to evaluate and the thesis needs frequency
@@ -154,8 +154,8 @@ independent windows, fees, drawdown, and liquidation behavior remain required.
 
 Only consider HPO if:
 
-- baseline is positive after fees
-- every dated route/window clears the normalized activity floor:
+- baseline is positive after fees and positive expectancy
+  - every dated route/window clears the normalized activity floor:
   `max(12, ceil(20 * window_days / 365.25))` trades; legacy rows without
   complete dates use the configured fallback
 - at least two independent windows are positive or flat when the strategy is
