@@ -500,6 +500,53 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 server.http.deleted_sessions, ["mcp-test-session"],
             )
 
+    def test_dispatch_runs_independent_direct_items_in_parallel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer([]) as server:
+            dispatcher, _ = self.make_dispatcher(
+                tmp, server,
+                resource_policy=ResourcePolicy(execution_parallelism=2),
+            )
+            first = batch_request()["requests"][0]
+            second = json.loads(json.dumps(first))
+            second["work_item_id"] = "JOB-2"
+            second["experiment_id"] = "EXP-2"
+            barrier = threading.Barrier(2)
+            active = 0
+            peak = 0
+            lock = threading.Lock()
+
+            def execute(item: dict) -> dict:
+                nonlocal active, peak
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                try:
+                    try:
+                        barrier.wait(timeout=2)
+                    except threading.BrokenBarrierError:
+                        pass
+                    return {
+                        "work_item_id": item["work_item_id"],
+                        "outcome": "retry",
+                        "blocker_code": "test_parallelism",
+                        "detail": "test result",
+                    }
+                finally:
+                    with lock:
+                        active -= 1
+
+            with patch.object(dispatcher, "_execute_one", side_effect=execute):
+                result = dispatcher.dispatch({
+                    "task_type": "execute_batch",
+                    "requests": [first, second],
+                })
+
+            self.assertEqual(peak, 2)
+            self.assertEqual(
+                [item["work_item_id"] for item in result.payload["results"]],
+                ["JOB-1", "JOB-2"],
+            )
+
     def test_deferred_dispatch_still_tears_down_session_at_final_poll(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["running"]

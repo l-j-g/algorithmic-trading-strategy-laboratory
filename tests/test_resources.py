@@ -32,6 +32,7 @@ synthesis_max_improvements = 20
 synthesis_retry_cooldown_seconds = 300
 synthesis_lease_seconds = 3600
 active_ready_limit = 3
+execution_parallelism = 2
 analysis_cohort_min = 4
 analysis_cohort_max = 8
 analysis_parallelism = 2
@@ -51,6 +52,7 @@ rolling_lookback_days = 90
             self.assertEqual(policy.synthesis_generate_limit, 25)
             self.assertEqual(policy.synthesis_low_watermark, 5)
             self.assertEqual(policy.synthesis_min_new_concepts, 5)
+            self.assertEqual(policy.execution_parallelism, 2)
             self.assertEqual(policy.analysis_parallelism, 2)
             self.assertEqual(policy.analyzer_timeout_seconds, 720)
             self.assertEqual(policy.monte_carlo_scenarios, 500)
@@ -94,6 +96,10 @@ rolling_lookback_days = 90
             ResourcePolicy(analysis_cohort_min=3)
         with self.assertRaisesRegex(ValueError, "between 600 and 900"):
             ResourcePolicy(analyzer_timeout_seconds=599)
+
+    def test_rejects_execution_parallelism_above_reserved_cpu(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not exceed cpu_cores"):
+            ResourcePolicy(cpu_cores=2, execution_parallelism=3)
 
     def test_rejects_invalid_window_policy(self) -> None:
         with self.assertRaisesRegex(ValueError, "relative or explicit"):

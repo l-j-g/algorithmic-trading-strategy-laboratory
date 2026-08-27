@@ -22,6 +22,7 @@ synthesis_retry_cooldown_seconds = 300
 synthesis_lease_seconds = 3600
 claim_timeout_seconds = 7200
 execution_batch_size = 8
+execution_parallelism = 6
 active_ready_limit = 8
 executor_infrastructure_failure_limit = 10
 
@@ -49,7 +50,8 @@ Compute-heavy behavior:
   wait five minutes before retry.
 - Worker drains dependency-satisfied scheduled overflow as ready capacity opens,
   avoiding another synthesis context load between jobs in the cohort.
-- Up to eight jobs share one execution turn.
+- Up to eight jobs share one execution turn; up to six independent Jesse
+  sessions run concurrently, bounded by the six reserved CPU cores.
 - Ordinary completed evidence accumulates across execution turns until at least
   four items are available, then one separate bounded analysis turn evaluates a
   four-to-eight-item cohort. Deterministic lifecycle-only and HPO work may be
@@ -62,7 +64,7 @@ Compute-heavy behavior:
 - Candle Monte Carlo uses 500 scenarios.
 - Six of ten CPU cores are available to Jesse; four remain for the OS, Docker,
   database and agent.
-- Only eight jobs may be ready/running, matching execution batch capacity.
+- Only eight jobs may be ready/running, matching one full execution batch.
 
 These are execution budgets, not promotion criteria. More trials reduce search
 noise but do not turn weak or overfit results into valid candidates.

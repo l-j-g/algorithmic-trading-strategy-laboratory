@@ -5,6 +5,7 @@ inside Jesse and model-backed preparation remains an explicit separate dispatch.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -876,13 +877,8 @@ class DirectMcpDispatcher:
                     ),
                     "detail": status["detail"],
                 })
-        for item in direct:
-            if any(
-                result.get("work_item_id") == item.get("work_item_id")
-                for result in results
-            ):
-                continue
-            results.append(self._execute_one(item))
+        if direct:
+            results.extend(self._execute_direct_items(direct, results))
         if delegated:
             delegated_result = self._fallback({
                 **request, "requests": delegated,
@@ -903,6 +899,30 @@ class DirectMcpDispatcher:
             outcome="finished",
             payload={"outcome": "finished", "results": results},
         )
+
+    def _execute_direct_items(
+        self,
+        items: list[dict[str, Any]],
+        existing_results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Run independent Jesse sessions concurrently, preserving batch order."""
+        pending = [
+            item for item in items
+            if not any(
+                result.get("work_item_id") == item.get("work_item_id")
+                for result in existing_results
+            )
+        ]
+        if not pending:
+            return []
+        workers = min(self.resource_policy.execution_parallelism, len(pending))
+        if workers <= 1:
+            return [self._execute_one(item) for item in pending]
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="ats-jesse-exec",
+        ) as executor:
+            return list(executor.map(self._execute_one, pending))
 
     def _strategy_readiness(
         self, payload: dict[str, Any], preparation: list[dict[str, Any]],

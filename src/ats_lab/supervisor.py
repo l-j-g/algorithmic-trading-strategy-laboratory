@@ -118,6 +118,7 @@ class BatchSupervisor:
         result["supervisor"] = self.database.supervisor_runtime_status()
         result["policy"] = {
             "execution_batch_size": self.resource_policy.execution_batch_size,
+            "execution_parallelism": self.resource_policy.execution_parallelism,
             "analysis_cohort_min": self.resource_policy.analysis_cohort_min,
             "analysis_cohort_max": self.resource_policy.analysis_cohort_max,
             "analysis_parallelism": self.resource_policy.analysis_parallelism,

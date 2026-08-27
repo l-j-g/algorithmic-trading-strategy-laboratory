@@ -96,6 +96,7 @@ class ResourcePolicy:
     synthesis_lease_seconds: int = 3600
     claim_timeout_seconds: int = 7200
     execution_batch_size: int = 8
+    execution_parallelism: int = 1
     active_ready_limit: int = 3
     executor_infrastructure_failure_limit: int = 10
     analysis_cohort_min: int = 4
@@ -124,7 +125,8 @@ class ResourcePolicy:
             "synthesis_min_new_concepts", "synthesis_max_improvements",
             "synthesis_max_revision_depth", "synthesis_failure_diagnosis_limit",
             "synthesis_retry_cooldown_seconds", "synthesis_lease_seconds",
-            "claim_timeout_seconds", "execution_batch_size", "active_ready_limit",
+            "claim_timeout_seconds", "execution_batch_size",
+            "execution_parallelism", "active_ready_limit",
             "executor_infrastructure_failure_limit",
             "analysis_cohort_min", "analysis_cohort_max",
             "analysis_parallelism", "analyzer_timeout_seconds",
@@ -154,6 +156,10 @@ class ResourcePolicy:
             )
         if self.analysis_parallelism > 4:
             raise ValueError("resources.analysis_parallelism must be at most 4")
+        if self.execution_parallelism > self.cpu_cores:
+            raise ValueError(
+                "resources.execution_parallelism must not exceed cpu_cores"
+            )
         if not (
             ANALYZER_TIMEOUT_MIN_SECONDS
             <= self.analyzer_timeout_seconds
