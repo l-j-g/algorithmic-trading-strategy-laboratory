@@ -199,6 +199,28 @@ class CliEvidenceTests(unittest.TestCase):
         follower.return_value.run.assert_called_once_with()
         self.assertEqual(output, "")
 
+    def test_start_ctrl_c_requests_graceful_stop_and_waits(self) -> None:
+        with (
+            patch("ats_lab.cli.SupervisorLoopControl") as lifecycle,
+            patch("ats_lab.cli.ActivityFollower") as follower,
+        ):
+            lifecycle.return_value.start.return_value = SimpleNamespace(
+                state="started", process_id=123,
+            )
+            follower.return_value.run.side_effect = [KeyboardInterrupt(), None]
+            output = self.invoke("start")
+
+        lifecycle.return_value.stop.assert_called_once_with()
+        self.assertEqual(follower.return_value.run.call_count, 2)
+        self.assertIn(
+            "stop_requested",
+            {
+                row["event_type"]
+                for row in WorkflowDatabase(self.path).events_after(0)
+            },
+        )
+        self.assertEqual(output, "")
+
     def test_candidates_deduplicate_atomic_evidence_by_experiment(self) -> None:
         human = self.invoke("candidates")
         payload = json.loads(self.invoke("candidates", "--format", "json"))

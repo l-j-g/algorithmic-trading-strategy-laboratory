@@ -906,10 +906,21 @@ def _run_start(context: CommandContext) -> int:
     try:
         follower.run()
     except KeyboardInterrupt:
-        if sys.stdout.isatty():
-            print()
-        print("Detached; supervisor continues.", file=sys.stderr)
-        return 130
+        lifecycle.stop()
+        database.record_event(
+            "supervisor", "cli", "stop_requested",
+            {"stage": "stopping", "reason": "keyboard_interrupt"},
+        )
+        try:
+            follower.run()
+        except KeyboardInterrupt:
+            if sys.stdout.isatty():
+                print()
+            print(
+                "Stop requested; supervisor continues finishing current work.",
+                file=sys.stderr,
+            )
+            return 130
     return 0
 
 

@@ -31,6 +31,7 @@ _ANSI_CODES = re.compile(r"\033\[[0-?]*[ -/]*[@-~]")
 DISPLAY_EVENT_TYPES = frozenset({
     "research_started",
     "research_attached",
+    "stop_requested",
     "preflight_completed",
     "synthesis_started",
     "synthesis_completed",
@@ -262,6 +263,7 @@ def _stage_for_event(event: ActivityEvent) -> str:
     return {
         "research_started": "STARTING",
         "research_attached": "STARTING",
+        "stop_requested": "STOPPING",
         "preflight_completed": "PREFLIGHT",
         "synthesis_started": "SYNTHESIS",
         "synthesis_completed": "SYNTHESIS",
@@ -369,6 +371,11 @@ def _event_lines(event: ActivityEvent, *, color: bool, links: bool) -> list[str]
         return [_paint("STARTING:", "cyan", color) + " Starting ATS Research Lab"]
     if event.event_type == "research_attached":
         return [_paint("STARTING:", "cyan", color) + " ATS Lab already running; attached"]
+    if event.event_type == "stop_requested":
+        return [
+            _paint("STOPPING:", "yellow", color)
+            + " Graceful stop requested · finishing current work"
+        ]
     if event.event_type == "preflight_completed":
         checks = []
         for check in payload.get("checks", []):
@@ -509,6 +516,7 @@ class ActivityFollower:
         self.stage = "STARTING"
         self.last_event_at = self.started_at
         self.tokens: int | None = None
+        self.stop_requested = False
         self._footer_drawn = False
         self._file = ActivityFileWriter(self.config)
 
@@ -561,6 +569,8 @@ class ActivityFollower:
             event_time = _parse_time(event.occurred_at) or now
             if event.event_type == "research_started":
                 self.started_at = event_time
+            if event.event_type == "stop_requested":
+                self.stop_requested = True
             self.last_event_at = event_time
             count += 1
         self._draw_footer(now, force=count > 0)
@@ -574,11 +584,22 @@ class ActivityFollower:
             self._consume(rows, now)
             runtime = self.database.supervisor_runtime_status() or {}
             phase = str(runtime.get("phase") or "")
+            control_reader = getattr(self.database, "control_status", None)
+            control = (control_reader() or {}) if control_reader is not None else {}
+            stop_pending = bool(
+                self.stop_requested
+                or phase == "stop_requested"
+                or control.get("desired_state") == "stop_requested"
+            )
             runtime_stage = _STAGE_LABELS.get(phase)
-            if runtime_stage and phase not in {"stopped", "stop_requested"}:
+            if stop_pending:
+                self.stage = "STOPPING"
+            elif runtime_stage and phase not in {"stopped", "stop_requested"}:
                 self.stage = runtime_stage
-            if phase in {"stopped", "stop_requested"}:
-                self.stage = "STOPPED" if phase == "stopped" else "STOPPING"
+            if stop_pending and phase != "stopped":
+                self._draw_footer(now)
+            if phase == "stopped":
+                self.stage = "STOPPED"
                 self._draw_footer(now, force=True)
                 break
             iterations += 1

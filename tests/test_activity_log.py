@@ -121,6 +121,16 @@ class ActivityLogTests(unittest.TestCase):
         self.assertNotIn("LIVE", footer)
         self.assertNotIn("\033[", strip_terminal_controls(footer))
 
+    def test_stop_request_is_a_display_event(self) -> None:
+        event = ActivityEvent(
+            4, "supervisor", "cli", "stop_requested", {},
+            "2026-08-27T00:03:00Z",
+        )
+        self.assertEqual(
+            render_activity_event(event),
+            "STOPPING: Graceful stop requested · finishing current work",
+        )
+
     def test_follower_prints_events_footer_and_plain_daily_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -152,6 +162,32 @@ class ActivityLogTests(unittest.TestCase):
             log = log_path.read_text()
             self.assertIn("SYNTHESIS: Synthesising 25 new tests", log)
             self.assertNotIn("\033[", log)
+
+    def test_follower_waits_for_stopped_after_stop_request(self) -> None:
+        class StopSequence:
+            def __init__(self) -> None:
+                self.phases = iter(("stop_requested", "stopped"))
+
+            def events_after(self, _cursor: int, *, limit: int = 100) -> list[dict]:
+                return []
+
+            def supervisor_runtime_status(self) -> dict[str, str]:
+                return {"phase": next(self.phases)}
+
+            def control_status(self) -> dict[str, str]:
+                return {"desired_state": "stop_requested"}
+
+        output = io.StringIO()
+        follower = ActivityFollower(
+            StopSequence(), output=output, color=False, links=False,
+            started_at="2026-08-27T00:00:00Z",
+            clock=lambda: datetime(2026, 8, 27, 0, 0, 1, tzinfo=timezone.utc),
+            sleep=lambda _seconds: None,
+        )
+
+        follower.run()
+
+        self.assertIn("STOPPED", output.getvalue())
 
     def test_database_event_cursor_is_bounded_and_ordered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
