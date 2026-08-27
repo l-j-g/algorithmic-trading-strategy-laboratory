@@ -895,8 +895,10 @@ class QueueMixin:
         """Resolve scheduled children whose dependency state cannot progress.
 
         Missing or archived parents make a child impossible and archive it.
-        Blocked parents block a child explicitly. Children blocked only by this
-        dependency rule reopen to ``scheduled`` once every parent finishes.
+        Blocked parents and finished significance parents without a passing
+        gate block a child explicitly. Children blocked only by this
+        dependency rule reopen to ``scheduled`` once every parent finishes and
+        every significance gate passes.
         Repeat passes close dependency chains in one call.
         """
         if limit < 1:
@@ -910,11 +912,18 @@ class QueueMixin:
                     """SELECT child.id AS child_id,child.state AS child_state,
                               child.blocker_code,
                               dependency.value AS dependency_id,
-                              parent.state AS dependency_state
+                              parent.state AS dependency_state,
+                              parent_experiment.experiment_type
+                                AS dependency_experiment_type,
+                              json_extract(
+                                parent.specification_json,'$.gate_decision'
+                              ) AS dependency_gate_decision
                        FROM work_items child
                        JOIN json_each(child.dependencies_json) dependency
                        LEFT JOIN work_items parent
                          ON parent.id=dependency.value
+                       LEFT JOIN experiments parent_experiment
+                         ON parent_experiment.id=parent.experiment_id
                        WHERE child.state IN ('scheduled','blocked')
                        ORDER BY child.id,dependency.value"""
                 ).fetchall()
@@ -926,6 +935,7 @@ class QueueMixin:
                         "missing": [],
                         "archived": [],
                         "blocked": [],
+                        "gate_blocked": [],
                         "unfinished": [],
                     })
                     dependency_id = row["dependency_id"]
@@ -938,6 +948,15 @@ class QueueMixin:
                         item["blocked"].append(dependency_id)
                     elif dependency_state != WorkState.FINISHED.value:
                         item["unfinished"].append(dependency_id)
+                    elif (
+                        row["dependency_experiment_type"] == "significance"
+                        and row["dependency_gate_decision"] not in {
+                            "significance_passed",
+                            "significance_passed_bh_fdr",
+                            "significance_passed_capacity_held",
+                        }
+                    ):
+                        item["gate_blocked"].append(dependency_id)
 
                 for child_id, item in dependencies.items():
                     if sum(len(ids) for ids in result.values()) >= limit:
@@ -982,11 +1001,22 @@ class QueueMixin:
                         )
                         result["archived"].append(child_id)
                         changed = True
-                    elif blocked and row["state"] == WorkState.SCHEDULED.value:
-                        detail = (
-                            "Dependency work item is blocked: "
-                            + ", ".join(blocked)
-                        )
+                    elif (
+                        (blocked or item["gate_blocked"])
+                        and row["state"] == WorkState.SCHEDULED.value
+                    ):
+                        detail_parts = []
+                        if blocked:
+                            detail_parts.append(
+                                "Dependency work item is blocked: "
+                                + ", ".join(blocked)
+                            )
+                        if item["gate_blocked"]:
+                            detail_parts.append(
+                                "Significance gate is not passed for dependency "
+                                "work item: " + ", ".join(item["gate_blocked"])
+                            )
+                        detail = "; ".join(detail_parts)
                         self._transition_work_item_row(
                             connection, row, WorkState.BLOCKED,
                             allowed_from=(WorkState.SCHEDULED,),
@@ -1011,6 +1041,7 @@ class QueueMixin:
                         row["state"] == WorkState.BLOCKED.value
                         and row["blocker_code"] == "dependency_blocked"
                         and not blocked
+                        and not item["gate_blocked"]
                         and not item["unfinished"]
                     ):
                         self._transition_work_item_row(
