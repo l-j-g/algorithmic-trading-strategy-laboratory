@@ -92,6 +92,9 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertIn("New Concept", prompt)
         self.assertIn("Controlled Improvement", prompt)
         self.assertIn("Failure Diagnosis / Counter", prompt)
+        self.assertIn("source_experiment_id must exactly match an entry in context.improvement_candidates", prompt)
+        self.assertIn("diagnosed_failures, failure_diagnoses", prompt)
+        self.assertIn("those records are evidence-only", prompt)
         self.assertIn("Memory outage/degradation must not block", prompt)
         self.assertIn("stable_tested_entry_fingerprints", prompt)
 
