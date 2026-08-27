@@ -12,6 +12,7 @@
     "operation": {"enum": ["backtest", "hpo", "significance", "monte_carlo"]},
     "strategy_name": {"type": "string", "minLength": 1},
     "routes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/route"}},
+    "data_routes": {"type": "array", "items": {"$ref": "#/$defs/data_route"}},
     "parameters": {"type": "object"},
     "success_gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}},
     "failure_gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}}
@@ -26,6 +27,16 @@
         "timeframe": {"type": "string", "minLength": 1},
         "start_date": {"type": "string", "minLength": 1},
         "finish_date": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "data_route": {
+      "type": "object",
+      "required": ["exchange", "symbol", "timeframe"],
+      "properties": {
+        "exchange": {"type": "string", "minLength": 1},
+        "symbol": {"type": "string", "minLength": 1},
+        "timeframe": {"type": "string", "minLength": 1}
       },
       "additionalProperties": false
     },

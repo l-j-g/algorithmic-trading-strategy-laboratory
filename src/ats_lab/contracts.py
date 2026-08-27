@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 import json
 
-from .models import Evaluation, ExperimentSpec, ExperimentType, GateSpec, RouteSpec, Verdict, WorkItem, WorkState, utc_now
+from .models import DataRouteSpec, Evaluation, ExperimentSpec, ExperimentType, GateSpec, RouteSpec, Verdict, WorkItem, WorkState, utc_now
 
 
 def _required(payload: dict[str, Any], *names: str) -> None:
@@ -26,6 +26,9 @@ def load_json(path: Path) -> dict[str, Any]:
 def experiment_from_payload(payload: dict[str, Any], source_path: str = "") -> ExperimentSpec:
     _required(payload, "id", "strategy_name", "experiment_type")
     routes = tuple(RouteSpec(**route) for route in payload.get("routes", []))
+    data_routes = tuple(
+        DataRouteSpec(**route) for route in payload.get("data_routes", [])
+    )
     success_gates = tuple(GateSpec(**gate) for gate in payload.get("success_gates", []))
     failure_gates = tuple(GateSpec(**gate) for gate in payload.get("failure_gates", []))
     return ExperimentSpec(
@@ -34,6 +37,7 @@ def experiment_from_payload(payload: dict[str, Any], source_path: str = "") -> E
         hypothesis=str(payload.get("hypothesis", "")), archetype=str(payload.get("archetype", "")),
         target_regime=str(payload.get("target_regime", "")), failure_regime=str(payload.get("failure_regime", "")),
         routes=routes,
+        data_routes=data_routes,
         balance=payload.get("balance", payload.get("starting_balance")),
         leverage=payload.get("leverage", payload.get("futures_leverage")),
         leverage_mode=payload.get(

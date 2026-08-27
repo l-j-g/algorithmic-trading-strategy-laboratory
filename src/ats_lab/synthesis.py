@@ -10,7 +10,7 @@ from typing import Any
 
 from .contracts import load_json
 from .database import WorkflowDatabase
-from .models import ExperimentSpec, ExperimentType, GateSpec, RouteSpec, WorkItem, WorkState
+from .models import DataRouteSpec, ExperimentSpec, ExperimentType, GateSpec, RouteSpec, WorkItem, WorkState
 
 
 ENTRY_CHANGE_SCOPES = {"new_entry", "entry_changed"}
@@ -35,6 +35,7 @@ class SynthesisRequest:
     entry_rule: str
     change_scope: str
     routes: tuple[RouteSpec, ...]
+    data_routes: tuple[DataRouteSpec, ...] = ()
     parent_entry_fingerprint: str | None = None
     priority: int = 100
     n_simulations: int = 2000
@@ -97,12 +98,16 @@ def synthesis_request_from_payload(payload: dict[str, Any]) -> SynthesisRequest:
     routes = tuple(RouteSpec(**route) for route in payload["routes"])
     if not routes:
         raise ValueError("at least one route is required")
+    data_routes = tuple(
+        DataRouteSpec(**route) for route in payload.get("data_routes", [])
+    )
     n_simulations = int(payload.get("n_simulations", 2000))
     if n_simulations < 2000:
         raise ValueError("n_simulations must be at least 2000")
     return SynthesisRequest(
         strategy_name=str(payload["strategy_name"]), hypothesis=str(payload["hypothesis"]),
         entry_rule=str(payload["entry_rule"]), change_scope=scope, routes=routes,
+        data_routes=data_routes,
         parent_entry_fingerprint=payload.get("parent_entry_fingerprint"),
         priority=int(payload.get("priority", 100)), n_simulations=n_simulations,
         random_seed=payload.get("random_seed"),
@@ -310,6 +315,7 @@ def synthesize(
             archetype=request.archetype, target_regime=request.target_regime,
             failure_regime=request.failure_regime,
             routes=request.routes,
+            data_routes=request.data_routes,
             success_gates=(GateSpec("p_value", "<", 0.05),),
             failure_gates=(GateSpec("p_value", ">", 0.10),),
             parent_experiment_id=request.source_experiment_id, source_path=source_path,
@@ -320,7 +326,11 @@ def synthesize(
         _ensure_work_item(database, WorkItem(
             id=significance_id, experiment_id=significance_id, priority=request.priority,
             state=sig_state, specification={"operation": "significance", "parameters": sig_parameters,
-                                             "entry_rule": lineage},
+                                             "entry_rule": lineage,
+                                             "data_routes": [
+                                                 route.__dict__
+                                                 for route in request.data_routes
+                                             ]},
         ))
 
     baseline_state = WorkState.READY if release_ready else WorkState.SCHEDULED
@@ -339,10 +349,12 @@ def synthesize(
             baseline_state, decision = WorkState.ARCHIVED, "significance_failed"
 
     baseline_spec = ExperimentSpec(
-        id=baseline_id, strategy_name=request.strategy_name, experiment_type=ExperimentType.BASELINE,
+        id=baseline_id, strategy_name=request.strategy_name,
+        experiment_type=ExperimentType.BASELINE,
         hypothesis=request.hypothesis, archetype=request.archetype,
         target_regime=request.target_regime, failure_regime=request.failure_regime,
         routes=request.routes,
+        data_routes=request.data_routes,
         parent_experiment_id=significance_id if needs_significance else request.source_experiment_id,
         source_path=source_path,
     )
@@ -351,7 +363,11 @@ def synthesize(
     _ensure_work_item(database, WorkItem(
         id=baseline_id, experiment_id=baseline_id, priority=request.priority + (1 if needs_significance else 0),
         state=baseline_state, dependencies=dependencies,
-        specification={"operation": "backtest", "entry_rule": lineage, "gate_decision": decision},
+        specification={
+            "operation": "backtest", "entry_rule": lineage,
+            "gate_decision": decision,
+            "data_routes": [route.__dict__ for route in request.data_routes],
+        },
     ))
     _set_state(database, baseline_id, baseline_state)
     if p_value is not None:

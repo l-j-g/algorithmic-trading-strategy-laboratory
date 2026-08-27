@@ -615,6 +615,110 @@ class QueueMixin:
                 repaired += 1
         return repaired
 
+    def repair_work_item_data_routes(
+        self,
+        work_item_id: str,
+        data_routes: list[dict],
+        *,
+        reason: str,
+        active_limit: int = 5,
+    ) -> dict:
+        """Repair auxiliary Jesse candle routes with an audited requeue.
+
+        Only unreconciled work is eligible. A durable run is never overwritten
+        or rerun by this repair; the route metadata is changed and the item is
+        reopened for one bounded execution attempt.
+        """
+        if not work_item_id.strip():
+            raise ValueError("work_item_id is required")
+        if not reason.strip():
+            raise ValueError("reason is required")
+        if not isinstance(data_routes, list):
+            raise ValueError("data_routes must be a list")
+        for index, route in enumerate(data_routes):
+            if not isinstance(route, dict):
+                raise ValueError(f"data_routes[{index}] must be an object")
+            for field in ("exchange", "symbol", "timeframe"):
+                if not isinstance(route.get(field), str) or not route[field].strip():
+                    raise ValueError(
+                        f"data_routes[{index}].{field} must be non-empty text"
+                    )
+        now = utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT state,specification_json FROM work_items
+                   WHERE id=?""",
+                (work_item_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown work item: {work_item_id}")
+            if row["state"] in {
+                WorkState.RUNNING.value,
+                WorkState.FINISHED.value,
+                WorkState.ARCHIVED.value,
+            }:
+                raise ValueError(
+                    f"cannot repair data routes for work item in {row['state']}"
+                )
+            if connection.execute(
+                "SELECT 1 FROM runs WHERE work_item_id=? LIMIT 1",
+                (work_item_id,),
+            ).fetchone() is not None:
+                raise ValueError(
+                    "cannot repair data routes after durable execution evidence"
+                )
+            specification = json.loads(row["specification_json"] or "{}")
+            if not isinstance(specification, dict):
+                raise ValueError("work item specification must be an object")
+            previous = specification.get("data_routes", [])
+            specification["data_routes"] = data_routes
+            target_state = (
+                WorkState.SCHEDULED.value
+                if row["state"] in {
+                    WorkState.WAITING_RETRY.value, WorkState.BLOCKED.value,
+                }
+                else row["state"]
+            )
+            changed = connection.execute(
+                """UPDATE work_items SET state=?,attempts=0,retry_after=NULL,
+                          blocker_code=NULL,blocker_detail=NULL,
+                          claimed_by=NULL,claimed_at=?,specification_json=?,
+                          updated_at=? WHERE id=?""",
+                (
+                    target_state, None,
+                    json.dumps(specification, sort_keys=True),
+                    now, work_item_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise RuntimeError(
+                    f"data-route repair state changed concurrently: {work_item_id}"
+                )
+            connection.execute(
+                """INSERT INTO events(
+                       aggregate_type,aggregate_id,event_type,
+                       payload_json,occurred_at
+                   ) VALUES('work_item',?,
+                            'data_routes_repaired',?,?)""",
+                (work_item_id, json.dumps({
+                    "previous_data_routes": previous,
+                    "data_routes": data_routes,
+                    "reason": reason,
+                    "attempts_reset": 1,
+                    "reopened_state": target_state,
+                }, sort_keys=True), now),
+            )
+        promoted = self.promote_scheduled_runnable(active_limit)
+        return {
+            "work_item_id": work_item_id,
+            "changed": True,
+            "state": self.rows(
+                "SELECT state FROM work_items WHERE id=?", (work_item_id,),
+            )[0]["state"],
+            "promoted": promoted,
+        }
+
     def defer_infrastructure_retry(
         self, work_item_id: str, *, blocker_code: str,
         blocker_detail: str, retry_after: str,

@@ -83,6 +83,54 @@ class WorkflowDatabaseTests(unittest.TestCase):
                     "JOB-1", resolution_code="again", detail="duplicate",
                 )
 
+    def test_repair_data_routes_reopens_unexecuted_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-1", strategy_name="TestStrategy",
+            ))
+            database.upsert_work_item(WorkItem(
+                id="JOB-1", experiment_id="EXP-1", priority=1,
+                state=WorkState.WAITING_RETRY,
+                attempts=2, blocker_code="jesse_execution_stopped",
+                blocker_detail="missing auxiliary candles",
+                specification={"operation": "backtest"},
+            ))
+
+            result = database.repair_work_item_data_routes(
+                "JOB-1",
+                [{
+                    "exchange": "Binance Perpetual Futures",
+                    "symbol": "BTC-USDT",
+                    "timeframe": "4h",
+                }],
+                reason="Jesse strategy requires 4h candles",
+            )
+
+            self.assertEqual(result["state"], "ready")
+            row = database.rows(
+                "SELECT attempts,blocker_code,specification_json FROM work_items "
+                "WHERE id='JOB-1'"
+            )[0]
+            self.assertEqual(row["attempts"], 0)
+            self.assertIsNone(row["blocker_code"])
+            self.assertEqual(
+                json.loads(row["specification_json"])["data_routes"],
+                [{
+                    "exchange": "Binance Perpetual Futures",
+                    "symbol": "BTC-USDT",
+                    "timeframe": "4h",
+                }],
+            )
+            self.assertEqual(
+                database.rows(
+                    """SELECT event_type FROM events WHERE aggregate_id='JOB-1'
+                       ORDER BY id DESC LIMIT 1"""
+                )[0]["event_type"],
+                "data_routes_repaired",
+            )
+
     def test_requeue_finished_evaluation_preserves_run_and_marks_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")

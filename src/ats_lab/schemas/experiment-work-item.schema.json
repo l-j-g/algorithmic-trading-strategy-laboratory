@@ -17,6 +17,7 @@
         "target_regime": {"type": "string"},
         "failure_regime": {"type": "string"},
         "routes": {"type": "array", "items": {"$ref": "#/$defs/route"}},
+        "data_routes": {"type": "array", "items": {"$ref": "#/$defs/data_route"}},
         "success_gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}},
         "failure_gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}}
       },
@@ -42,6 +43,16 @@
       "properties": {
         "exchange": {"type": "string"}, "symbol": {"type": "string"}, "timeframe": {"type": "string"},
         "start_date": {"type": "string"}, "finish_date": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "data_route": {
+      "type": "object",
+      "required": ["exchange", "symbol", "timeframe"],
+      "properties": {
+        "exchange": {"type": "string", "minLength": 1},
+        "symbol": {"type": "string", "minLength": 1},
+        "timeframe": {"type": "string", "minLength": 1}
       },
       "additionalProperties": false
     },

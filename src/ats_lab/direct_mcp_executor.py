@@ -45,6 +45,7 @@ JESSE_RESULT_STATUSES = frozenset(
 )
 ROUTE_FIELDS = ("exchange", "symbol", "timeframe", "start_date", "finish_date")
 RAW_RESULT_KEYS = {"session_id", "status", "metrics"}
+MISSING_SESSION_MARKERS = ("session", "not found")
 
 
 class McpError(RuntimeError):
@@ -275,6 +276,24 @@ def _route_violations(routes: Any) -> list[str]:
     return violations
 
 
+def _data_route_violations(data_routes: Any, label: str) -> list[str]:
+    if data_routes is None:
+        return []
+    if not isinstance(data_routes, list):
+        return [f"{label} must be an array"]
+    violations: list[str] = []
+    for index, route in enumerate(data_routes):
+        if not isinstance(route, dict):
+            violations.append(f"{label}[{index}] must be an object")
+            continue
+        for field in ("exchange", "symbol", "timeframe"):
+            if not _text(route.get(field)):
+                violations.append(
+                    f"{label}[{index}].{field} must be non-empty text"
+                )
+    return violations
+
+
 def _gate_violations(label: str, gates: Any) -> list[str]:
     if gates is None:
         return []
@@ -318,6 +337,9 @@ def execution_request_violations(request: Any) -> list[str]:
         if not _text(experiment.get("strategy_name")):
             violations.append("experiment.strategy_name must be non-empty text")
         violations.extend(_route_violations(experiment.get("routes")))
+        violations.extend(_data_route_violations(
+            experiment.get("data_routes"), "experiment.data_routes",
+        ))
         violations.extend(_gate_violations(
             "experiment.success_gates", experiment.get("success_gates"),
         ))
@@ -336,6 +358,9 @@ def execution_request_violations(request: Any) -> list[str]:
         parameters = work_item.get("parameters")
         if parameters is not None and not isinstance(parameters, dict):
             violations.append("work_item.parameters must be an object")
+        violations.extend(_data_route_violations(
+            work_item.get("data_routes"), "work_item.data_routes",
+        ))
     return violations
 
 
@@ -1069,6 +1094,32 @@ class DirectMcpDispatcher:
             )
         except (KeyError, TypeError, ValueError, McpError, OSError) as error:
             checkpoint = self._checkpoint(work_item_id)
+            if checkpoint:
+                recovery_status = self._recover_missing_session_checkpoint(
+                    work_item_id, experiment_id, checkpoint, error,
+                )
+                if recovery_status in {"recovered", "already_registered"}:
+                    return self._record_and_return(
+                        client, work_item_id, polls, "retry",
+                        blocker_code="jesse_session_recovery_pending",
+                        detail=(
+                            f"session {checkpoint['session_id']} is no longer "
+                            "present in Jesse; one replacement session will be "
+                            "created on the next attempt"
+                        ),
+                        attempt_charged=False,
+                    )
+                if recovery_status == "replacement_exhausted":
+                    return self._record_and_return(
+                        client, work_item_id, polls, "blocked",
+                        blocker_code="jesse_session_recovery_exhausted",
+                        detail=(
+                            f"session {checkpoint['session_id']} is missing after "
+                            "the one allowed replacement; requires bounded "
+                            "Jesse or harness analysis"
+                        ),
+                        attempt_charged=True,
+                    )
             if checkpoint and checkpoint["state"] == "draft":
                 self._save_checkpoint(
                     work_item_id, experiment_id, checkpoint["session_id"],
@@ -1212,7 +1263,13 @@ class DirectMcpDispatcher:
         exchange, start_date, finish_date, mcp_routes = (
             self._shared_route_window(request["experiment"], "significance test")
         )
-        parameters = request.get("work_item", {}).get("parameters") or {}
+        work_item = request.get("work_item", {})
+        parameters = work_item.get("parameters") or {}
+        experiment_data_routes = request["experiment"].get("data_routes", [])
+        work_data_routes = work_item.get("data_routes", [])
+        data_routes = work_data_routes or experiment_data_routes or []
+        if not isinstance(data_routes, list):
+            raise ValueError("data_routes must be a list")
         n_simulations = parameters.get("n_simulations")
         if n_simulations is None:
             raise ValueError(
@@ -1221,7 +1278,7 @@ class DirectMcpDispatcher:
         payload: dict[str, Any] = {
             "exchange": exchange,
             "routes": json.dumps(mcp_routes, separators=(",", ":")),
-            "data_routes": "[]",
+            "data_routes": json.dumps(data_routes, separators=(",", ":")),
             "start_date": start_date, "finish_date": finish_date,
             "n_simulations": n_simulations,
             "debug_mode": False, "export_csv": False, "export_json": False,
@@ -1538,6 +1595,92 @@ class DirectMcpDispatcher:
                 )
         except Exception:
             pass
+
+    @staticmethod
+    def _is_missing_session_error(error: BaseException) -> bool:
+        detail = str(error).casefold()
+        return all(marker in detail for marker in MISSING_SESSION_MARKERS)
+
+    def _recover_missing_session_checkpoint(
+        self,
+        work_item_id: str,
+        experiment_id: str,
+        checkpoint: dict[str, Any],
+        error: BaseException,
+    ) -> str:
+        """Invalidate one Jesse session that the server explicitly forgot.
+
+        A Jesse restart can erase in-memory sessions while ATS still has a
+        durable checkpoint. Grant exactly one replacement, only without a
+        durable run, and make the mutation atomic so concurrent workers cannot
+        create multiple replacement drafts.
+        """
+        if not self._is_missing_session_error(error):
+            return "not_missing"
+        session_id = str(checkpoint["session_id"])
+        now = utc_now()
+        reason = "Jesse reported persisted session not found"
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                """SELECT session_id,state FROM direct_execution_sessions
+                   WHERE work_item_id=?""",
+                (work_item_id,),
+            ).fetchone()
+            if current is None or current["session_id"] != session_id:
+                return "checkpoint_changed"
+            if connection.execute(
+                "SELECT 1 FROM runs WHERE work_item_id=? LIMIT 1",
+                (work_item_id,),
+            ).fetchone() is not None:
+                return "durable_run_exists"
+            recovery = connection.execute(
+                """SELECT old_session_id,replacement_session_id
+                   FROM direct_execution_recoveries WHERE work_item_id=?""",
+                (work_item_id,),
+            ).fetchone()
+            if recovery is not None:
+                if (
+                    recovery["old_session_id"] == session_id
+                    and recovery["replacement_session_id"] is None
+                ):
+                    connection.execute(
+                        "DELETE FROM direct_execution_sessions WHERE work_item_id=?",
+                        (work_item_id,),
+                    )
+                    return "already_registered"
+                return "replacement_exhausted"
+            connection.execute(
+                """INSERT INTO direct_execution_recoveries(
+                       work_item_id,old_session_id,old_state,reason,
+                       replacement_allowed,created_at,updated_at
+                   ) VALUES (?,?,?,?,1,?,?)""",
+                (
+                    work_item_id, session_id, current["state"], reason, now, now,
+                ),
+            )
+            deleted = connection.execute(
+                """DELETE FROM direct_execution_sessions
+                   WHERE work_item_id=? AND session_id=?""",
+                (work_item_id, session_id),
+            )
+            if deleted.rowcount != 1:
+                raise McpError(
+                    "missing Jesse session checkpoint changed during recovery"
+                )
+            connection.execute(
+                """INSERT INTO events(aggregate_type,aggregate_id,event_type,
+                       payload_json,occurred_at) VALUES(
+                       'work_item',?,'missing_execution_session_recovered',?,?)""",
+                (work_item_id, json.dumps({
+                    "experiment_id": experiment_id,
+                    "old_session_id": session_id,
+                    "old_state": current["state"],
+                    "reason": reason,
+                    "replacement_allowance": 1,
+                }, sort_keys=True), now),
+            )
+        return "recovered"
 
     def _checkpoint(self, work_item_id: str) -> dict[str, Any] | None:
         rows = self.database.rows(

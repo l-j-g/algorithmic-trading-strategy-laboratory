@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
-from ats_lab.models import ExperimentSpec, RouteSpec, RunResult, RunStatus
+from ats_lab.models import DataRouteSpec, ExperimentSpec, RouteSpec, RunResult, RunStatus
 from ats_lab.synthesis import (
     SynthesisRequest,
     benjamini_hochberg,
@@ -21,6 +21,9 @@ ROUTE = RouteSpec(
 )
 
 ROUTE_PAYLOAD = ROUTE.__dict__
+DATA_ROUTE = DataRouteSpec(
+    exchange="Binance Perpetual Futures", symbol="BTC-USDT", timeframe="4h",
+)
 
 
 class SynthesisTests(unittest.TestCase):
@@ -93,6 +96,32 @@ class SynthesisTests(unittest.TestCase):
         })
         self.assertEqual(request.action, "new")
         self.assertIsNone(request.proposal_type)
+
+    def test_data_routes_are_parsed_and_persisted_for_both_jobs(self) -> None:
+        payload = self.typed_payload()
+        payload["data_routes"] = [DATA_ROUTE.__dict__]
+        request = synthesis_request_from_payload(payload)
+        self.assertEqual(request.data_routes, (DATA_ROUTE,))
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            result = synthesize(database, request)
+            significance = database.execution_request(result["significance_job"])
+            baseline = database.execution_request(result["baseline_job"])
+            self.assertEqual(
+                significance["work_item"]["data_routes"],
+                [DATA_ROUTE.__dict__],
+            )
+            self.assertEqual(
+                baseline["work_item"]["data_routes"],
+                [DATA_ROUTE.__dict__],
+            )
+            self.assertEqual(
+                json.loads(database.rows(
+                    "SELECT specification_json FROM experiments "
+                    "WHERE id=?", (result["baseline_job"],)
+                )[0]["specification_json"])["data_routes"],
+                [DATA_ROUTE.__dict__],
+            )
 
     def make_request(self, scope: str = "new_entry") -> SynthesisRequest:
         return SynthesisRequest(

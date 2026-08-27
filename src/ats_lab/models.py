@@ -62,6 +62,15 @@ class RouteSpec:
 
 
 @dataclass(frozen=True)
+class DataRouteSpec:
+    """Auxiliary candle route used by multi-timeframe Jesse strategies."""
+
+    exchange: str
+    symbol: str
+    timeframe: str
+
+
+@dataclass(frozen=True)
 class GateSpec:
     name: str
     operator: str
@@ -79,6 +88,7 @@ class ExperimentSpec:
     target_regime: str = ""
     failure_regime: str = ""
     routes: tuple[RouteSpec, ...] = ()
+    data_routes: tuple[DataRouteSpec, ...] = ()
     balance: float | None = None
     leverage: float | None = None
     leverage_mode: str | None = None

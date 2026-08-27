@@ -539,6 +539,17 @@ def build_parser() -> AtsLabArgumentParser:
         help="Persist aggregate requested-route coverage proven by finished Jesse sessions.",
     )
     route_backfill.add_argument("--apply", action="store_true")
+    data_route_repair = sub.add_parser(
+        "repair-data-routes",
+        help="Repair auxiliary Jesse candle routes and reopen one unreconciled work item.",
+    )
+    data_route_repair.add_argument("work_item_id")
+    data_route_repair.add_argument(
+        "--route", action="append", required=True, dest="routes",
+        help='Auxiliary route JSON, repeat for multiple routes.',
+    )
+    data_route_repair.add_argument("--reason", required=True)
+    data_route_repair.add_argument("--apply", action="store_true")
     partial_recovery = sub.add_parser(
         "recover-partial-batch-retries",
         help="Reopen explicit jobs charged by the known batch-wide retry defect.",
@@ -1556,6 +1567,32 @@ def _run_recover_partial_batch_retries(context: CommandContext) -> int:
     return 0
 
 
+def _run_repair_data_routes(context: CommandContext) -> int:
+    args = context.args
+    database = context.database
+    database.initialize()
+    routes = []
+    for raw_route in args.routes:
+        route = json.loads(raw_route)
+        if not isinstance(route, dict):
+            raise ValueError("--route must decode to a JSON object")
+        routes.append(route)
+    if not args.apply:
+        emit({
+            "apply": False,
+            "work_item_id": args.work_item_id,
+            "data_routes": routes,
+            "reason": args.reason,
+        })
+        return 0
+    policy = load_resource_policy(context.repo / ".ats-lab" / "config.toml")
+    emit(database.repair_work_item_data_routes(
+        args.work_item_id, routes, reason=args.reason,
+        active_limit=policy.active_ready_limit,
+    ))
+    return 0
+
+
 def _run_recover_executor_infrastructure(context: CommandContext) -> int:
     args = context.args
     repo = context.repo
@@ -1805,6 +1842,7 @@ REPO_DISCOVERY_COMMANDS = frozenset({
     "worker", "supervisor", "dashboard", "backend", "web", "status", "start", "monitor", "control",
     "console", "recover-claims", "resolve-blocker", "requeue-evaluation",
     "recover-orphaned-replacements",
+    "repair-data-routes",
     "queue", "candidates", "evidence", "diagnostic-export",
     "diagnostic-hpo-trial",
     "hpo", "hpo-detail", "hpo-route-plan", "hpo-defaults", "timings", "telemetry", "analyzer",
@@ -1869,6 +1907,7 @@ COMMAND_HANDLERS: dict[str, Callable[[CommandContext], int]] = {
     "normalize-blockers": _run_normalize_blockers,
     "backfill-route-coverage": _run_backfill_route_coverage,
     "recover-partial-batch-retries": _run_recover_partial_batch_retries,
+    "repair-data-routes": _run_repair_data_routes,
     "recover-executor-infrastructure": _run_recover_executor_infrastructure,
     "recover-orphaned-replacements": _run_recover_orphaned_replacements,
     "recover-zombie-sessions": _run_recover_zombie_sessions,

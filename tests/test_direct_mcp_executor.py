@@ -87,6 +87,23 @@ class FakeMcpHandler(BaseHTTPRequestHandler):
                 self.server.run_calls += 1  # type: ignore[attr-defined]
                 result = {"status": "started", "session_id": arguments["session_id"]}
             elif name == "get_backtest_session":
+                if arguments["session_id"] in self.server.missing_sessions:  # type: ignore[attr-defined]
+                    result = {
+                        "data": None,
+                        "error": (
+                            f"Backtest session {arguments['session_id']} "
+                            "not found"
+                        ),
+                        "message": (
+                            f"Backtest session {arguments['session_id']} "
+                            "not found"
+                        ),
+                    }
+                    self._reply({
+                        "jsonrpc": "2.0", "id": payload.get("id"),
+                        "result": result,
+                    })
+                    return
                 poll = self.server.poll_count  # type: ignore[attr-defined]
                 self.server.poll_count += 1  # type: ignore[attr-defined]
                 statuses = self.server.statuses  # type: ignore[attr-defined]
@@ -157,6 +174,7 @@ class FakeMcpServer:
         self.http.poll_count = 0
         self.http.statuses = statuses
         self.http.deleted_sessions = []
+        self.http.missing_sessions = set()
         self.http.metrics = {
             "net_profit_percentage": 12.345678901234,
             "route_runs": [
@@ -813,6 +831,120 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 request["requests"][0]["work_item"]["data_routes"],
             )
 
+    def test_missing_persisted_session_gets_one_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, database = self.make_dispatcher(
+                tmp, server, max_polls=2,
+            )
+            request = batch_request()["requests"][0]
+            fingerprint = dispatcher._fingerprint(request)
+            with database.connect() as connection:
+                connection.execute(
+                    """INSERT INTO direct_execution_sessions(
+                           work_item_id,experiment_id,session_id,
+                           request_fingerprint,state,created_at,updated_at
+                       ) VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        "JOB-1", "EXP-1", "old-session", fingerprint,
+                        "start_recovery_failed", "now", "now",
+                    ),
+                )
+            server.http.missing_sessions.add("old-session")
+
+            first = dispatcher.dispatch(batch_request()).payload["results"][0]
+
+            self.assertEqual(first["outcome"], "retry")
+            self.assertEqual(first["blocker_code"], "jesse_session_recovery_pending")
+            self.assertFalse(first["attempt_charged"])
+            self.assertEqual(
+                database.rows(
+                    "SELECT COUNT(*) AS count FROM direct_execution_sessions "
+                    "WHERE work_item_id='JOB-1'"
+                )[0]["count"],
+                0,
+            )
+            recovery = database.rows(
+                """SELECT old_session_id,replacement_allowed,
+                          replacement_reserved,replacement_session_id
+                   FROM direct_execution_recoveries WHERE work_item_id='JOB-1'"""
+            )[0]
+            self.assertEqual(recovery["old_session_id"], "old-session")
+            self.assertEqual(recovery["replacement_allowed"], 1)
+            self.assertEqual(recovery["replacement_reserved"], 0)
+            self.assertIsNone(recovery["replacement_session_id"])
+            self.assertEqual(
+                database.rows(
+                    """SELECT event_type FROM events WHERE aggregate_id='JOB-1'
+                       ORDER BY id DESC LIMIT 1"""
+                )[0]["event_type"],
+                "missing_execution_session_recovered",
+            )
+
+            second = dispatcher.dispatch(batch_request()).payload["results"][0]
+
+            self.assertEqual(second["outcome"], "finished")
+            self.assertEqual(
+                len([
+                    name for name, _ in server.http.tool_calls
+                    if name == "create_backtest_draft"
+                ]),
+                1,
+            )
+            recovery = database.rows(
+                """SELECT replacement_reserved,replacement_session_id
+                   FROM direct_execution_recoveries WHERE work_item_id='JOB-1'"""
+            )[0]
+            self.assertEqual(recovery["replacement_reserved"], 1)
+            self.assertEqual(recovery["replacement_session_id"], "jesse-session-1")
+
+    def test_missing_replacement_session_does_not_get_second_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, database = self.make_dispatcher(tmp, server)
+            request = batch_request()["requests"][0]
+            fingerprint = dispatcher._fingerprint(request)
+            with database.connect() as connection:
+                connection.execute(
+                    """INSERT INTO direct_execution_recoveries(
+                           work_item_id,old_session_id,old_state,reason,
+                           replacement_allowed,replacement_reserved,
+                           replacement_session_id,created_at,updated_at
+                       ) VALUES (?,?,?,?,1,1,?,?,?)""",
+                    (
+                        "JOB-1", "old-session", "start_recovery_failed",
+                        "previous missing session recovery", "replacement-session",
+                        "now", "now",
+                    ),
+                )
+                connection.execute(
+                    """INSERT INTO direct_execution_sessions(
+                           work_item_id,experiment_id,session_id,
+                           request_fingerprint,state,created_at,updated_at
+                       ) VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        "JOB-1", "EXP-1", "replacement-session", fingerprint,
+                        "start_recovery_failed", "now", "now",
+                    ),
+                )
+            server.http.missing_sessions.add("replacement-session")
+
+            result = dispatcher.dispatch(batch_request()).payload["results"][0]
+
+            self.assertEqual(result["outcome"], "blocked")
+            self.assertEqual(
+                result["blocker_code"], "jesse_session_recovery_exhausted",
+            )
+            self.assertEqual(
+                len([
+                    name for name, _ in server.http.tool_calls
+                    if name == "create_backtest_draft"
+                ]),
+                0,
+            )
+
     def test_backtest_draft_snapshots_exchange_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["running", "finished"]
@@ -904,6 +1036,36 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 "SELECT * FROM direct_execution_telemetry ORDER BY id DESC LIMIT 1"
             )[0]
             self.assertEqual(telemetry["model_call_count"], 0)
+
+    def test_significance_forwards_work_item_data_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, _database = self.make_dispatcher(
+                tmp, server, work_id="JOB-SIG", experiment_id="EXP-SIG",
+                specification={
+                    "operation": "significance",
+                    "parameters": {"n_simulations": 5000},
+                },
+            )
+            request = significance_request()
+            request["requests"][0]["work_item"]["data_routes"] = [{
+                "exchange": "Binance Perpetual Futures",
+                "symbol": "BTC-USDT",
+                "timeframe": "4h",
+            }]
+
+            result = dispatcher.dispatch(request)
+
+            self.assertEqual(result.outcome, "finished")
+            create_args = next(
+                args for name, args in server.http.tool_calls
+                if name == "create_significance_test_draft"
+            )
+            self.assertEqual(
+                json.loads(create_args["data_routes"]),
+                request["requests"][0]["work_item"]["data_routes"],
+            )
 
     def test_significance_draft_defaults_explicit_null_exchange_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
