@@ -195,17 +195,46 @@ class SynthesisMixin:
 
     def _binding_cohort_p_value(
         self, connection: sqlite3.Connection, fingerprint: str,
+        route_fingerprint: str | None = None,
     ) -> sqlite3.Row | None:
-        return connection.execute(
-            """SELECT r.id, r.experiment_id,
-                      json_extract(r.metrics_json, '$.p_value') AS p_value
-               FROM runs r JOIN experiments e ON e.id=r.experiment_id
-               WHERE e.experiment_type='significance' AND r.status='finished'
-                 AND json_extract(e.specification_json, '$.entry_rule.fingerprint')=?
-                 AND json_extract(r.metrics_json, '$.p_value') IS NOT NULL
-               ORDER BY COALESCE(r.finished_at, r.started_at) ASC, r.id ASC LIMIT 1""",
-            (fingerprint,),
+        query = """SELECT r.id, r.experiment_id,
+                          json_extract(r.metrics_json, '$.p_value') AS p_value
+                   FROM runs r JOIN experiments e ON e.id=r.experiment_id
+                   WHERE e.experiment_type='significance' AND r.status='finished'
+                     AND json_extract(e.specification_json, '$.entry_rule.fingerprint')=?
+                     AND json_extract(r.metrics_json, '$.p_value') IS NOT NULL"""
+        parameters: list[Any] = [fingerprint]
+        if route_fingerprint is not None:
+            query += """
+                     AND json_extract(
+                       e.specification_json,
+                       '$.entry_rule.significance_route_fingerprint'
+                     )=?"""
+            parameters.append(route_fingerprint)
+        query += " ORDER BY COALESCE(r.finished_at, r.started_at) ASC, r.id ASC LIMIT 1"
+        return connection.execute(query, tuple(parameters)).fetchone()
+
+    @staticmethod
+    def _record_significance_gate(
+        connection: sqlite3.Connection,
+        work_item_id: str,
+        decision: str,
+        findings: dict | None = None,
+    ) -> None:
+        row = connection.execute(
+            "SELECT specification_json FROM work_items WHERE id=?",
+            (work_item_id,),
         ).fetchone()
+        if row is None:
+            return
+        specification = json.loads(row["specification_json"] or "{}")
+        specification["gate_decision"] = decision
+        if findings is not None:
+            specification["gate_findings"] = findings
+        connection.execute(
+            "UPDATE work_items SET specification_json=?,updated_at=? WHERE id=?",
+            (json.dumps(specification, sort_keys=True), utc_now(), work_item_id),
+        )
 
     def _release_dependents(
         self, connection: sqlite3.Connection, work_item_id: str, target: str,
@@ -214,7 +243,7 @@ class SynthesisMixin:
     ) -> tuple[list[str], int]:
         changed: list[str] = []
         dependents = connection.execute(
-            """SELECT id,specification_json FROM work_items
+            """SELECT id,dependencies_json,specification_json FROM work_items
                WHERE state='scheduled' AND EXISTS (
                    SELECT 1 FROM json_each(work_items.dependencies_json)
                    WHERE value=?
@@ -223,10 +252,32 @@ class SynthesisMixin:
         ).fetchall()
         for row in dependents:
             state = target
-            if target == "ready" and int(active) >= active_limit:
-                state = "scheduled"
-            elif state == "ready":
-                active += 1
+            if target == "ready":
+                gate_pending = connection.execute(
+                    """SELECT 1
+                       FROM json_each(?) dependency
+                       JOIN work_items parent ON parent.id=dependency.value
+                       JOIN experiments parent_experiment
+                         ON parent_experiment.id=parent.experiment_id
+                       WHERE parent_experiment.experiment_type='significance'
+                         AND (
+                           parent.state!='finished'
+                           OR COALESCE(
+                             json_extract(parent.specification_json,'$.gate_decision'),
+                             ''
+                           ) NOT IN ('significance_passed',
+                                     'significance_passed_bh_fdr',
+                                     'significance_passed_capacity_held')
+                         )""",
+                    (row["dependencies_json"],),
+                ).fetchone()
+                if gate_pending is not None:
+                    state = "scheduled"
+                    decision = "awaiting_significance"
+                elif int(active) >= active_limit:
+                    state = "scheduled"
+                else:
+                    active += 1
             specification = json.loads(row["specification_json"])
             specification["gate_decision"] = (
                 decision if state != "scheduled" else "significance_passed_capacity_held"
@@ -293,8 +344,17 @@ class SynthesisMixin:
                         member_entry_rule = member_specification.get("entry_rule")
                         if isinstance(member_entry_rule, dict):
                             member_fingerprint = member_entry_rule.get("fingerprint")
+                            member_route_fingerprint = member_entry_rule.get(
+                                "significance_route_fingerprint"
+                            )
+                        else:
+                            member_route_fingerprint = None
+                    else:
+                        member_route_fingerprint = None
                     binding = (
-                        self._binding_cohort_p_value(connection, member_fingerprint)
+                        self._binding_cohort_p_value(
+                            connection, member_fingerprint, member_route_fingerprint,
+                        )
                         if member_fingerprint else None
                     )
                     family.append({
@@ -341,6 +401,10 @@ class SynthesisMixin:
                         "threshold": finding["threshold"],
                         "rejected": finding["rejected"],
                     }
+                    self._record_significance_gate(
+                        connection, member["work_item_id"], decision,
+                        gate_findings,
+                    )
                     released, active = self._release_dependents(
                         connection, member["work_item_id"], target, decision,
                         active_limit, active, now, findings=gate_findings,
@@ -359,7 +423,24 @@ class SynthesisMixin:
                 }
             binding = None
             if fingerprint:
-                binding = self._binding_cohort_p_value(connection, fingerprint)
+                route_fingerprint = None
+                if item is not None:
+                    experiment = connection.execute(
+                        "SELECT specification_json FROM experiments WHERE id=?",
+                        (item["experiment_id"],),
+                    ).fetchone()
+                    if experiment is not None:
+                        experiment_specification = json.loads(
+                            experiment["specification_json"] or "{}"
+                        )
+                        entry_rule = experiment_specification.get("entry_rule")
+                        if isinstance(entry_rule, dict):
+                            route_fingerprint = entry_rule.get(
+                                "significance_route_fingerprint"
+                            )
+                binding = self._binding_cohort_p_value(
+                    connection, fingerprint, route_fingerprint,
+                )
             if binding is not None and item is not None \
                     and binding["experiment_id"] != item["experiment_id"]:
                 return {"decision": "superseded_by_first_test", "dependents": []}
@@ -371,6 +452,7 @@ class SynthesisMixin:
                 target, decision = "scheduled", "significance_inconclusive"
             else:
                 target, decision = "archived", "significance_failed"
+            self._record_significance_gate(connection, work_item_id, decision)
             active = connection.execute(
                 "SELECT COUNT(*) FROM work_items WHERE state IN ('ready','running')"
             ).fetchone()[0]

@@ -67,13 +67,14 @@ class ExecutionDispositionTests(unittest.TestCase):
         self.assertEqual(disposition.code, "jesse_execution_stopped")
         self.assertEqual(disposition.detail, "qty cannot be 0")
 
-    def test_failed_execution_allows_only_revise_or_reject(self) -> None:
+    def test_failed_execution_allows_non_promotion_verdicts(self) -> None:
         builder = ExecutionAnalysisInputBuilder()
         row = {"run_status": "stopped"}
 
         builder.validate_failure_verdict(row, Verdict.REVISE)
         builder.validate_failure_verdict(row, Verdict.REJECT)
-        with self.assertRaisesRegex(ValueError, "revise or reject"):
+        builder.validate_failure_verdict(row, Verdict.INFRASTRUCTURE_FAILURE)
+        with self.assertRaisesRegex(ValueError, "infrastructure_failure"):
             builder.validate_failure_verdict(row, Verdict.HPO_CANDIDATE)
 
 

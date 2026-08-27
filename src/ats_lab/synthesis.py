@@ -29,6 +29,17 @@ TYPED_PROPOSAL_REQUIRED_FIELDS = {
 }
 
 
+def _route_fingerprint(route: RouteSpec) -> str:
+    """Identify one primary route without depending on route order."""
+    material = json.dumps(asdict(route), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _route_set_fingerprint(routes: tuple[RouteSpec, ...]) -> str:
+    material = "|".join(sorted(_route_fingerprint(route) for route in routes))
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class SynthesisRequest:
     strategy_name: str
@@ -65,12 +76,20 @@ class SynthesisRequest:
 
     @property
     def job_fingerprint(self) -> str:
-        if self.action == "new" and self.change_scope in ENTRY_CHANGE_SCOPES:
+        if (
+            self.action == "new"
+            and self.change_scope in ENTRY_CHANGE_SCOPES
+            and len(self.routes) == 1
+        ):
             return self.entry_fingerprint
+        route_material = (
+            f"|route_set:{_route_set_fingerprint(self.routes)}"
+            if len(self.routes) > 1 else ""
+        )
         material = "|".join((
             self.entry_fingerprint, self.action, self.source_experiment_id or "",
             self.change_scope, " ".join(self.controlled_change.split()).casefold(),
-        ))
+        )) + route_material
         return hashlib.sha256(material.encode()).hexdigest()
 
 
@@ -225,23 +244,52 @@ def benjamini_hochberg(p_values: list[float], level: float) -> list[dict[str, An
     ]
 
 
-def _binding_significance_test(database: WorkflowDatabase, fingerprint: str) -> dict[str, Any] | None:
+def _binding_significance_test(
+    database: WorkflowDatabase,
+    fingerprint: str,
+    route: RouteSpec | None = None,
+) -> dict[str, Any] | None:
     """Return the first finished significance test for a canonical fingerprint.
 
     First-test-wins: the earliest finished run is binding; later re-tests are
     stored and visible but never flip baseline readiness.
     """
-    rows = database.rows(
-        """SELECT r.id AS run_id,
-                  json_extract(r.metrics_json, '$.p_value') AS p_value,
-                  COALESCE(r.finished_at, r.started_at) AS decided_at
-           FROM runs r JOIN experiments e ON e.id=r.experiment_id
-           WHERE e.experiment_type='significance' AND r.status='finished'
-             AND json_extract(e.specification_json, '$.entry_rule.fingerprint')=?
-             AND json_extract(r.metrics_json, '$.p_value') IS NOT NULL
-           ORDER BY COALESCE(r.finished_at, r.started_at) ASC, r.id ASC LIMIT 1""",
-        (fingerprint,),
-    )
+    query = """SELECT r.id AS run_id,
+                      json_extract(r.metrics_json, '$.p_value') AS p_value,
+                      COALESCE(r.finished_at, r.started_at) AS decided_at
+               FROM runs r JOIN experiments e ON e.id=r.experiment_id
+               WHERE e.experiment_type='significance' AND r.status='finished'
+                 AND json_extract(e.specification_json, '$.entry_rule.fingerprint')=?
+                 AND json_extract(r.metrics_json, '$.p_value') IS NOT NULL"""
+    parameters: list[Any] = [fingerprint]
+    if route is not None:
+        query += """
+                 AND (
+                   json_extract(
+                     e.specification_json,
+                     '$.entry_rule.significance_route_fingerprint'
+                   )=?
+                   OR (
+                     json_extract(
+                       e.specification_json,
+                       '$.entry_rule.significance_route_fingerprint'
+                     ) IS NULL
+                     AND json_array_length(
+                       json_extract(e.specification_json, '$.routes')
+                     )=1
+                     AND json_extract(e.specification_json, '$.routes[0].exchange')=?
+                     AND json_extract(e.specification_json, '$.routes[0].symbol')=?
+                     AND json_extract(e.specification_json, '$.routes[0].timeframe')=?
+                     AND json_extract(e.specification_json, '$.routes[0].start_date')=?
+                     AND json_extract(e.specification_json, '$.routes[0].finish_date')=?
+                   )
+                 )"""
+        parameters.extend([
+            _route_fingerprint(route), route.exchange, route.symbol,
+            route.timeframe, route.start_date, route.finish_date,
+        ])
+    query += " ORDER BY COALESCE(r.finished_at, r.started_at) ASC, r.id ASC LIMIT 1"
+    rows = database.rows(query, tuple(parameters))
     if not rows:
         return None
     return {
@@ -311,6 +359,20 @@ def _effective_data_routes(
     )
 
 
+def _effective_data_routes_for_route(
+    database: WorkflowDatabase,
+    request: SynthesisRequest,
+    route: RouteSpec,
+) -> tuple[DataRouteSpec, ...]:
+    """Resolve trusted auxiliary candles for one Jesse primary route."""
+    return merge_data_routes(
+        request.strategy_name,
+        [asdict(route)],
+        _inherited_data_routes(database, request.source_experiment_id),
+        request.data_routes,
+    )
+
+
 def synthesize(
     database: WorkflowDatabase, request: SynthesisRequest, *, source_path: str = "",
     release_ready: bool = True,
@@ -319,8 +381,11 @@ def synthesize(
     database.initialize()
     data_routes = _effective_data_routes(database, request)
     fingerprint = request.entry_fingerprint
-    stem = f"{_slug(request.strategy_name)}-{request.job_fingerprint[:8].upper()}"
-    significance_id = f"{stem}-SIG"
+    route_set_suffix = (
+        f"-{_route_set_fingerprint(request.routes)[:8].upper()}"
+        if len(request.routes) > 1 else ""
+    )
+    stem = f"{_slug(request.strategy_name)}-{request.job_fingerprint[:8].upper()}{route_set_suffix}"
     baseline_id = f"{stem}-BL"
     lineage = {
         "fingerprint": fingerprint,
@@ -344,52 +409,86 @@ def synthesize(
         "cohort_id": request.cohort_id,
         "cohort_slot": request.cohort_slot,
     }
-    binding = _binding_significance_test(database, fingerprint)
-    p_value = binding["p_value"] if binding else None
     needs_significance = request.change_scope in ENTRY_CHANGE_SCOPES
+    significance_ids: list[str] = []
+    significance_bindings: list[dict[str, Any] | None] = []
+    significance_p_values: list[float | None] = []
 
     if needs_significance:
         sig_parameters: dict[str, Any] = {"n_simulations": request.n_simulations}
         if request.random_seed is not None:
             sig_parameters["random_seed"] = request.random_seed
-        sig_spec = ExperimentSpec(
-            id=significance_id, strategy_name=request.strategy_name,
-            experiment_type=ExperimentType.SIGNIFICANCE, hypothesis=request.hypothesis,
-            archetype=request.archetype, target_regime=request.target_regime,
-            failure_regime=request.failure_regime,
-            routes=request.routes,
-            data_routes=data_routes,
-            success_gates=(GateSpec("p_value", "<", 0.05),),
-            failure_gates=(GateSpec("p_value", ">", 0.10),),
-            parent_experiment_id=request.source_experiment_id, source_path=source_path,
-        )
-        _ensure_experiment(database, sig_spec)
-        _merge_experiment_metadata(database, significance_id, lineage, {"operation": "significance", "parameters": sig_parameters})
-        sig_state = WorkState.FINISHED if p_value is not None else (WorkState.READY if release_ready else WorkState.SCHEDULED)
-        _ensure_work_item(database, WorkItem(
-            id=significance_id, experiment_id=significance_id, priority=request.priority,
-            state=sig_state, specification={"operation": "significance", "parameters": sig_parameters,
-                                             "entry_rule": lineage,
-                                             "data_routes": [
-                                                 route.__dict__
-                                                 for route in data_routes
-                                             ]},
-        ))
+        for index, route in enumerate(request.routes):
+            route_key = _route_fingerprint(route)
+            significance_id = (
+                f"{stem}-SIG" if len(request.routes) == 1
+                else f"{stem}-SIG-{route_key[:8].upper()}"
+            )
+            significance_ids.append(significance_id)
+            binding = _binding_significance_test(database, fingerprint, route)
+            significance_bindings.append(binding)
+            p_value = float(binding["p_value"]) if binding else None
+            significance_p_values.append(p_value)
+            sig_lineage = {
+                **lineage,
+                "significance_route": asdict(route),
+                "significance_route_fingerprint": route_key,
+            }
+            sig_data_routes = _effective_data_routes_for_route(
+                database, request, route,
+            )
+            sig_decision = (
+                "awaiting_significance" if p_value is None
+                else "significance_passed" if p_value < 0.05
+                else "significance_inconclusive" if p_value <= 0.10
+                else "significance_failed"
+            )
+            sig_state = (
+                WorkState.FINISHED if p_value is not None
+                else WorkState.READY if release_ready and index == 0
+                else WorkState.SCHEDULED
+            )
+            sig_spec = ExperimentSpec(
+                id=significance_id, strategy_name=request.strategy_name,
+                experiment_type=ExperimentType.SIGNIFICANCE, hypothesis=request.hypothesis,
+                archetype=request.archetype, target_regime=request.target_regime,
+                failure_regime=request.failure_regime,
+                routes=(route,),
+                data_routes=sig_data_routes,
+                success_gates=(GateSpec("p_value", "<", 0.05),),
+                failure_gates=(GateSpec("p_value", ">", 0.10),),
+                parent_experiment_id=request.source_experiment_id, source_path=source_path,
+            )
+            _ensure_experiment(database, sig_spec)
+            _merge_experiment_metadata(
+                database, significance_id, sig_lineage,
+                {"operation": "significance", "parameters": sig_parameters},
+            )
+            _ensure_work_item(database, WorkItem(
+                id=significance_id, experiment_id=significance_id,
+                priority=request.priority + index,
+                state=sig_state, specification={
+                    "operation": "significance", "parameters": sig_parameters,
+                    "entry_rule": sig_lineage,
+                    "gate_decision": sig_decision,
+                    "data_routes": data_route_dicts(sig_data_routes),
+                },
+            ))
 
     baseline_state = WorkState.READY if release_ready else WorkState.SCHEDULED
     decision = "significance_not_required"
     dependencies: tuple[str, ...] = ()
     if needs_significance:
-        dependencies = (significance_id,)
-        if p_value is None:
+        dependencies = tuple(significance_ids)
+        if any(p_value is None for p_value in significance_p_values):
             baseline_state, decision = WorkState.SCHEDULED, "awaiting_significance"
-        elif p_value < 0.05:
-            baseline_state = WorkState.READY if release_ready else WorkState.SCHEDULED
-            decision = "significance_passed" if release_ready else "significance_passed_capacity_held"
-        elif p_value <= 0.10:
+        elif any(p_value > 0.10 for p_value in significance_p_values if p_value is not None):
+            baseline_state, decision = WorkState.ARCHIVED, "significance_failed"
+        elif any(p_value >= 0.05 for p_value in significance_p_values if p_value is not None):
             baseline_state, decision = WorkState.SCHEDULED, "significance_inconclusive"
         else:
-            baseline_state, decision = WorkState.ARCHIVED, "significance_failed"
+            baseline_state = WorkState.READY if release_ready else WorkState.SCHEDULED
+            decision = "significance_passed" if release_ready else "significance_passed_capacity_held"
 
     baseline_spec = ExperimentSpec(
         id=baseline_id, strategy_name=request.strategy_name,
@@ -398,7 +497,10 @@ def synthesize(
         target_regime=request.target_regime, failure_regime=request.failure_regime,
         routes=request.routes,
         data_routes=data_routes,
-        parent_experiment_id=significance_id if needs_significance else request.source_experiment_id,
+        parent_experiment_id=(
+            significance_ids[0] if needs_significance
+            else request.source_experiment_id
+        ),
         source_path=source_path,
     )
     _ensure_experiment(database, baseline_spec)
@@ -413,15 +515,33 @@ def synthesize(
         },
     ))
     _set_state(database, baseline_id, baseline_state)
-    if p_value is not None:
-        _set_state(database, significance_id, WorkState.FINISHED)
+    if needs_significance and all(
+        p_value is not None for p_value in significance_p_values
+    ):
+        for significance_id in significance_ids:
+            _set_state(database, significance_id, WorkState.FINISHED)
     return {
         "entry_fingerprint": fingerprint, "change_scope": request.change_scope,
         "job_fingerprint": request.job_fingerprint,
-        "significance_job": significance_id if needs_significance else None,
+        "significance_job": (
+            significance_ids[0] if len(significance_ids) == 1 else None
+        ) if needs_significance else None,
+        "significance_jobs": significance_ids,
         "baseline_job": baseline_id, "baseline_state": baseline_state.value,
-        "decision": decision, "p_value": p_value,
-        "binding_significance_test": binding,
+        "decision": decision,
+        "p_value": (
+            significance_p_values[0] if len(significance_p_values) == 1
+            else max(
+                (value for value in significance_p_values if value is not None),
+                default=None,
+            )
+        ) if needs_significance else None,
+        "p_values": significance_p_values,
+        "binding_significance_test": (
+            significance_bindings[0] if len(significance_bindings) == 1
+            else None
+        ),
+        "binding_significance_tests": significance_bindings,
         "released_ready": release_ready,
     }
 

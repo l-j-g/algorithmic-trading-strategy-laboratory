@@ -10,8 +10,13 @@ ats-lab synthesize --file idea.json
 New or changed entry rules create:
 
 ```text
-entry-significance (ready) -> baseline-backtest (scheduled)
+entry-significance per primary route (ready) -> baseline-backtest (scheduled)
 ```
+
+Jesse Rule Test sessions accept exactly one primary trading route. A multi-route
+baseline keeps all requested trading routes, while ATS creates one significance
+job per symbol/timeframe and releases the baseline only after every route gate
+passes. Multi-timeframe auxiliary candles stay in `data_routes`.
 
 The entry rule is normalized and SHA-256 fingerprinted. The fingerprint links
 later revisions and permits reuse of an unchanged rule's evidence.

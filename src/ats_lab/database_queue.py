@@ -75,6 +75,24 @@ class QueueMixin:
                          json_extract(specification_json, '$.readiness.status'),
                          'ready'
                      ) != 'requirements_pending'
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM json_each(work_items.dependencies_json) dependency
+                         JOIN work_items parent ON parent.id=dependency.value
+                         JOIN experiments parent_experiment
+                           ON parent_experiment.id=parent.experiment_id
+                         WHERE parent_experiment.experiment_type='significance'
+                           AND (
+                             parent.state!='finished'
+                             OR COALESCE(
+                               json_extract(
+                                 parent.specification_json,'$.gate_decision'
+                               ), ''
+                             ) NOT IN ('significance_passed',
+                                       'significance_passed_bh_fdr',
+                                       'significance_passed_capacity_held')
+                           )
+                     )
                    ORDER BY priority, created_at, id LIMIT 1"""
             ).fetchone()
             if row is None:
@@ -99,6 +117,24 @@ class QueueMixin:
                          json_extract(specification_json, '$.readiness.status'),
                          'ready'
                      ) != 'requirements_pending'
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM json_each(work_items.dependencies_json) dependency
+                         JOIN work_items parent ON parent.id=dependency.value
+                         JOIN experiments parent_experiment
+                           ON parent_experiment.id=parent.experiment_id
+                         WHERE parent_experiment.experiment_type='significance'
+                           AND (
+                             parent.state!='finished'
+                             OR COALESCE(
+                               json_extract(
+                                 parent.specification_json,'$.gate_decision'
+                               ), ''
+                             ) NOT IN ('significance_passed',
+                                       'significance_passed_bh_fdr',
+                                       'significance_passed_capacity_held')
+                           )
+                     )
                    ORDER BY CASE WHEN json_extract(
                        specification_json, '$.operation'
                    ) = 'hpo' THEN 0 ELSE 1 END,
@@ -825,6 +861,21 @@ class QueueMixin:
                          SELECT 1 FROM json_each(work_items.dependencies_json) dependency
                          LEFT JOIN work_items parent ON parent.id=dependency.value
                          WHERE parent.id IS NULL OR parent.state!='finished'
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM json_each(work_items.dependencies_json) dependency
+                         JOIN work_items parent ON parent.id=dependency.value
+                         JOIN experiments parent_experiment
+                           ON parent_experiment.id=parent.experiment_id
+                         WHERE parent_experiment.experiment_type='significance'
+                           AND COALESCE(
+                             json_extract(
+                               parent.specification_json,'$.gate_decision'
+                             ), ''
+                           ) NOT IN ('significance_passed',
+                                     'significance_passed_bh_fdr',
+                                     'significance_passed_capacity_held')
                      )
                    ORDER BY priority, created_at, id LIMIT ?""",
                 (capacity,),

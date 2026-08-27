@@ -39,11 +39,13 @@ methodology rules are enforced in code:
    rule are stored and visible but never flip baseline readiness; the
    synthesis status output reports which run counted (`run_id`, `p_value`,
    `decided_at`). Re-running significance until p < 0.05 is not a valid
-   path to release. The significance test sweeps ALL requested routes and
-   is judged on the worst-case (maximum) p-value across them, mirroring
-   how baselines sweep many routes; job identity is derived from the
-   canonical entry rule plus structural fields only — hypothesis prose
-   never mints new jobs for identical science.
+   path to release. Jesse significance accepts exactly one primary trading
+   route per session. ATS therefore creates one Rule Test per symbol/timeframe
+   and gates the combined baseline on every route-specific result. Auxiliary
+   candles for a multi-timeframe strategy belong in `data_routes`; they are
+   not additional trading routes. Job identity is derived from the canonical
+   entry rule plus structural fields only — hypothesis prose never mints new
+   jobs for identical science.
 2. **Benjamini-Hochberg FDR control per synthesis cohort.** All entry
    significance p-values inside one synthesis cohort form one hypothesis
    family. Once every member has a binding finished test, the family is

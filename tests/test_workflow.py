@@ -201,6 +201,36 @@ class WorkflowDatabaseTests(unittest.TestCase):
             self.assertEqual(claimed["state"], "running")
             self.assertIsNone(database.claim_next("worker-2"))
 
+    def test_significance_gate_blocks_ready_dependent_from_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="SIG", strategy_name="Test", experiment_type=ExperimentType.SIGNIFICANCE,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="SIG", experiment_id="SIG", priority=1,
+                state=WorkState.FINISHED,
+                specification={"operation": "significance", "gate_decision": "significance_inconclusive"},
+            ))
+            database.upsert_experiment(ExperimentSpec(
+                id="BASE", strategy_name="Test", experiment_type=ExperimentType.BASELINE,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="BASE", experiment_id="BASE", priority=2,
+                state=WorkState.READY, dependencies=("SIG",),
+                specification={"operation": "backtest", "gate_decision": "awaiting_significance"},
+            ))
+
+            self.assertIsNone(database.claim_next("worker"))
+            self.assertEqual(database.claim_batch("worker", 5), [])
+
+            with database.connect() as connection:
+                connection.execute(
+                    "UPDATE work_items SET state='scheduled' WHERE id='BASE'"
+                )
+            self.assertEqual(database.promote_scheduled_runnable(5), 0)
+
     def test_active_queue_excludes_finished_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")

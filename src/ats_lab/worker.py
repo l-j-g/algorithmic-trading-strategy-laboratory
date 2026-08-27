@@ -224,9 +224,8 @@ class Worker:
             chains = []
             for generated in synthesized["generated"]:
                 work_item_ids = [
-                    item_id for item_id in (
-                        generated.get("significance_job"), generated["baseline_job"],
-                    ) if item_id
+                    *generated.get("significance_jobs", []),
+                    generated["baseline_job"],
                 ]
                 chains.append({
                     "slot": generated["cohort_slot"], "lane": generated["lane"],
