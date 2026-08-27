@@ -41,6 +41,10 @@ The footer shows total research duration, time since the last event, and the
 latest provider token usage when available. `RULE TEST`, `MONTE CARLO`, and
 `HPO` use the same run layout. HPO analysis remains under `ANALYSIS`.
 
+Execution events from one bounded turn are compacted in the terminal. The
+`n/m` counter is that turn's progress; it is not the synthesis cohort size.
+Detailed per-item events remain in the optional daily activity log.
+
 Press `Ctrl-C` once to request a graceful stop. The supervisor finishes its
 current bounded dispatch, records `STOPPING`, and the attached display waits
 until the supervisor reaches `STOPPED`. A second `Ctrl-C` returns control to

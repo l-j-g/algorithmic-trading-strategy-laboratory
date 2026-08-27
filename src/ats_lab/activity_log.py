@@ -55,6 +55,7 @@ _STAGE_LABELS = {
     "paused": "PAUSED",
     "stopping": "STOPPING",
     "stopped": "STOPPED",
+    "awaiting_analysis_cohort": "WAITING",
     "idle": "WAITING",
 }
 _OPERATION_LABELS = {
@@ -465,6 +466,68 @@ def render_activity_event(event: ActivityEvent, *, color: bool = False, links: b
     return "\n".join(_event_lines(event, color=color, links=links))
 
 
+def _activity_group_key(event: ActivityEvent) -> tuple[object, ...] | None:
+    """Return a terminal-only grouping key for repeated execution events."""
+    if event.event_type not in {"run_started", "run_failed"}:
+        return None
+    batch_id = event.payload.get("batch_id")
+    if not batch_id:
+        return None
+    key = (
+        event.event_type,
+        batch_id,
+        event.payload.get("operation") or "backtest",
+        event.payload.get("strategy") or event.payload.get("strategy_name") or "unknown",
+        _route_text(event.payload) or "",
+    )
+    if event.event_type == "run_failed":
+        key += (event.payload.get("blocker_code") or "execution failure",)
+    return key
+
+
+def _activity_event_groups(events: Iterable[ActivityEvent]) -> list[list[ActivityEvent]]:
+    groups: list[list[ActivityEvent]] = []
+    for event in events:
+        key = _activity_group_key(event)
+        if groups and key is not None:
+            previous_key = _activity_group_key(groups[-1][0])
+            if key == previous_key:
+                groups[-1].append(event)
+                continue
+        groups.append([event])
+    return groups
+
+
+def render_activity_group(
+    events: list[ActivityEvent], *, color: bool = False, links: bool = True,
+) -> str:
+    """Render repeated starts/failures as one compact terminal line."""
+    if len(events) == 1:
+        return render_activity_event(events[0], color=color, links=links)
+    first = events[0]
+    payload = first.payload
+    operation = str(payload.get("operation") or "backtest")
+    stage = _stage_for_operation(operation)
+    total = payload.get("total") or len(events)
+    completed = events[-1].payload.get("completed", 0)
+    strategy = payload.get("strategy") or payload.get("strategy_name") or "unknown"
+    route = _route_text(payload)
+    route_suffix = f" · {route}" if route else ""
+    if first.event_type == "run_started":
+        actions = {
+            "backtest": "Backtest started",
+            "significance": "Rule test started",
+            "monte_carlo": "Monte Carlo started",
+            "hpo": "HPO started",
+        }
+        action = actions.get(operation, "Run started")
+        prefix = _paint(f"{stage} ({completed}/{total}):", "blue", color)
+        return f"{prefix} {action} · {len(events)} items · {strategy}{route_suffix}"
+    blocker = str(payload.get("blocker_code") or "execution failure")
+    prefix = _paint(f"{stage} ({completed}/{total}):", "red", color)
+    return f"{prefix} Failed · {len(events)} items · {strategy} · {blocker}{route_suffix}"
+
+
 def render_footer(
     stage: str,
     *,
@@ -549,21 +612,17 @@ class ActivityFollower:
 
     def _consume(self, rows: Iterable[Mapping[str, Any]], now: datetime) -> int:
         count = 0
+        display_events: list[ActivityEvent] = []
         for row in rows:
             self.cursor = max(self.cursor, int(row["id"]))
             event = ActivityEvent.from_row(row)
             if not is_display_event(event):
                 continue
-            self._clear_footer()
-            rendered = render_activity_event(
-                event, color=self.color, links=self.links,
+            display_events.append(event)
+            self._file.write(
+                render_activity_event(event, color=False, links=False).splitlines(),
+                when=_parse_time(event.occurred_at) or now,
             )
-            if rendered:
-                self._write(rendered + "\n")
-                self._file.write(
-                    render_activity_event(event, color=False, links=False).splitlines(),
-                    when=_parse_time(event.occurred_at) or now,
-                )
             self.stage = _stage_for_event(event)
             self.tokens = _tokens_for_event(event)
             event_time = _parse_time(event.occurred_at) or now
@@ -573,6 +632,13 @@ class ActivityFollower:
                 self.stop_requested = True
             self.last_event_at = event_time
             count += 1
+        for group in _activity_event_groups(display_events):
+            self._clear_footer()
+            rendered = render_activity_group(
+                group, color=self.color, links=self.links,
+            )
+            if rendered:
+                self._write(rendered + "\n")
         self._draw_footer(now, force=count > 0)
         return count
 

@@ -150,8 +150,11 @@ class BatchSupervisor:
             }
 
         pending = self.database.pending_batch_evaluation(self.worker_id)
-        if pending:
-            return self._analyze_pending(pending, recovered=0, promoted=0)
+        ready_for_analysis = self._analysis_ready_rows(pending)
+        if ready_for_analysis:
+            return self._analyze_pending(
+                ready_for_analysis, recovered=0, promoted=0,
+            )
 
         if self.preflight is not None:
             infrastructure = self.preflight()
@@ -222,9 +225,19 @@ class BatchSupervisor:
                 )
                 if row["batch_id"] == recovery_batch
             ]
-            return self._analyze_pending(
-                pending_failures, recovered=recovered, promoted=0,
-            )
+            ready_failures = self._analysis_ready_rows(pending_failures)
+            if ready_failures:
+                return self._analyze_pending(
+                    ready_failures, recovered=recovered, promoted=0,
+                )
+            return {
+                "status": "awaiting_analysis_cohort",
+                "batch_id": recovery_batch,
+                "pending_items": len(pending_failures),
+                "minimum_items": self.resource_policy.analysis_cohort_min,
+                "recovered": recovered,
+                "promoted": 0,
+            }
         if hasattr(self.database, "reconcile_finished_hpo_work"):
             self.database.reconcile_finished_hpo_work()
         self._apply_default_hpo_routes()
@@ -324,6 +337,7 @@ class BatchSupervisor:
                 "run_started",
                 self._activity_request_payload(
                     request, operation=self._operation_for_request(request),
+                    batch_id=batch_id,
                 ) | {
                     "total": len(requests),
                     "completed": 0,
@@ -361,6 +375,7 @@ class BatchSupervisor:
                     "run_failed",
                     self._activity_request_payload(
                         request, operation=self._operation_for_request(request),
+                        batch_id=batch_id,
                     ) | {
                         "total": len(claimed), "completed": 0,
                         "blocker_code": dispatch.blocker_code or "batch_execution_failed",
@@ -402,6 +417,7 @@ class BatchSupervisor:
                     "run_failed",
                     self._activity_request_payload(
                         request, operation=self._operation_for_request(request),
+                        batch_id=batch_id,
                     ) | {
                         "total": len(claimed), "completed": processed,
                         "blocker_code": "batch_coverage_mismatch",
@@ -482,6 +498,7 @@ class BatchSupervisor:
                                 operation=self._operation_for_request(
                                     self.database.execution_request(item["id"]),
                                 ),
+                                batch_id=batch_id,
                             ) | {
                                 "total": len(claimed), "completed": processed,
                                 "usage": self._dispatch_usage(dispatch),
@@ -499,6 +516,7 @@ class BatchSupervisor:
                             operation=self._operation_for_request(
                                 self.database.execution_request(item["id"]),
                             ),
+                            batch_id=batch_id,
                         ) | {
                             "total": len(claimed), "completed": processed,
                             "usage": self._dispatch_usage(dispatch),
@@ -515,6 +533,7 @@ class BatchSupervisor:
                         "run_failed",
                         self._activity_request_payload(
                             request, operation=self._operation_for_request(request),
+                            batch_id=batch_id,
                         ) | {
                             "total": len(claimed), "completed": processed,
                             "blocker_code": "invalid_execution_result",
@@ -556,6 +575,7 @@ class BatchSupervisor:
                     "run_failed",
                     self._activity_request_payload(
                         request, operation=self._operation_for_request(request),
+                        batch_id=batch_id,
                     ) | {
                         "total": len(claimed), "completed": processed,
                         "blocker_code": disposition.code,
@@ -569,9 +589,27 @@ class BatchSupervisor:
                 "recovered": recovered, "promoted": promoted,
             }
         pending = self.database.pending_batch_evaluation(self.worker_id)
+        ready_for_analysis = self._analysis_ready_rows(pending)
+        if not ready_for_analysis:
+            self._runtime(
+                "awaiting_analysis_cohort",
+                batch_id=batch_id,
+                detail={
+                    "pending_items": len(pending),
+                    "minimum_items": self.resource_policy.analysis_cohort_min,
+                },
+            )
+            return {
+                "status": "awaiting_analysis_cohort",
+                "batch_id": batch_id,
+                "results": terminal,
+                "pending_items": len(pending),
+                "minimum_items": self.resource_policy.analysis_cohort_min,
+                "recovered": recovered,
+                "promoted": promoted,
+            }
         analysis = self._analyze_pending(
-            [row for row in pending if row["batch_id"] == batch_id],
-            recovered=recovered, promoted=promoted,
+            ready_for_analysis, recovered=recovered, promoted=promoted,
         )
         analysis["execution_results"] = terminal
         if unknown:
@@ -924,6 +962,31 @@ class BatchSupervisor:
             cohort
             for group in (ordinary, hpo)
             for cohort in self._balanced_chunks(group)
+        ]
+
+    def _analysis_ready_rows(self, rows: list[dict]) -> list[dict]:
+        """Return pending work only when a minimum ordinary cohort is ready.
+
+        Ordinary execution evidence accumulates across execution batches. HPO
+        analysis remains independently dispatchable because it has a separate
+        payload contract and can legitimately contain one imported study.
+        """
+        if not rows:
+            return []
+        ordinary = [
+            row for row in rows if self._operation(row) != "hpo"
+        ]
+        hpo = [row for row in rows if self._operation(row) == "hpo"]
+        ready_ids: set[str] = {str(row["work_item_id"]) for row in hpo}
+        ready_ids.update(
+            str(row["work_item_id"])
+            for row in ordinary
+            if self._deterministic_analysis_payload(row) is not None
+        )
+        if len(ordinary) >= self.resource_policy.analysis_cohort_min:
+            ready_ids.update(str(row["work_item_id"]) for row in ordinary)
+        return [
+            row for row in rows if str(row["work_item_id"]) in ready_ids
         ]
 
     def _balanced_chunks(self, rows: list[dict]) -> list[list[dict]]:
@@ -1750,6 +1813,7 @@ class BatchSupervisor:
 
     def _activity_request_payload(
         self, request: dict[str, Any], *, operation: str,
+        batch_id: str | None = None,
     ) -> dict[str, Any]:
         experiment = request.get("experiment")
         if not isinstance(experiment, dict):
@@ -1759,6 +1823,7 @@ class BatchSupervisor:
             routes = []
         return {
             "operation": operation,
+            "batch_id": batch_id,
             "work_item_id": request.get("work_item_id"),
             "experiment_id": request.get("experiment_id"),
             "strategy": experiment.get("strategy_name") or "unknown",
@@ -1778,8 +1843,11 @@ class BatchSupervisor:
         result: dict[str, Any],
         *,
         operation: str,
+        batch_id: str | None = None,
     ) -> dict[str, Any]:
-        payload = self._activity_request_payload(request, operation=operation)
+        payload = self._activity_request_payload(
+            request, operation=operation, batch_id=batch_id,
+        )
         evidence = result.get("evidence")
         run = evidence.get("run") if isinstance(evidence, dict) else None
         if not isinstance(run, dict):
@@ -2306,9 +2374,19 @@ class BatchSupervisor:
                 return results
             if result["status"] == "paused":
                 self._runtime("paused")
+            elif result["status"] == "awaiting_analysis_cohort":
+                self._runtime(
+                    "awaiting_analysis_cohort",
+                    batch_id=result.get("batch_id"),
+                    detail={
+                        "pending_items": result.get("pending_items"),
+                        "minimum_items": result.get("minimum_items"),
+                    },
+                )
             else:
                 self._runtime("idle", detail={"last_status": result["status"]})
             if result["status"] in {
                 "idle", "paused", "analysis_failed", "synthesis_failed",
+                "awaiting_analysis_cohort",
             }:
                 self.sleep(idle_sleep)

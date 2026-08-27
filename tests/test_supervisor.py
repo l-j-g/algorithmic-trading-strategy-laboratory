@@ -73,8 +73,23 @@ class BatchSupervisorTests(unittest.TestCase):
             ))
         return database
 
+    def make_analysis_database(
+        self, root: str, *, job_count: int = 4,
+    ) -> WorkflowDatabase:
+        database = self.make_database(root)
+        for index in range(3, job_count + 1):
+            database.upsert_experiment(ExperimentSpec(
+                id=f"EXP-{index}", strategy_name=f"Strategy{index}",
+            ))
+            database.upsert_work_item(WorkItem(
+                id=f"JOB-{index}", experiment_id=f"EXP-{index}",
+                priority=index, state=WorkState.READY,
+                specification={"operation": "backtest"},
+            ))
+        return database
+
     @staticmethod
-    def execution_result() -> DispatchResult:
+    def execution_result(indices=(1, 2)) -> DispatchResult:
         return DispatchResult(outcome="finished", payload={
             "outcome": "finished",
             "results": [
@@ -92,12 +107,12 @@ class BatchSupervisorTests(unittest.TestCase):
                         },
                     }},
                 }
-                for index in (1, 2)
+                for index in indices
             ],
         })
 
     @staticmethod
-    def analysis_result() -> DispatchResult:
+    def analysis_result(indices=(1, 2)) -> DispatchResult:
         return DispatchResult(outcome="finished", payload={
             "outcome": "finished",
             "evaluations": [
@@ -107,16 +122,17 @@ class BatchSupervisorTests(unittest.TestCase):
                     "finding": f"Result {index} needs more validation.",
                     "next_action": "Run one controlled validation.",
                 }
-                for index in (1, 2)
+                for index in indices
             ],
             "synthesis_requests": [],
         })
 
     def test_one_round_uses_separate_execution_and_analysis_turns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
+            database = self.make_analysis_database(tmp)
             dispatcher = SequenceDispatcher([
-                self.execution_result(), self.analysis_result(),
+                self.execution_result(range(1, 5)),
+                self.analysis_result(range(1, 5)),
             ])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
@@ -134,13 +150,50 @@ class BatchSupervisorTests(unittest.TestCase):
             )
             self.assertEqual(
                 database.rows("SELECT state,COUNT(*) count FROM work_items GROUP BY state"),
-                [{"state": "finished", "count": 2}],
+                [{"state": "finished", "count": 4}],
             )
             self.assertEqual(
-                database.rows("SELECT COUNT(*) count FROM runs")[0]["count"], 2,
+                database.rows("SELECT COUNT(*) count FROM runs")[0]["count"], 4,
             )
             self.assertEqual(
-                database.rows("SELECT COUNT(*) count FROM evaluations")[0]["count"], 2,
+                database.rows("SELECT COUNT(*) count FROM evaluations")[0]["count"], 4,
+            )
+
+    def test_analysis_waits_for_minimum_cohort_across_execution_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_analysis_database(tmp)
+            dispatcher = SequenceDispatcher([
+                self.execution_result(),
+                self.execution_result(range(3, 5)),
+                self.analysis_result(range(1, 5)),
+            ])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(
+                    execution_batch_size=2, synthesis_low_watermark=0,
+                ),
+            )
+
+            first = supervisor.run_round()
+
+            self.assertEqual(first["status"], "awaiting_analysis_cohort")
+            self.assertEqual(
+                [request["task_type"] for request in dispatcher.requests],
+                ["execute_batch"],
+            )
+            self.assertEqual(
+                len(database.pending_batch_evaluation("batch-worker")), 2,
+            )
+
+            second = supervisor.run_round()
+
+            self.assertEqual(second["status"], "batch_complete")
+            self.assertEqual(
+                [request["task_type"] for request in dispatcher.requests],
+                ["execute_batch", "execute_batch", "analyze_batch"],
+            )
+            self.assertEqual(
+                database.rows("SELECT COUNT(*) count FROM evaluations")[0]["count"], 4,
             )
 
     def test_analyzer_receives_bounded_untrusted_memory_hints(self) -> None:
@@ -172,10 +225,11 @@ class BatchSupervisorTests(unittest.TestCase):
                 }][:limit]
 
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
+            database = self.make_analysis_database(tmp)
             memory = Memory()
             dispatcher = SequenceDispatcher([
-                self.execution_result(), self.analysis_result(),
+                self.execution_result(range(1, 5)),
+                self.analysis_result(range(1, 5)),
             ])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker", memory_adapter=memory,
@@ -241,12 +295,12 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_execution_rejects_metrics_that_do_not_match_raw_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
-            execution = self.execution_result()
+            database = self.make_analysis_database(tmp, job_count=5)
+            execution = self.execution_result(range(1, 6))
             execution.payload["results"][0]["evidence"]["run"]["metrics"] = {
                 "net_profit_percentage": 999.0,
             }
-            analysis = self.analysis_result()
+            analysis = self.analysis_result(range(1, 6))
             analysis.payload["evaluations"] = analysis.payload["evaluations"][1:]
             dispatcher = SequenceDispatcher([execution, analysis])
             supervisor = BatchSupervisor(
@@ -264,14 +318,15 @@ class BatchSupervisorTests(unittest.TestCase):
             self.assertEqual(states[0]["blocker_code"], "invalid_execution_result")
             self.assertEqual(states[1]["state"], "finished")
             self.assertEqual(
-                database.rows("SELECT COUNT(*) count FROM runs")[0]["count"], 1,
+                database.rows("SELECT COUNT(*) count FROM runs")[0]["count"], 4,
             )
 
     def test_execution_persists_exact_compact_raw_result_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
+            database = self.make_analysis_database(tmp)
             dispatcher = SequenceDispatcher([
-                self.execution_result(), self.analysis_result(),
+                self.execution_result(range(1, 5)),
+                self.analysis_result(range(1, 5)),
             ])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
@@ -294,7 +349,7 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_three_route_aggregate_persists_requested_route_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
+            database = self.make_analysis_database(tmp)
             routes = [
                 {
                     "exchange": "Binance Perpetual Futures",
@@ -314,8 +369,8 @@ class BatchSupervisorTests(unittest.TestCase):
                     "UPDATE experiments SET specification_json=? WHERE id='EXP-1'",
                     (json.dumps(specification),),
                 )
-            execution = self.execution_result()
-            analysis = self.analysis_result()
+            execution = self.execution_result(range(1, 5))
+            analysis = self.analysis_result(range(1, 5))
             supervisor = BatchSupervisor(
                 database, SequenceDispatcher([execution, analysis]), "batch-worker",
                 resource_policy=ResourcePolicy(synthesis_low_watermark=0),
@@ -348,7 +403,7 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_unfinished_session_does_not_claim_aggregate_route_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
+            database = self.make_analysis_database(tmp)
             routes = [
                 {
                     "exchange": "Binance Perpetual Futures",
@@ -368,11 +423,11 @@ class BatchSupervisorTests(unittest.TestCase):
                     "UPDATE experiments SET specification_json=? WHERE id='EXP-1'",
                     (json.dumps(specification),),
                 )
-            execution = self.execution_result()
+            execution = self.execution_result(range(1, 5))
             run = execution.payload["results"][0]["evidence"]["run"]
             run["status"] = "running"
             run["raw_result"]["status"] = "running"
-            analysis = self.analysis_result()
+            analysis = self.analysis_result(range(1, 5))
             dispatcher = SequenceDispatcher([execution, analysis])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
@@ -474,12 +529,12 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_execution_rejects_missing_raw_metrics_before_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
-            execution = self.execution_result()
+            database = self.make_analysis_database(tmp, job_count=5)
+            execution = self.execution_result(range(1, 6))
             del execution.payload["results"][0]["evidence"]["run"][
                 "raw_result"
             ]["metrics"]
-            analysis = self.analysis_result()
+            analysis = self.analysis_result(range(1, 6))
             analysis.payload["evaluations"] = analysis.payload["evaluations"][1:]
             supervisor = BatchSupervisor(
                 database, SequenceDispatcher([execution, analysis]), "batch-worker",
@@ -528,7 +583,7 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_hpo_candidate_automatically_schedules_hpo_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
+            database = self.make_analysis_database(tmp)
             database.upsert_experiment(ExperimentSpec(
                 id="EXP-1-COST2X", strategy_name="Strategy1",
                 experiment_type=ExperimentType.COST_SENSITIVITY,
@@ -552,10 +607,10 @@ class BatchSupervisorTests(unittest.TestCase):
                 },
             ))
             metrics = self.hpo_evidence_metrics()
-            execution = self.execution_result()
+            execution = self.execution_result(range(1, 5))
             execution.payload["results"][0]["evidence"]["run"]["metrics"] = dict(metrics)
             execution.payload["results"][0]["evidence"]["run"]["raw_result"]["metrics"] = dict(metrics)
-            analysis = self.analysis_result()
+            analysis = self.analysis_result(range(1, 5))
             analysis.payload["evaluations"][0]["verdict"] = "hpo_candidate"
             dispatcher = SequenceDispatcher([execution, analysis])
             supervisor = BatchSupervisor(
@@ -581,7 +636,7 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_paper_trade_claim_enqueues_double_fee_stress_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
+            database = self.make_analysis_database(tmp)
             database.upsert_experiment(ExperimentSpec(
                 id="EXP-1", strategy_name="Strategy1",
                 routes=(RouteSpec(
@@ -590,12 +645,12 @@ class BatchSupervisorTests(unittest.TestCase):
                     start_date="2024-01-01", finish_date="2025-01-01",
                 ),),
             ))
-            analysis = self.analysis_result()
+            analysis = self.analysis_result(range(1, 5))
             analysis.payload["evaluations"][0]["verdict"] = (
                 "paper_trade_candidate"
             )
             dispatcher = SequenceDispatcher([
-                self.execution_result(), analysis,
+                self.execution_result(range(1, 5)), analysis,
             ])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
@@ -638,11 +693,11 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_hpo_candidate_without_gate_evidence_is_inconclusive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
-            analysis = self.analysis_result()
+            database = self.make_analysis_database(tmp)
+            analysis = self.analysis_result(range(1, 5))
             analysis.payload["evaluations"][0]["verdict"] = "hpo_candidate"
             dispatcher = SequenceDispatcher([
-                self.execution_result(), analysis,
+                self.execution_result(range(1, 5)), analysis,
             ])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
@@ -663,13 +718,13 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_paper_trade_claim_without_validation_is_inconclusive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
-            analysis = self.analysis_result()
+            database = self.make_analysis_database(tmp)
+            analysis = self.analysis_result(range(1, 5))
             analysis.payload["evaluations"][0]["verdict"] = (
                 "paper_trade_candidate"
             )
             dispatcher = SequenceDispatcher([
-                self.execution_result(), analysis,
+                self.execution_result(range(1, 5)), analysis,
             ])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
@@ -1002,9 +1057,9 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_failed_analysis_retries_once_then_persists_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
+            database = self.make_analysis_database(tmp)
             dispatcher = SequenceDispatcher([
-                self.execution_result(),
+                self.execution_result(range(1, 5)),
                 DispatchResult(
                     outcome="retry", blocker_code="analyzer_model_failure",
                     detail="model unavailable",
@@ -1028,13 +1083,13 @@ class BatchSupervisorTests(unittest.TestCase):
             self.assertEqual(result["status"], "analysis_failed")
             self.assertEqual(len(database.pending_batch_evaluation("batch-worker")), 0)
             self.assertEqual(
-                database.rows("SELECT COUNT(*) count FROM runs")[0]["count"], 2,
+                database.rows("SELECT COUNT(*) count FROM runs")[0]["count"], 4,
             )
             self.assertEqual(
                 database.rows(
                     """SELECT COUNT(*) count FROM evaluations
                        WHERE verdict='infrastructure_failure'"""
-                )[0]["count"], 2,
+                )[0]["count"], 4,
             )
             self.assertEqual(
                 [request["task_type"] for request in dispatcher.requests],
@@ -1048,16 +1103,16 @@ class BatchSupervisorTests(unittest.TestCase):
                     """SELECT COUNT(*) count FROM work_items
                        WHERE state='blocked'
                          AND blocker_code='analyzer_retry_exhausted'"""
-                )[0]["count"], 2,
+                )[0]["count"], 4,
             )
 
     def test_invalid_evaluation_batch_retries_then_terminalizes_all(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
-            invalid = self.analysis_result()
+            database = self.make_analysis_database(tmp)
+            invalid = self.analysis_result(range(1, 5))
             del invalid.payload["evaluations"][1]["next_action"]
             dispatcher = SequenceDispatcher([
-                self.execution_result(),
+                self.execution_result(range(1, 5)),
                 invalid,
                 DispatchResult(
                     outcome="retry", blocker_code="analyzer_model_failure",
@@ -1080,7 +1135,7 @@ class BatchSupervisorTests(unittest.TestCase):
                 database.rows(
                     """SELECT COUNT(*) count FROM evaluations
                        WHERE verdict='infrastructure_failure'"""
-                )[0]["count"], 2,
+                )[0]["count"], 4,
             )
             self.assertEqual(len(database.pending_batch_evaluation("batch-worker")), 0)
 
@@ -1228,7 +1283,7 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_terminal_strategy_failure_flows_through_analysis_not_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
+            database = self.make_analysis_database(tmp)
             database.upsert_experiment(ExperimentSpec(
                 id="EXP-CHILD", strategy_name="StrategyChild",
             ))
@@ -1236,14 +1291,14 @@ class BatchSupervisorTests(unittest.TestCase):
                 id="JOB-CHILD", experiment_id="EXP-CHILD", priority=3,
                 state=WorkState.SCHEDULED, dependencies=("JOB-1",),
             ))
-            execution = self.execution_result()
+            execution = self.execution_result(range(1, 5))
             execution.payload["results"][0] = {
                 "work_item_id": "JOB-1",
                 "outcome": "blocked",
                 "blocker_code": "jesse_execution_stopped",
                 "detail": "qty cannot be 0",
             }
-            analysis = self.analysis_result()
+            analysis = self.analysis_result(range(1, 5))
             dispatcher = SequenceDispatcher([execution, analysis])
             supervisor = BatchSupervisor(
                 database, dispatcher, "batch-worker",
@@ -1304,9 +1359,9 @@ class BatchSupervisorTests(unittest.TestCase):
 
     def test_analyzer_infrastructure_failure_backs_off_pending_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            database = self.make_database(tmp)
+            database = self.make_analysis_database(tmp)
             dispatcher = SequenceDispatcher([
-                self.execution_result(),
+                self.execution_result(range(1, 5)),
                 DispatchResult(
                     outcome="retry",
                     blocker_code="executor_provider_failed",
@@ -1329,7 +1384,7 @@ class BatchSupervisorTests(unittest.TestCase):
                 """SELECT state,blocker_code,retry_after FROM work_items
                    WHERE state='running' ORDER BY id"""
             )
-            self.assertEqual(len(deferred), 2)
+            self.assertEqual(len(deferred), 4)
             self.assertTrue(all(row["retry_after"] for row in deferred))
             self.assertTrue(all(
                 row["blocker_code"] == "awaiting_batch_evaluation"
@@ -1340,7 +1395,7 @@ class BatchSupervisorTests(unittest.TestCase):
                     """SELECT COUNT(*) count FROM events
                        WHERE event_type='analysis_retry_deferred'"""
                 )[0]["count"],
-                2,
+                4,
             )
 
     def test_legacy_retry_limit_is_recovered_into_analysis(self) -> None:

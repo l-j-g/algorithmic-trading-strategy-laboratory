@@ -50,8 +50,12 @@ Compute-heavy behavior:
 - Worker drains dependency-satisfied scheduled overflow as ready capacity opens,
   avoiding another synthesis context load between jobs in the cohort.
 - Up to eight jobs share one execution turn.
-- One separate bounded analysis turn evaluates whole completed batch and creates
-  next cohort when needed.
+- Ordinary completed evidence accumulates across execution turns until at least
+  four items are available, then one separate bounded analysis turn evaluates a
+  four-to-eight-item cohort. Deterministic lifecycle-only and HPO work may be
+  analyzed independently.
+- The execution progress counter reports the current execution turn, not the
+  25-chain synthesis cohort.
 - New entry jobs use 5,000 local random-entry simulations.
 - HPO uses native Jesse optimization with 300 trials per parameter and keeps 50
   candidates.

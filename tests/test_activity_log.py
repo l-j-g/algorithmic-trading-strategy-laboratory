@@ -163,6 +163,52 @@ class ActivityLogTests(unittest.TestCase):
             self.assertIn("SYNTHESIS: Synthesising 25 new tests", log)
             self.assertNotIn("\033[", log)
 
+    def test_follower_compacts_repeated_execution_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = WorkflowDatabase(root / "lab.sqlite3")
+            database.initialize()
+            started = {
+                "batch_id": "BATCH-1",
+                "operation": "backtest",
+                "strategy": "KamaAdxPullback",
+                "routes": [{
+                    "symbol": "ETH-USDT", "timeframe": "1h",
+                    "start_date": "2024-01-01", "finish_date": "2026-06-02",
+                }],
+                "total": 2, "completed": 0,
+            }
+            failed = {
+                **started,
+                "blocker_code": "malformed_jesse_session",
+                "detail": "two session responses were incomplete",
+            }
+            for index in range(2):
+                database.record_event(
+                    "supervisor", "worker", "run_started", started,
+                    occurred_at=f"2026-08-27T00:00:0{index}Z",
+                )
+            for index in range(2):
+                database.record_event(
+                    "supervisor", "worker", "run_failed",
+                    {**failed, "completed": index + 1},
+                    occurred_at=f"2026-08-27T00:00:0{index + 2}Z",
+                )
+
+            output = io.StringIO()
+            follower = ActivityFollower(
+                database, output=output, config=ActivityLogConfig(repo=root),
+                started_at="2026-08-27T00:00:00Z", color=False, links=False,
+                clock=lambda: datetime(2026, 8, 27, 0, 0, 5, tzinfo=timezone.utc),
+                sleep=lambda _seconds: None,
+            )
+            follower.run(max_iterations=1)
+
+            text = output.getvalue()
+            self.assertEqual(text.count("Backtest started"), 1)
+            self.assertIn("Backtest started · 2 items · KamaAdxPullback", text)
+            self.assertIn("Failed · 2 items · KamaAdxPullback · malformed_jesse_session", text)
+
     def test_follower_waits_for_stopped_after_stop_request(self) -> None:
         class StopSequence:
             def __init__(self) -> None:
