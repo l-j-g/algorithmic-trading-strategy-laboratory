@@ -24,7 +24,6 @@ from .direct_mcp_executor import (
 from .dashboard import serve as serve_dashboard
 from .web_api import serve as serve_backend, serve_web
 from .inventory import build_inventory, render_markdown as render_inventory
-from .legacy_import import LegacyImporter
 from .loop_control import SupervisorLoopControl
 from .contracts import evaluation_from_payload, experiment_from_payload, load_json, work_item_from_payload
 from .console import (
@@ -248,7 +247,6 @@ def build_parser() -> AtsLabArgumentParser:
     )
     doctor.add_argument("--format", choices=("table", "json"), default="table")
     sub.add_parser("init")
-    sub.add_parser("migrate-legacy")
     audit_parser = sub.add_parser("audit")
     audit_parser.add_argument("--markdown", type=Path)
     queue_parser = sub.add_parser("queue")
@@ -799,11 +797,6 @@ def _run_memory_backfill(context: CommandContext) -> int:
     emit(backfill_memory_outbox(
         database, apply=args.apply, batch_size=args.batch_size,
     ))
-    return 0
-
-
-def _run_migrate_legacy(context: CommandContext) -> int:
-    emit(LegacyImporter(context.repo, context.database).import_all())
     return 0
 
 
@@ -1889,7 +1882,6 @@ COMMAND_HANDLERS: dict[str, Callable[[CommandContext], int]] = {
     "memory": _run_memory,
     "memory-sync": _run_memory_sync,
     "memory-backfill": _run_memory_backfill,
-    "migrate-legacy": _run_migrate_legacy,
     "audit": _run_audit,
     "queue": _run_queue,
     "synthesis-status": _run_synthesis_status,

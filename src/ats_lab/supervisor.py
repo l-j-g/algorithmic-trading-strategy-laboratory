@@ -1847,6 +1847,8 @@ class BatchSupervisor:
             self.database, policy=self.resource_policy,
             memory_adapter=self.memory_adapter,
         )
+        # now carries local_diversity_injection (archetype/regime/route) computed
+        # locally in batch_synthesis (zero extra agent calls)
         dispatch = self._dispatch({
             "schema_version": 1,
             "task_type": "synthesize_batch",
@@ -1883,6 +1885,7 @@ class BatchSupervisor:
             synthesis = apply_batch(
                 self.database, bounded_requests, policy=self.resource_policy,
                 cohort_id=cohort["id"], source_path="batch-supervisor",
+                context=context,
             )
             if (
                 synthesis["rejected"]

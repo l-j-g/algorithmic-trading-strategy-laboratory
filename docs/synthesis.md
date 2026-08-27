@@ -44,6 +44,8 @@ Two controls apply on top of these raw-p gates:
   Cohorts with unfinished members wait (`awaiting_cohort_fdr`). Tests outside
   a synthesis cohort keep the single-test raw-p gates above.
 
+Cohorts now reserve more slots for new concepts (default 10/25) with local diversity injection for wider archetype/regime variety (no extra LLM cost).
+
 Inconclusive results never archive anything: dependent baselines stay
 `scheduled` pending more evidence, and archiving remains a manual operator
 action for that case.

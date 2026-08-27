@@ -16,8 +16,8 @@ monte_carlo_scenarios = 500
 synthesis_inspect_limit = 25
 synthesis_generate_limit = 25
 synthesis_low_watermark = 75
-synthesis_min_new_concepts = 5
-synthesis_max_improvements = 20
+synthesis_min_new_concepts = 10
+synthesis_max_improvements = 15
 synthesis_retry_cooldown_seconds = 300
 synthesis_lease_seconds = 3600
 claim_timeout_seconds = 7200
@@ -48,9 +48,9 @@ Compute-heavy behavior:
 - One synthesis agent call returns 25 chains at 75-chain watermark. Context
   inspects at most 25 records and four canonical evidence rows per record.
 - Local lane gate trims harmless over-generation to exact 25 while preserving
-  minimum five new concepts and maximum twenty improvements. Under-generation
+  minimum ten new concepts and maximum fifteen improvements. Under-generation
   fails explicitly.
-- Each cohort reserves at least five slots for new concepts and uses up to twenty
+- Each cohort reserves at least ten slots for new concepts and uses up to fifteen
   eligible controlled improvements.
 - Planner lease prevents duplicate synthesis across workers. Invalid batches
   wait five minutes before retry.

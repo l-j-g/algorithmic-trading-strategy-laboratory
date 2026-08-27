@@ -225,8 +225,15 @@ def build_batch_context(
            ORDER BY tested_count DESC, archetype LIMIT ?""",
         (CONTEXT_THEME_LIMIT,),
     )
+    diversity_injection = _compute_local_diversity_injection(
+        themes=[dict(row) for row in themes],
+        recent=recent,
+        learnings=learnings,
+        stable_fingerprints=stable_fingerprints,
+        revisions=revisions,
+    )
     context = {
-        "context_schema_version": 2,
+        "context_schema_version": 3,
         "inspect_limit": limit, "generate_limit": policy.synthesis_generate_limit,
         "evidence_rows_per_candidate": evidence_limit,
         "low_watermark": policy.synthesis_low_watermark,
@@ -252,6 +259,7 @@ def build_batch_context(
         "stable_tested_entry_fingerprints": [dict(row) for row in stable_fingerprints],
         "archetype_theme_representation": [dict(row) for row in themes],
         "archetype_coverage": [dict(row) for row in themes],
+        "local_diversity_injection": diversity_injection,
         "known_entry_fingerprint_count": int(fingerprint_count),
         "promotion_locked_count": locked_count,
         "forbidden_states": [
@@ -343,12 +351,53 @@ def _portfolio_context(
     }
 
 
+def _compute_local_diversity_injection(
+    *, themes: list, recent: list, learnings: list, stable_fingerprints: list, revisions: list
+) -> dict[str, Any]:
+    """Cheap local archetype/regime/route diversity using *existing* context only.
+    No DB hits, no agent calls, no new synthesis. Pure python on already-fetched rows.
+    """
+    arch_counts: dict[str, int] = {}
+    for t in themes or []:
+        a = str(t.get("archetype") or "unspecified")
+        arch_counts[a] = arch_counts.get(a, 0) + int(t.get("tested_count", 0))
+    underrepresented = sorted(arch_counts, key=arch_counts.get)[:3] if arch_counts else ["breakout", "mean_reversion", "trend"]
+    regime_variety: list[str] = []
+    seen = set()
+    for src in (revisions or [], learnings or [], recent or []):
+        for item in src:
+            for f in (item.get("target_regime"), item.get("failure_regime")):
+                if f and f not in seen:
+                    seen.add(f)
+                    regime_variety.append(f)
+                    if len(regime_variety) >= 5:
+                        break
+            if len(regime_variety) >= 5:
+                break
+        if len(regime_variety) >= 5:
+            break
+    if not regime_variety:
+        regime_variety = ["expansion", "chop", "volatile", "range", "trend"]
+    route_anchors = [str(r.get("fingerprint", ""))[:12] for r in (stable_fingerprints or [])[:3]]
+    if not any(route_anchors):
+        route_anchors = ["distinct-symbol-timeframe-variation"]
+    return {
+        "underrepresented_archetypes": underrepresented,
+        "suggested_regimes": regime_variety[:5],
+        "route_diversity_anchors": route_anchors,
+        "injection_method": "local_context_only; zero additional agent calls",
+    }
+
+
 def apply_batch(
     database: WorkflowDatabase, payloads: list[dict[str, Any]], *, source_path: str = "agent-batch-synthesis",
     policy: ResourcePolicy | None = None, cohort_id: str | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate and persist one planning batch with promotion locks and capacity control."""
     policy = policy or ResourcePolicy()
+    context = context or {}
+    local_div = context.get("local_diversity_injection", {})
     payloads = [_normalize_typed_proposal(raw) for raw in payloads]
     payloads = _canonicalize_non_entry_rules(database, payloads)
     generate_limit = policy.synthesis_generate_limit
@@ -391,6 +440,9 @@ def apply_batch(
             raise ValueError(
                 f"synthesis cohort allows at most {policy.synthesis_max_improvements} improvements"
             )
+        # Cheap local diversity injection (archetype/regime/route) available via local_div
+        # (computed from existing context; zero additional agent calls)
+        _ = local_div
         seen.clear()
     for index, raw_payload in enumerate(payloads[:generate_limit]):
         try:

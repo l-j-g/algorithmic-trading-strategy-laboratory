@@ -211,9 +211,17 @@ def evaluate_hpo_candidate(
     profit_rows = [
         row for row in rows if row.net_profit_percentage is not None
     ]
-    if not profit_rows or any(row.fees is None for row in rows):
+    if (
+        not profit_rows
+        or any(row.fees is None for row in rows)
+        or any(getattr(r, "expectancy", None) is None for r in profit_rows)
+    ):
         missing.append("hpo_baseline_positive_after_fees")
-    elif not any(row.net_profit_percentage > 0 for row in profit_rows):
+    elif not any(
+        r.net_profit_percentage > 0
+        and float(getattr(r, "expectancy", 0)) > policy.minimum_expectancy
+        for r in profit_rows
+    ):
         failed.append("hpo_baseline_positive_after_fees")
 
     if not rows or any(row.trade_count is None for row in rows):
@@ -376,6 +384,20 @@ def _has_core_metrics(row: object) -> bool:
     )
 
 
+def _effective_leverage(row: object) -> float:
+    """Configured session leverage for lev-aware DD (and fallbacks). 1.0 for BC/legacy."""
+    for k in ("configured_futures_leverage", "leverage", "effective_leverage_mean"):
+        val = _value(row, k)
+        if val is not None:
+            try:
+                f = float(val)
+                if f > 0:
+                    return f
+            except (TypeError, ValueError):
+                pass
+    return 1.0
+
+
 def _evaluate_validation_lane(
     name: str,
     rows: tuple[object, ...],
@@ -392,6 +414,11 @@ def _evaluate_validation_lane(
         gate for gate in quality.missing
         if gate != "fees_cost_sensitivity"
     )
+    exps = [_value(row, "expectancy") for row in rows]
+    if any(e is None for e in exps):
+        missing.append("expectancy")
+    elif any(float(e) <= policy.minimum_expectancy for e in exps if e is not None):
+        failed.append("expectancy")
 
 
 def _robustness_state(row: object, policy: ResourcePolicy) -> str:
@@ -412,7 +439,9 @@ def _robustness_state(row: object, policy: ResourcePolicy) -> str:
         return "failed"
     if (
         float(_value(row, "net_profit_percentage")) <= 0
-        or float(_value(row, "max_drawdown_percentage")) > policy.maximum_drawdown_percentage
+        or float(_value(row, "max_drawdown_percentage") or 0)
+           > policy.maximum_drawdown_percentage * _effective_leverage(row)
+        or float(_value(row, "expectancy") or 0) <= policy.minimum_expectancy
         or float(_value(row, "sharpe_ratio")) < policy.minimum_sharpe_ratio
         or float(_value(row, "profit_factor")) < policy.minimum_profit_factor
         or int(_value(row, "trade_count")) < trade_floor

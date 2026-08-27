@@ -649,23 +649,34 @@ class BatchSupervisorTests(unittest.TestCase):
     def hpo_evidence_metrics() -> dict:
         route = {
             "net_profit_percentage": 10.0, "trade_count": 100, "fees": 20.0,
+            "expectancy": 0.4, "sharpe_ratio": 0.8, "profit_factor": 1.3,
+            "sortino_ratio": 1.0, "calmar_ratio": 1.0, "max_drawdown_percentage": 8.0,
         }
         windows = (
             ("2024-01-01", "2024-07-01"), ("2024-07-01", "2025-01-01"),
         )
+        routes = [
+            {
+                "symbol": symbol, "timeframe": "1h",
+                "start_date": start, "finish_date": finish,
+                **route,
+            }
+            for symbol in ("BTC-USDT", "ETH-USDT")
+            for start, finish in windows
+        ]
+        # ensure a cost_sensitivity row for the gate
+        routes.append({
+            "symbol": "SOL-USDT", "timeframe": "1h",
+            "start_date": "2024-01-01", "finish_date": "2025-01-01",
+            "lifecycle_stage": "cost_sensitivity",
+            **route,
+        })
         return {
             "net_profit_percentage": 10.0,
             "fees": 20.0,
             "trade_count": 100,
-            "route_results": [
-                {
-                    "symbol": symbol, "timeframe": "1h",
-                    "start_date": start, "finish_date": finish,
-                    **route,
-                }
-                for symbol in ("BTC-USDT", "ETH-USDT")
-                for start, finish in windows
-            ],
+            "expectancy": 0.4,
+            "route_results": routes,
         }
 
     def test_hpo_candidate_automatically_schedules_hpo_lifecycle(self) -> None:
@@ -691,6 +702,7 @@ class BatchSupervisorTests(unittest.TestCase):
                     "sharpe_ratio": 1.0, "sortino_ratio": 1.0,
                     "calmar_ratio": 1.0, "profit_factor": 1.2,
                     "trade_count": 100, "fees": 40.0,
+                    "expectancy": 0.3,
                 },
             ))
             metrics = self.hpo_evidence_metrics()
@@ -1718,20 +1730,20 @@ class BatchSupervisorTests(unittest.TestCase):
             )
             requests = [
                 {"lane": "improvement", "id": f"I-{index}"}
-                for index in range(20)
+                for index in range(18)
             ] + [
                 {"lane": "new_concept", "id": f"N-{index}"}
-                for index in range(7)
+                for index in range(12)
             ]
 
             bounded = supervisor._bounded_synthesis_requests(requests, 25)
 
             self.assertEqual(len(bounded), 25)
             self.assertEqual(
-                sum(item["lane"] == "improvement" for item in bounded), 20,
+                sum(item["lane"] == "improvement" for item in bounded), 15,
             )
             self.assertEqual(
-                sum(item["lane"] == "new_concept" for item in bounded), 5,
+                sum(item["lane"] == "new_concept" for item in bounded), 10,
             )
             with self.assertRaisesRegex(ValueError, "returned 24/25"):
                 supervisor._bounded_synthesis_requests(requests[:24], 25)

@@ -46,6 +46,7 @@ class GateTests(unittest.TestCase):
                 self.row(
                     lifecycle_stage=LifecycleStage.COST_SENSITIVITY,
                     sortino_ratio=1.0, calmar_ratio=1.0,
+                    expectancy=0.1, net_profit_percentage=5.0, sharpe_ratio=0.6, profit_factor=1.2,
                 ),
             ],
             policy=ResourcePolicy(),
@@ -142,6 +143,7 @@ class GateTests(unittest.TestCase):
                     lifecycle_stage=LifecycleStage.OUT_OF_SAMPLE,
                     sortino_ratio=1.0,
                     calmar_ratio=1.0,
+                    expectancy=0.5,
                 ),
                 self.row(
                     evidence_split=EvidenceSplit.ROLLING,
@@ -150,6 +152,7 @@ class GateTests(unittest.TestCase):
                     calmar_ratio=1.0,
                     walk_forward_method="rolling",
                     walk_forward_windows=3,
+                    expectancy=0.4,
                 ),
                 self.row(
                     lifecycle_stage=LifecycleStage.MONTE_CARLO,
@@ -157,10 +160,12 @@ class GateTests(unittest.TestCase):
                     sortino_ratio=1.3,
                     monte_carlo_method="candle_based",
                     monte_carlo_scenarios=500,
+                    expectancy=0.3,
                 ),
                 self.row(
                     lifecycle_stage=LifecycleStage.COST_SENSITIVITY,
                     sortino_ratio=1.0, calmar_ratio=1.0,
+                    expectancy=0.2,
                 ),
             ],
             policy=ResourcePolicy(),
@@ -249,6 +254,7 @@ class GateTests(unittest.TestCase):
         payload = {
             "net_profit_percentage": 10.0, "trade_count": 100,
             "sortino_ratio": 1.0, "calmar_ratio": 1.0,
+            "expectancy": 0.3,
         }
         payload.update(overrides)
         rows = []

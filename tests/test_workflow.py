@@ -8,7 +8,6 @@ from pathlib import Path
 
 from ats_lab.audit import build_audit
 from ats_lab.database import WorkflowDatabase
-from ats_lab.legacy_import import LegacyImporter
 from ats_lab.inventory import build_inventory
 from ats_lab.contracts import evaluation_from_payload, experiment_from_payload, work_item_from_payload
 from ats_lab.models import Evaluation, ExperimentSpec, ExperimentType, RunResult, RunStatus, Verdict, WorkItem, WorkState
@@ -627,100 +626,18 @@ class WorkItemUpsertTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
 
 
-class LegacyImporterTests(unittest.TestCase):
-    def make_repo(self, root: Path) -> None:
-        research = root / "research"
-        (research / "automation" / "headless_runs").mkdir(parents=True)
-        (research / "experiments").mkdir()
-        (research / "TEST_JOB_QUEUE.md").write_text("""## Active Queue
-```yaml
-- rank: 1
-  id: READY-1
-  priority: P0
-  status: queued
-  readiness: ready
-  strategy: ReadyStrategy
-  hypothesis: A test hypothesis
-  experiment_log: research/experiments/ready.md
-```
-## Blocked Jobs
-```yaml
-- rank: 2
-  id: DONE-1
-  priority: P1
-  status: complete
-  strategy: DoneStrategy
-  verdict: hpo-candidate
-  summary: "passed gates"
-  metrics_text: "trades=20"
-```
-""")
-        (research / "RESEARCH_JOURNAL.md").write_text("""## Ranked Test Results
-```yaml
-- rank: 2
-  id: DONE-1
-  status: complete
-  strategy: DoneStrategy
-  verdict: hpo-candidate
-  actual: "passed gates"
-  metrics_text: "trades=20"
-```
-""")
-        (research / "automation" / "job_state.json").write_text('{"jobs": {}}\n')
-        (research / "experiments" / "ready.md").write_text("# Ready\n")
-        (research / "automation" / "headless_runs" / "DONE-1.json").write_text(json.dumps({
-            "job_id": "DONE-1", "strategy": "DoneStrategy", "results": [{
-                "session_id": "session-1", "status": "finished", "url": "http://localhost/session-1",
-                "symbol": "BTC-USDT", "timeframe": "1h", "start_date": "2025-01-01", "finish_date": "2025-12-31",
-                "metrics": {"total": 20, "net_profit_percentage": 5.0},
-            }]
-        }))
-
-    def test_import_is_idempotent_and_separates_queue_from_history(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            self.make_repo(repo)
-            database = WorkflowDatabase(repo / "workflow.sqlite3")
-            first = LegacyImporter(repo, database).import_all()
-            second = LegacyImporter(repo, database).import_all()
-            audit = build_audit(database)
-            self.assertEqual(first, second)
-            self.assertEqual(audit["experiments"], 2)
-            self.assertEqual(audit["active_queue"], 1)
-            self.assertEqual(audit["verdicts"]["hpo_candidate"], 1)
-            self.assertEqual(audit["run_statuses"]["finished"], 1)
-
-    def test_journal_only_blocked_record_is_finished_history(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            self.make_repo(repo)
-            journal = repo / "research" / "RESEARCH_JOURNAL.md"
-            journal.write_text(journal.read_text() + """
-```yaml
-- rank: 3
-  id: OLD-BLOCKED
-  status: blocked
-  strategy: OldStrategy
-  verdict: blocked
-  actual: "infrastructure failed"
-```
-""")
-            database = WorkflowDatabase(repo / "workflow.sqlite3")
-            LegacyImporter(repo, database).import_all()
-            state = database.rows("SELECT state FROM work_items WHERE id='OLD-BLOCKED'")[0]["state"]
-            self.assertEqual(state, "finished")
-
-
 class InventoryTests(unittest.TestCase):
     def test_classifies_replaced_and_v2_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             (repo / "algorithmic-trading-strategy-laboratory" / "src" / "ats_lab").mkdir(parents=True)
             (repo / "research").mkdir()
-            (repo / "research" / "TEST_JOB_QUEUE.md").write_text("queue")
+            auto = repo / "research" / "automation"
+            auto.mkdir(parents=True)
+            (auto / "job_state.json").write_text("{}")
             (repo / "algorithmic-trading-strategy-laboratory" / "src" / "ats_lab" / "models.py").write_text("models")
             inventory = build_inventory(repo)
-            self.assertEqual(inventory["replace"][0]["path"], "research/TEST_JOB_QUEUE.md")
+            self.assertIn("automation/job_state.json", str(inventory))
             self.assertEqual(inventory["retain"][0]["path"], "algorithmic-trading-strategy-laboratory/src/ats_lab/models.py")
 
 

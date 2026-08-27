@@ -194,7 +194,7 @@ class Worker:
                 "research chains. Resolve revise outcomes first, then fill remaining slots "
                 "with diverse new hypotheses. Use eligible improvements first, at least "
                 f"{self.resource_policy.synthesis_min_new_concepts} new concepts, and at most "
-                f"{self.resource_policy.synthesis_max_improvements} improvements. Use prior "
+                f"{self.resource_policy.synthesis_max_improvements} improvements. Prioritize wide variety across archetypes, target/failure regimes and routes for new concepts. Use prior "
                 "metrics and failure notes for controlled improvements."
             ),
             "cohort": cohort,
@@ -216,8 +216,10 @@ class Worker:
                 "detail": detail,
             }
         try:
+            ctx = request.get("context") or build_batch_context(self.database, policy=self.resource_policy)
             synthesized = apply_batch(
                 self.database, synthesis_payloads, policy=self.resource_policy, cohort_id=cohort["id"],
+                context=ctx,
             )
             if synthesized["rejected"] or len(synthesized["generated"]) != cohort["requested_count"]:
                 raise ValueError(f"incomplete synthesis cohort: {synthesized}")

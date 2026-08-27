@@ -51,7 +51,11 @@ MISSING_DATA_ROUTE_MARKERS = (
     "data route is required but missing",
     "route not found",
 )
-MISSING_SESSION_MARKERS = ("session", "not found")
+MISSING_SESSION_MARKERS = (
+    "failed to retrieve session",
+    "session not found",
+    "unknown session",
+)
 
 
 class McpError(RuntimeError):
@@ -1705,7 +1709,7 @@ class DirectMcpDispatcher:
     @staticmethod
     def _is_missing_session_error(error: BaseException) -> bool:
         detail = str(error).casefold()
-        return all(marker in detail for marker in MISSING_SESSION_MARKERS)
+        return any(marker in detail for marker in MISSING_SESSION_MARKERS)
 
     def _recover_missing_session_checkpoint(
         self,

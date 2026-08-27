@@ -88,8 +88,8 @@ class ResourcePolicy:
     synthesis_inspect_limit: int = 25
     synthesis_generate_limit: int = 25
     synthesis_low_watermark: int = 5
-    synthesis_min_new_concepts: int = 5
-    synthesis_max_improvements: int = 20
+    synthesis_min_new_concepts: int = 10
+    synthesis_max_improvements: int = 15
     synthesis_max_revision_depth: int = 3
     synthesis_failure_diagnosis_limit: int = 8
     synthesis_retry_cooldown_seconds: int = 300
@@ -108,9 +108,10 @@ class ResourcePolicy:
     minimum_trades_per_year: int = 20
     minimum_trade_floor: int = 12
     maximum_drawdown_percentage: float = 30.0
-    minimum_sharpe_ratio: float = 0.0
-    minimum_profit_factor: float = 1.0
+    minimum_sharpe_ratio: float = 0.5
+    minimum_profit_factor: float = 1.1
     maximum_holdout_degradation_percentage: float = 50.0
+    minimum_expectancy: float = 0.0
     evaluation_windows: EvaluationWindowPolicy = EvaluationWindowPolicy()
     portfolio_correlation_threshold: float = 0.85
     portfolio_capacity_utilization_limit: float = 0.70
@@ -172,7 +173,7 @@ class ResourcePolicy:
             raise ValueError("resources.analyzer_retry_limit must equal 1")
         for name in (
             "maximum_drawdown_percentage", "minimum_profit_factor",
-            "maximum_holdout_degradation_percentage",
+            "maximum_holdout_degradation_percentage", "minimum_expectancy",
         ):
             if float(getattr(self, name)) < 0:
                 raise ValueError(f"resources.{name} must be non-negative")

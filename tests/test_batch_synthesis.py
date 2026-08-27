@@ -101,7 +101,7 @@ class BatchSynthesisTests(unittest.TestCase):
                 + len(context["concept_learnings"])
             )
 
-            self.assertEqual(len(context["improvement_candidates"]), 20)
+            self.assertEqual(len(context["improvement_candidates"]), 15)
             self.assertLessEqual(inspected, 25)
             candidate = next(
                 row for row in context["improvement_candidates"]
@@ -117,10 +117,13 @@ class BatchSynthesisTests(unittest.TestCase):
             self.add_source(database, "REJECT", Verdict.REJECT)
             context = build_batch_context(database)
 
-            self.assertEqual(context["context_schema_version"], 2)
+            self.assertEqual(context["context_schema_version"], 3)
             self.assertEqual(context["allocation"]["exact_total"], 25)
-            self.assertEqual(context["allocation"]["new_concepts_at_least"], 5)
-            self.assertEqual(context["allocation"]["controlled_improvements_at_most"], 20)
+            self.assertEqual(context["allocation"]["new_concepts_at_least"], 10)
+            self.assertEqual(context["allocation"]["controlled_improvements_at_most"], 15)
+            self.assertIn("local_diversity_injection", context)
+            inj = context["local_diversity_injection"]
+            self.assertIn("underrepresented_archetypes", inj)
             self.assertEqual(len(context["promising_inconclusive"]), 1)
             self.assertEqual(len(context["diagnosed_failures"]), 1)
             self.assertLessEqual(len(context["stable_tested_entry_fingerprints"]), 12)
@@ -272,7 +275,7 @@ class BatchSynthesisTests(unittest.TestCase):
     def test_cohort_enforces_exact_adaptive_lane_allocation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)
-            for index in range(20):
+            for index in range(15):
                 self.add_source(database, f"REVISE-{index}", Verdict.REVISE)
             with database.connect() as connection:
                 connection.execute("UPDATE work_items SET state='archived'")
@@ -286,7 +289,7 @@ class BatchSynthesisTests(unittest.TestCase):
                     target_regime="persistent trend", failure_regime="range",
                     edge_thesis="Trend persistence should survive controlled exit changes.",
                 )
-                for index in range(20)
+                for index in range(15)
             ] + [
                 request(
                     lane="new_concept", strategy_name=f"Novel{index}",
@@ -295,15 +298,16 @@ class BatchSynthesisTests(unittest.TestCase):
                     failure_regime="false breakout",
                     edge_thesis="Compression can precede persistent expansion.",
                 )
-                for index in range(5)
+                for index in range(10)
             ]
             cohort = database.reserve_synthesis_cohort(
                 worker_id="planner", requested_count=25, low_watermark=5,
                 lease_seconds=60, retry_cooldown_seconds=60,
             )
-            result = apply_batch(database, payloads, cohort_id=cohort["id"])
+            context = build_batch_context(database)
+            result = apply_batch(database, payloads, cohort_id=cohort["id"], context=context)
             self.assertEqual(len(result["generated"]), 25)
-            self.assertEqual(sum(row["lane"] == "new_concept" for row in result["generated"]), 5)
+            self.assertEqual(sum(row["lane"] == "new_concept" for row in result["generated"]), 10)
 
     def test_cohort_rejects_missing_typed_proposal_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
