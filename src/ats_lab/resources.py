@@ -143,8 +143,6 @@ class ResourcePolicy:
             raise ValueError("resources.monte_carlo_scenarios must be at least 500")
         if self.synthesis_generate_limit > self.synthesis_inspect_limit:
             raise ValueError("resources.synthesis_generate_limit cannot exceed inspect limit")
-        if self.synthesis_low_watermark >= self.synthesis_generate_limit:
-            raise ValueError("resources.synthesis_low_watermark must be below generation limit")
         if self.synthesis_min_new_concepts + self.synthesis_max_improvements != self.synthesis_generate_limit:
             raise ValueError(
                 "resources.synthesis_min_new_concepts + synthesis_max_improvements "

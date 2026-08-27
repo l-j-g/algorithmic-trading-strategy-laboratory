@@ -15,7 +15,7 @@ hpo_best_candidates = 50
 monte_carlo_scenarios = 500
 synthesis_inspect_limit = 25
 synthesis_generate_limit = 25
-synthesis_low_watermark = 5
+synthesis_low_watermark = 75
 synthesis_min_new_concepts = 5
 synthesis_max_improvements = 20
 synthesis_retry_cooldown_seconds = 300
@@ -37,9 +37,15 @@ oos_lookback_days = 180
 rolling_lookback_days = 90
 ```
 
+`synthesis_low_watermark` is a refill threshold for unresolved research
+chains, not a cohort size. With 25-chain synthesis cohorts and a watermark of
+75, the planner starts refilling before the queue is exhausted and progressively
+keeps roughly 75-100 unresolved chains available. The planner still makes one
+bounded 25-chain synthesis request at a time.
+
 Compute-heavy behavior:
 
-- One synthesis agent call returns 25 chains at five-chain watermark. Context
+- One synthesis agent call returns 25 chains at 75-chain watermark. Context
   inspects at most 25 records and four canonical evidence rows per record.
 - Local lane gate trims harmless over-generation to exact 25 while preserving
   minimum five new concepts and maximum twenty improvements. Under-generation

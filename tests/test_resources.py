@@ -91,6 +91,13 @@ rolling_lookback_days = 90
         with self.assertRaisesRegex(ValueError, "must equal synthesis_generate_limit"):
             ResourcePolicy(synthesis_min_new_concepts=6)
 
+    def test_allows_buffer_watermark_above_one_synthesis_cohort(self) -> None:
+        policy = ResourcePolicy(
+            synthesis_generate_limit=25,
+            synthesis_low_watermark=75,
+        )
+        self.assertEqual(policy.synthesis_low_watermark, 75)
+
     def test_rejects_invalid_analyzer_bounds(self) -> None:
         with self.assertRaisesRegex(ValueError, "4 <= min <= max <= 8"):
             ResourcePolicy(analysis_cohort_min=3)
