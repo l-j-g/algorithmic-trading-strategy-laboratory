@@ -9,18 +9,19 @@ ats-lab tui
 Start and stop the research process without managing terminal jobs manually:
 
 ```bash
-ats-lab loop start
+ats-lab start
 ats-lab loop status
 ats-lab loop stop
 ```
 
+`ats-lab start` starts or resumes the supervisor and returns immediately.
 For the attached operator display, use:
 
 ```bash
-ats-lab start
+ats-lab start --follow
 ```
 
-This starts or resumes the supervisor, then follows durable activity events.
+This follows durable activity events while the supervisor runs.
 Event rows stay on screen; one bottom line replaces `LIVE` and refreshes every
 second while waiting:
 
@@ -64,8 +65,8 @@ log_dir = "{ats-lab}/logs/{date}_log"
 Files contain plain event rows only: no ANSI colour, hyperlinks, or ticking
 footer. File failures do not stop research.
 
-`loop start` resumes an existing supervisor or launches one detached when none
-is alive. Output goes to ignored runtime file `.ats-lab/supervisor.log`.
+`loop start` remains a compatibility alias for `start`. Output goes to ignored
+runtime file `.ats-lab/supervisor.log`.
 `loop stop` requests a graceful stop; it does not kill an executing batch.
 
 The UI refreshes canonical SQLite projections continuously. It never reads raw

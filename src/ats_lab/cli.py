@@ -302,11 +302,15 @@ def build_parser() -> AtsLabArgumentParser:
     )
     status_parser.add_argument("--format", choices=("table", "json"), default="table")
     start = sub.add_parser(
-        "start", help="Start or resume research and follow its activity stream."
+        "start", help="Start or resume research and return immediately."
     )
     start.add_argument("--idle-sleep", type=float, default=30.0)
     start.add_argument("--retry-delay", type=float, default=60.0)
     start.add_argument("--interval", type=float, default=1.0)
+    start.add_argument(
+        "--follow", action="store_true", help="Stay attached to the activity stream."
+    )
+    start.add_argument("--format", choices=("table", "json"), default="table")
     monitor = sub.add_parser("monitor", help="Show human-readable terminal progress.")
     monitor.add_argument("--watch", action="store_true")
     monitor.add_argument("--interval", type=float, default=5.0)
@@ -321,6 +325,10 @@ def build_parser() -> AtsLabArgumentParser:
     loop_start = loop_sub.add_parser("start", help="Start or resume the research loop.")
     loop_start.add_argument("--idle-sleep", type=float, default=30.0)
     loop_start.add_argument("--retry-delay", type=float, default=60.0)
+    loop_start.add_argument("--interval", type=float, default=1.0)
+    loop_start.add_argument(
+        "--follow", action="store_true", help="Stay attached to the activity stream."
+    )
     loop_start.add_argument("--format", choices=("table", "json"), default="table")
     for name in ("status", "pause", "stop"):
         command = loop_sub.add_parser(name)
@@ -885,24 +893,33 @@ def _run_start(context: CommandContext) -> int:
     parser = context.parser
     repo = context.repo
     database = context.database
+    follow = getattr(args, "follow", False)
+    output_format = getattr(args, "format", "table")
+    interval = getattr(args, "interval", 1.0)
     if args.idle_sleep < 0 or args.retry_delay < 0:
         parser.error("start sleep values must be non-negative")
-    if args.interval <= 0:
+    if interval <= 0:
         parser.error("start --interval must be positive")
+    if follow and output_format == "json":
+        parser.error("start --follow cannot be combined with --format json")
     database.initialize()
-    cursor = database.latest_event_id()
     lifecycle = SupervisorLoopControl(
         database, repo,
         idle_sleep=args.idle_sleep,
         retry_delay=args.retry_delay,
     )
     result = lifecycle.start()
+    if not follow:
+        _print_loop_status(result.to_dict(), output_format=output_format)
+        return 0
+
     runtime = database.supervisor_runtime_status() or {}
     if result.state == "already_running":
         database.record_event(
             "supervisor", "cli", "research_attached",
             {"stage": "starting", "process_id": result.process_id},
         )
+    cursor = database.latest_event_id()
     follower = ActivityFollower(
         database,
         output=sys.stdout,
@@ -912,7 +929,7 @@ def _run_start(context: CommandContext) -> int:
             runtime.get("started_at")
             if result.state == "already_running" else None
         ),
-        interval=args.interval,
+        interval=interval,
     )
     try:
         follower.run()
@@ -933,6 +950,22 @@ def _run_start(context: CommandContext) -> int:
             )
             return 130
     return 0
+
+
+def _print_loop_status(result: dict[str, object], *, output_format: str) -> None:
+    if output_format == "json":
+        emit(result)
+        return
+    print(
+        f"LOOP {str(result['state']).upper()}  "
+        f"pid={result['process_id'] or '—'}  "
+        f"phase={result['phase']}  control={result['control']}"
+    )
+    if result["repaired_retry_schedules"]:
+        print(
+            "REPAIRED retry_schedules="
+            f"{result['repaired_retry_schedules']}"
+        )
 
 
 def _run_tui(context: CommandContext) -> int:
@@ -956,11 +989,13 @@ def _run_loop(context: CommandContext) -> int:
     parser = context.parser
     repo = context.repo
     database = context.database
-    database.initialize()
     idle_sleep = getattr(args, "idle_sleep", 30.0)
     retry_delay = getattr(args, "retry_delay", 60.0)
     if idle_sleep < 0 or retry_delay < 0:
         parser.error("loop sleep values must be non-negative")
+    if args.loop_command == "start":
+        return _run_start(context)
+    database.initialize()
     lifecycle = SupervisorLoopControl(
         database, repo,
         idle_sleep=idle_sleep,
@@ -972,19 +1007,7 @@ def _run_loop(context: CommandContext) -> int:
         "pause": lifecycle.pause,
         "stop": lifecycle.stop,
     }[args.loop_command]().to_dict()
-    if args.format == "json":
-        emit(result)
-    else:
-        print(
-            f"LOOP {str(result['state']).upper()}  "
-            f"pid={result['process_id'] or '—'}  "
-            f"phase={result['phase']}  control={result['control']}"
-        )
-        if result["repaired_retry_schedules"]:
-            print(
-                "REPAIRED retry_schedules="
-                f"{result['repaired_retry_schedules']}"
-            )
+    _print_loop_status(result, output_format=args.format)
     return 0
 
 

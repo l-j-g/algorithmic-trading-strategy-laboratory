@@ -352,7 +352,7 @@ ats-lab supervisor --plan
 Continuous operation:
 
 ```bash
-ats-lab loop start
+ats-lab start
 ats-lab loop status
 ats-lab loop pause
 ats-lab loop stop
@@ -366,7 +366,7 @@ ats-lab supervisor --continuous --max-rounds 3
 
 Supervisor finishes the current execution plus required analysis, then exits
 before claiming another batch. Completed run evidence stays durable. Restart
-after a graceful stop with `ats-lab loop start`.
+after a graceful stop with `ats-lab start`.
 
 ### Control
 

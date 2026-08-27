@@ -11,13 +11,13 @@ START HERE
   ats-lab                         Show health, queue, memory, and next command
   ats-lab doctor                  Check Docker, Jesse, Memory, and workflow state
   ats-lab next                    Show one recommended next action
-  ats-lab start                   Start/resume research with attached activity display
+  ats-lab start                   Start/resume research and return immediately
   ats-lab tui                     Open color keyboard-driven operator UI
   ats-lab monitor --watch         Stream plain-text progress
 
 DAILY OPERATION
-  ats-lab start                   Start/resume and follow durable activity events
-  ats-lab loop start              Start or resume canonical research loop
+  ats-lab start --follow          Start/resume and follow durable activity events
+  ats-lab loop start              Compatibility alias for ats-lab start
   ats-lab loop status             Show actual process and control state
   ats-lab loop pause              Pause loop without ending process
   ats-lab loop stop               Gracefully stop loop process
@@ -76,7 +76,7 @@ def next_guidance(
         return {
             "action": "Start loop and repair retry schedules",
             "reason": f"{invalid_retries} relative retry values cannot mature",
-            "command": "ats-lab loop start",
+            "command": "ats-lab start",
         }
     if not snapshot.get("healthy", True):
         return {
@@ -89,14 +89,14 @@ def next_guidance(
         return {
             "action": "Resume supervisor control",
             "reason": "research control is paused",
-            "command": "ats-lab loop start",
+            "command": "ats-lab start",
         }
     phase = str(runtime.get("phase") or "not_reported")
     if desired == "stop_requested" and active:
         return {
             "action": "Resume research control",
             "reason": "work remains but supervisor stop is requested",
-            "command": "ats-lab loop start",
+            "command": "ats-lab start",
         }
     if int(memory.get("retry", 0) or 0):
         return {
@@ -149,14 +149,14 @@ def next_guidance(
         return {
             "action": "Resume batch analysis",
             "reason": "finished execution evidence awaits evaluation",
-            "command": "ats-lab loop start",
+            "command": "ats-lab start",
         }
     if next_action in {"monitor_running_batch", "execute_batch"}:
         if phase in {"stopped", "not_reported"}:
             return {
                 "action": "Start the canonical supervisor",
                 "reason": "runnable research work exists without an active supervisor",
-                "command": "ats-lab loop start",
+                "command": "ats-lab start",
             }
         return {
             "action": "Monitor the running research batch",
@@ -173,7 +173,7 @@ def next_guidance(
         return {
             "action": "Run cohort replenishment",
             "reason": "runnable research chains reached the synthesis watermark",
-            "command": "ats-lab loop start",
+            "command": "ats-lab start",
         }
     return {
         "action": "Review strongest candidates",

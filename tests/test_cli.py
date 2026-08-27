@@ -185,19 +185,63 @@ class CliEvidenceTests(unittest.TestCase):
         self.assertIn("LOOP RUNNING", output)
         self.assertIn("pid=123", output)
 
-    def test_start_attaches_activity_follower_after_starting_loop(self) -> None:
+    def test_start_returns_after_starting_loop_by_default(self) -> None:
         with (
             patch("ats_lab.cli.SupervisorLoopControl") as lifecycle,
             patch("ats_lab.cli.ActivityFollower") as follower,
         ):
             lifecycle.return_value.start.return_value = SimpleNamespace(
                 state="started", process_id=123,
+                to_dict=lambda: {
+                    "state": "started", "process_id": 123,
+                    "phase": "starting", "control": "running",
+                    "repaired_retry_schedules": 0,
+                },
             )
-            output = self.invoke("start", "--interval", "0.1")
+            output = self.invoke("start")
+
+        lifecycle.return_value.start.assert_called_once()
+        follower.return_value.run.assert_not_called()
+        self.assertIn("LOOP STARTED", output)
+        self.assertIn("pid=123", output)
+
+    def test_start_follow_attaches_activity_follower(self) -> None:
+        with (
+            patch("ats_lab.cli.SupervisorLoopControl") as lifecycle,
+            patch("ats_lab.cli.ActivityFollower") as follower,
+        ):
+            lifecycle.return_value.start.return_value = SimpleNamespace(
+                state="started", process_id=123,
+                to_dict=lambda: {
+                    "state": "started", "process_id": 123,
+                    "phase": "starting", "control": "running",
+                    "repaired_retry_schedules": 0,
+                },
+            )
+            output = self.invoke("start", "--follow", "--interval", "0.1")
 
         lifecycle.return_value.start.assert_called_once()
         follower.return_value.run.assert_called_once_with()
         self.assertEqual(output, "")
+
+    def test_loop_start_uses_same_nonblocking_start_path(self) -> None:
+        with (
+            patch("ats_lab.cli.SupervisorLoopControl") as lifecycle,
+            patch("ats_lab.cli.ActivityFollower") as follower,
+        ):
+            lifecycle.return_value.start.return_value = SimpleNamespace(
+                state="started", process_id=123,
+                to_dict=lambda: {
+                    "state": "started", "process_id": 123,
+                    "phase": "starting", "control": "running",
+                    "repaired_retry_schedules": 0,
+                },
+            )
+            output = self.invoke("loop", "start")
+
+        lifecycle.return_value.start.assert_called_once()
+        follower.return_value.run.assert_not_called()
+        self.assertIn("LOOP STARTED", output)
 
     def test_start_ctrl_c_requests_graceful_stop_and_waits(self) -> None:
         with (
@@ -206,9 +250,14 @@ class CliEvidenceTests(unittest.TestCase):
         ):
             lifecycle.return_value.start.return_value = SimpleNamespace(
                 state="started", process_id=123,
+                to_dict=lambda: {
+                    "state": "started", "process_id": 123,
+                    "phase": "starting", "control": "running",
+                    "repaired_retry_schedules": 0,
+                },
             )
             follower.return_value.run.side_effect = [KeyboardInterrupt(), None]
-            output = self.invoke("start")
+            output = self.invoke("start", "--follow")
 
         lifecycle.return_value.stop.assert_called_once_with()
         self.assertEqual(follower.return_value.run.call_count, 2)
