@@ -231,6 +231,43 @@ class WorkflowDatabaseTests(unittest.TestCase):
                 )
             self.assertEqual(database.promote_scheduled_runnable(5), 0)
 
+    def test_dependency_reconcile_blocks_finished_significance_without_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="SIG", strategy_name="Test", experiment_type=ExperimentType.SIGNIFICANCE,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="SIG", experiment_id="SIG", priority=1,
+                state=WorkState.FINISHED, specification={"operation": "significance"},
+            ))
+            database.upsert_experiment(ExperimentSpec(
+                id="BASE", strategy_name="Test", experiment_type=ExperimentType.BASELINE,
+            ))
+            database.upsert_work_item(WorkItem(
+                id="BASE", experiment_id="BASE", priority=2,
+                state=WorkState.SCHEDULED, dependencies=("SIG",),
+                specification={"operation": "backtest"},
+            ))
+
+            result = database.reconcile_scheduled_dependencies()
+
+            self.assertEqual(result["blocked"], ["BASE"])
+            self.assertEqual(
+                database.rows(
+                    "SELECT state,blocker_code,blocker_detail FROM work_items "
+                    "WHERE id='BASE'"
+                )[0],
+                {
+                    "state": "blocked",
+                    "blocker_code": "dependency_blocked",
+                    "blocker_detail": (
+                        "Significance gate is not passed for dependency work item: SIG"
+                    ),
+                },
+            )
+
     def test_active_queue_excludes_finished_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = WorkflowDatabase(Path(tmp) / "workflow.sqlite3")
