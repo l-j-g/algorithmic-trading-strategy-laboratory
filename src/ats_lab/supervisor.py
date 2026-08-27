@@ -109,6 +109,8 @@ class BatchSupervisor:
             raise ValueError("heartbeat interval must be positive")
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        self._last_preflight_signature: str | None = None
+        self._last_attention_signature: str | None = None
 
     def plan(self) -> dict[str, Any]:
         result = operator_status(self.database)
@@ -153,14 +155,49 @@ class BatchSupervisor:
 
         if self.preflight is not None:
             infrastructure = self.preflight()
+            safe_checks = [
+                {
+                    "name": item.get("name"),
+                    "status": item.get("status"),
+                }
+                for item in infrastructure.get("checks", [])
+                if isinstance(item, dict)
+            ]
+            preflight_signature = json.dumps(
+                safe_checks, sort_keys=True, separators=(",", ":"),
+            )
+            if preflight_signature != self._last_preflight_signature:
+                self._activity(
+                    "preflight_completed",
+                    {
+                        "healthy": bool(infrastructure.get("healthy")),
+                        "checks": safe_checks,
+                    },
+                )
+                self._last_preflight_signature = preflight_signature
             if not infrastructure.get("healthy"):
                 self._runtime("infrastructure_blocked", detail=infrastructure)
+                attention = str(
+                    infrastructure.get("detail")
+                    or infrastructure.get("failed_check")
+                    or "infrastructure requires attention"
+                )
+                if attention != self._last_attention_signature:
+                    self._activity(
+                        "attention",
+                        {
+                            "stage": "infrastructure_blocked",
+                            "detail": attention,
+                        },
+                    )
+                    self._last_attention_signature = attention
                 return {
                     "status": "infrastructure_blocked",
                     "blocker_code": infrastructure.get("blocker_code"),
                     "failed_check": infrastructure.get("failed_check"),
                     "detail": infrastructure.get("detail"),
                 }
+            self._last_attention_signature = None
 
         cutoff = (
             datetime.now(timezone.utc)
@@ -282,6 +319,17 @@ class BatchSupervisor:
                     self.database.start_hpo_study(str(study_id))
             request["resource_policy"] = self.resource_policy.to_dict()
             requests.append(request)
+        for request in requests:
+            self._activity(
+                "run_started",
+                self._activity_request_payload(
+                    request, operation=self._operation_for_request(request),
+                ) | {
+                    "total": len(requests),
+                    "completed": 0,
+                    "usage": {},
+                },
+            )
         execution_started = time.perf_counter()
         dispatch = self._dispatch({
             "schema_version": 1,
@@ -308,6 +356,18 @@ class BatchSupervisor:
             detail = dispatch.detail or "batch executor requires results array"
             for item in claimed:
                 self._retry_or_block(item, dispatch.blocker_code or "batch_execution_failed", detail)
+                request = self.database.execution_request(item["id"])
+                self._activity(
+                    "run_failed",
+                    self._activity_request_payload(
+                        request, operation=self._operation_for_request(request),
+                    ) | {
+                        "total": len(claimed), "completed": 0,
+                        "blocker_code": dispatch.blocker_code or "batch_execution_failed",
+                        "detail": detail,
+                        "usage": self._dispatch_usage(dispatch),
+                    },
+                )
             return {
                 "status": "execution_failed", "batch_id": batch_id,
                 "work_items": [item["id"] for item in claimed], "detail": detail,
@@ -322,6 +382,7 @@ class BatchSupervisor:
 
         awaiting: list[str] = []
         terminal: list[dict[str, str]] = []
+        processed = 0
         for item in claimed:
             result = by_id.get(item["id"])
             if result is None:
@@ -335,6 +396,19 @@ class BatchSupervisor:
                 terminal.append({
                     "work_item_id": item["id"], "state": "retry",
                 })
+                processed += 1
+                request = self.database.execution_request(item["id"])
+                self._activity(
+                    "run_failed",
+                    self._activity_request_payload(
+                        request, operation=self._operation_for_request(request),
+                    ) | {
+                        "total": len(claimed), "completed": processed,
+                        "blocker_code": "batch_coverage_mismatch",
+                        "detail": detail,
+                        "usage": self._dispatch_usage(dispatch),
+                    },
+                )
                 continue
             outcome = result.get("outcome")
             if outcome == "finished":
@@ -399,14 +473,55 @@ class BatchSupervisor:
                             "work_item_id": item["id"],
                             "state": "hpo_analysis",
                         })
+                        processed += 1
+                        self._activity(
+                            "run_completed",
+                            self._activity_result_payload(
+                                self.database.execution_request(item["id"]),
+                                result,
+                                operation=self._operation_for_request(
+                                    self.database.execution_request(item["id"]),
+                                ),
+                            ) | {
+                                "total": len(claimed), "completed": processed,
+                                "usage": self._dispatch_usage(dispatch),
+                            },
+                        )
                         continue
                     self.database.mark_awaiting_evaluation(item["id"], batch_id)
                     awaiting.append(item["id"])
+                    processed += 1
+                    self._activity(
+                        "run_completed",
+                        self._activity_result_payload(
+                            self.database.execution_request(item["id"]),
+                            result,
+                            operation=self._operation_for_request(
+                                self.database.execution_request(item["id"]),
+                            ),
+                        ) | {
+                            "total": len(claimed), "completed": processed,
+                            "usage": self._dispatch_usage(dispatch),
+                        },
+                    )
                 except (KeyError, TypeError, ValueError) as error:
                     self._retry_or_block(
                         item, "invalid_execution_result", str(error),
                     )
                     terminal.append({"work_item_id": item["id"], "state": "retry"})
+                    processed += 1
+                    request = self.database.execution_request(item["id"])
+                    self._activity(
+                        "run_failed",
+                        self._activity_request_payload(
+                            request, operation=self._operation_for_request(request),
+                        ) | {
+                            "total": len(claimed), "completed": processed,
+                            "blocker_code": "invalid_execution_result",
+                            "detail": str(error),
+                            "usage": self._dispatch_usage(dispatch),
+                        },
+                    )
             else:
                 disposition = self.disposition_policy.classify(result)
                 if disposition.route is ExecutionRoute.ANALYSIS:
@@ -435,6 +550,19 @@ class BatchSupervisor:
                     terminal.append({
                         "work_item_id": item["id"], "state": "retry",
                     })
+                processed += 1
+                request = self.database.execution_request(item["id"])
+                self._activity(
+                    "run_failed",
+                    self._activity_request_payload(
+                        request, operation=self._operation_for_request(request),
+                    ) | {
+                        "total": len(claimed), "completed": processed,
+                        "blocker_code": disposition.code,
+                        "detail": disposition.detail,
+                        "usage": self._dispatch_usage(dispatch),
+                    },
+                )
         if not awaiting:
             return {
                 "status": "batch_terminal", "batch_id": batch_id, "results": terminal,
@@ -459,6 +587,14 @@ class BatchSupervisor:
     ) -> dict[str, Any]:
         """Partition ordinary and HPO work into disjoint 4-8 item cohorts."""
         cohorts = self._analysis_cohorts(rows)
+        self._activity(
+            "analysis_started",
+            {
+                "stage": "analyzing",
+                "count": len(rows),
+                "batch_id": rows[0]["batch_id"] if rows else None,
+            },
+        )
         self._runtime(
             "analyzing",
             batch_id=rows[0]["batch_id"] if rows else None,
@@ -484,14 +620,30 @@ class BatchSupervisor:
                 for cohort in cohorts
             ]
         failed = [result for result in results if result["status"] != "finished"]
+        evaluated = [
+            item for result in results
+            for item in result.get("evaluated", [])
+        ]
+        activity_payload = {
+            "stage": "analyzing",
+            "batch_id": rows[0]["batch_id"] if rows else None,
+            "total": len(rows),
+            "items": self._activity_analysis_items(rows),
+            "evaluated": len(evaluated),
+            "usage": self._merge_usage(
+                result.get("usage") for result in results
+            ),
+        }
+        if failed:
+            activity_payload["detail"] = failed[0].get("detail")
+            self._activity("analysis_failed", activity_payload)
+        else:
+            self._activity("analysis_completed", activity_payload)
         return {
             "status": "analysis_failed" if failed else "batch_complete",
             "batch_id": rows[0]["batch_id"] if rows else None,
             "cohorts": results,
-            "evaluated": [
-                item for result in results
-                for item in result.get("evaluated", [])
-            ],
+            "evaluated": evaluated,
             "detail": failed[0].get("detail") if failed else None,
             "recovered": recovered,
             "promoted": promoted,
@@ -511,6 +663,14 @@ class BatchSupervisor:
             study_id, limit=1000,
         )
         detail = self.database.hpo_study_detail(study_id)
+        self._activity(
+            "analysis_started",
+            {
+                "stage": "hpo_analysis",
+                "count": 1,
+                "study_id": study_id,
+            },
+        )
         if not payload or not detail:
             return self._fail_hpo_job(
                 job, "HPO analysis payload unavailable",
@@ -678,6 +838,23 @@ class BatchSupervisor:
                 state="finished", analyzer_attempt=job.get("attempts"),
                 cohort_id=job.get("cohort_id"),
             )
+        self._activity(
+            "analysis_completed",
+            {
+                "stage": "hpo_analysis",
+                "total": 1,
+                "evaluated": 1,
+                "items": [{
+                    "experiment_id": experiment_id,
+                    "verdict": verdict_value,
+                    "summary": finding,
+                    "strategy": self._activity_strategy_for_experiment(
+                        experiment_id,
+                    ),
+                }],
+                "usage": self._dispatch_usage(dispatch),
+            },
+        )
         return {
             "status": status,
             "study_id": study_id,
@@ -714,6 +891,15 @@ class BatchSupervisor:
                 state=state["state"], analyzer_attempt=job.get("attempts"),
                 cohort_id=job.get("cohort_id"),
             )
+        self._activity(
+            "analysis_failed",
+            {
+                "stage": "hpo_analysis",
+                "total": 1,
+                "study_id": job.get("study_id"),
+                "detail": error,
+            },
+        )
         return {
             "status": (
                 "hpo_analysis_blocked"
@@ -816,6 +1002,7 @@ class BatchSupervisor:
                 "payload_bytes": 0,
                 "analysis_calls_avoided": 1,
                 "evaluated": finalized,
+                "usage": {},
             }
         request = {
             "schema_version": 1,
@@ -870,6 +1057,7 @@ class BatchSupervisor:
                     "cohort_id": cohort_id, "attempt": attempt,
                     "payload_bytes": payload_bytes, "detail": detail,
                     "evaluated": [],
+                    "usage": self._dispatch_usage(dispatch),
                 }
             if attempt <= self.resource_policy.analyzer_retry_limit:
                 retry_results = [
@@ -891,6 +1079,9 @@ class BatchSupervisor:
                         item for result in retry_results
                         for item in result.get("evaluated", [])
                     ],
+                    "usage": self._merge_usage(
+                        result.get("usage") for result in retry_results
+                    ),
                 }
             return self._analysis_failure(
                 rows, cohort_id, attempt, detail,
@@ -920,6 +1111,9 @@ class BatchSupervisor:
                         item for result in retry_results
                         for item in result.get("evaluated", [])
                     ],
+                    "usage": self._merge_usage(
+                        result.get("usage") for result in retry_results
+                    ),
                 }
             return self._analysis_failure(
                 rows, cohort_id, attempt, str(error),
@@ -938,6 +1132,7 @@ class BatchSupervisor:
             "attempt": attempt,
             "payload_bytes": payload_bytes,
             "evaluated": finalized,
+            "usage": self._dispatch_usage(dispatch),
         }
 
     def _deterministic_analysis_payload(self, row: dict) -> dict[str, Any] | None:
@@ -1327,6 +1522,14 @@ class BatchSupervisor:
         recovered: int,
         promoted: int,
     ) -> dict[str, Any]:
+        self._activity(
+            "synthesis_started",
+            {
+                "stage": "synthesizing",
+                "cohort_id": cohort["id"],
+                "requested": cohort["requested_count"],
+            },
+        )
         self._runtime(
             "synthesizing",
             detail={"cohort_id": cohort["id"], "requested": cohort["requested_count"]},
@@ -1350,6 +1553,16 @@ class BatchSupervisor:
         if dispatch.outcome != "finished" or not isinstance(requests, list):
             detail = dispatch.detail or "synthesis requires evidence.synthesis_requests"
             self.database.fail_synthesis_cohort(cohort["id"], detail)
+            self._activity(
+                "synthesis_failed",
+                {
+                    "stage": "synthesizing",
+                    "cohort_id": cohort["id"],
+                    "requested": cohort["requested_count"],
+                    "detail": detail,
+                    "usage": self._dispatch_usage(dispatch),
+                },
+            )
             return {
                 "status": "synthesis_failed", "detail": detail,
                 "recovered": recovered, "promoted": promoted,
@@ -1382,8 +1595,40 @@ class BatchSupervisor:
                     "work_item_ids": work_item_ids,
                 })
             self.database.activate_synthesis_cohort(cohort["id"], chains)
+            items = [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "lane", "strategy_name", "hypothesis", "thesis",
+                        "entry_rule_summary", "why_this_now", "routes",
+                    )
+                    if item.get(key) is not None
+                }
+                for item in bounded_requests
+                if isinstance(item, dict)
+            ]
+            self._activity(
+                "synthesis_completed",
+                {
+                    "stage": "synthesizing",
+                    "cohort_id": cohort["id"],
+                    "requested": cohort["requested_count"],
+                    "items": items,
+                    "usage": self._dispatch_usage(dispatch),
+                },
+            )
         except (KeyError, TypeError, ValueError) as error:
             self.database.fail_synthesis_cohort(cohort["id"], str(error))
+            self._activity(
+                "synthesis_failed",
+                {
+                    "stage": "synthesizing",
+                    "cohort_id": cohort["id"],
+                    "requested": cohort["requested_count"],
+                    "detail": str(error),
+                    "usage": self._dispatch_usage(dispatch),
+                },
+            )
             return {
                 "status": "synthesis_failed", "detail": str(error),
                 "recovered": recovered, "promoted": promoted,
@@ -1486,6 +1731,218 @@ class BatchSupervisor:
             detail=detail,
             started_at=self.started_at,
         )
+
+    def _activity(
+        self, event_type: str, payload: dict[str, Any],
+    ) -> None:
+        """Append optional operator activity without affecting research state."""
+        recorder = getattr(self.database, "record_event", None)
+        if recorder is None:
+            return
+        try:
+            recorder(
+                "supervisor", self.worker_id, event_type,
+                {key: value for key, value in payload.items() if value is not None},
+            )
+        except Exception:
+            # Activity is an operator convenience. SQLite workflow state wins.
+            return
+
+    def _activity_request_payload(
+        self, request: dict[str, Any], *, operation: str,
+    ) -> dict[str, Any]:
+        experiment = request.get("experiment")
+        if not isinstance(experiment, dict):
+            experiment = {}
+        routes = experiment.get("routes")
+        if not isinstance(routes, list):
+            routes = []
+        return {
+            "operation": operation,
+            "work_item_id": request.get("work_item_id"),
+            "experiment_id": request.get("experiment_id"),
+            "strategy": experiment.get("strategy_name") or "unknown",
+            "hypothesis": experiment.get("hypothesis") or "",
+            "thesis": experiment.get("thesis") or "",
+            "entry_rule_summary": experiment.get("entry_rule_summary") or "",
+            "routes": [route for route in routes if isinstance(route, dict)][:4],
+            "success_gates": [
+                gate for gate in (experiment.get("success_gates") or [])
+                if isinstance(gate, dict)
+            ],
+        }
+
+    def _activity_result_payload(
+        self,
+        request: dict[str, Any],
+        result: dict[str, Any],
+        *,
+        operation: str,
+    ) -> dict[str, Any]:
+        payload = self._activity_request_payload(request, operation=operation)
+        evidence = result.get("evidence")
+        run = evidence.get("run") if isinstance(evidence, dict) else None
+        if not isinstance(run, dict):
+            run = {}
+        for key in ("route", "dashboard_url", "metrics", "status"):
+            if run.get(key) is not None:
+                payload[key] = run[key]
+        route = payload.get("route")
+        if isinstance(route, dict) and isinstance(route.get("routes"), list):
+            payload["routes"] = route["routes"]
+        metric_states = self._activity_metric_states(
+            payload.get("metrics"), payload.get("success_gates"),
+        )
+        if metric_states:
+            payload["metric_states"] = metric_states
+        return payload
+
+    def _activity_metric_states(
+        self,
+        metrics: object,
+        gates: object,
+    ) -> dict[str, str]:
+        if not isinstance(metrics, dict) or not isinstance(gates, list):
+            return {}
+        aliases = {
+            "trades": "trade_count",
+            "trade_count": "trade_count",
+            "net": "net_profit_percentage",
+            "net_profit_percentage": "net_profit_percentage",
+            "sharpe": "sharpe_ratio",
+            "sharpe_ratio": "sharpe_ratio",
+            "max_dd": "max_drawdown_percentage",
+            "max_drawdown_percentage": "max_drawdown_percentage",
+        }
+        states: dict[str, str] = {}
+        for gate in gates:
+            if not isinstance(gate, dict):
+                continue
+            metric_name = aliases.get(str(gate.get("name") or ""))
+            if not metric_name or metric_name not in metrics:
+                continue
+            try:
+                value = float(metrics[metric_name])
+                threshold = float(gate["threshold"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            operator = str(gate.get("operator") or ">=")
+            passed = {
+                ">": value > threshold,
+                ">=": value >= threshold,
+                "<": value < threshold,
+                "<=": value <= threshold,
+                "=": value == threshold,
+                "==": value == threshold,
+            }.get(operator)
+            if passed is None:
+                continue
+            distance = abs(value - threshold)
+            warning_band = max(abs(threshold) * 0.10, 0.10)
+            states[metric_name] = (
+                "yellow" if distance <= warning_band
+                else "green" if passed else "red"
+            )
+        return states
+
+    def _operation_for_request(self, request: dict[str, Any]) -> str:
+        work_item = request.get("work_item")
+        if isinstance(work_item, dict) and work_item.get("operation"):
+            return str(work_item["operation"])
+        experiment = request.get("experiment")
+        experiment_type = (
+            experiment.get("experiment_type")
+            if isinstance(experiment, dict) else None
+        )
+        return {
+            "baseline": "backtest",
+            "multi_window": "backtest",
+            "cost_sensitivity": "backtest",
+            "out_of_sample": "backtest",
+            "harness_check": "backtest",
+            "significance": "significance",
+            "monte_carlo": "monte_carlo",
+            "hpo": "hpo",
+        }.get(str(experiment_type or ""), "backtest")
+
+    @staticmethod
+    def _dispatch_usage(dispatch: DispatchResult) -> dict[str, int]:
+        payload = dispatch.payload or {}
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return {}
+        result: dict[str, int] = {}
+        for key in (
+            "input_tokens", "output_tokens", "cache_read_tokens", "total_tokens",
+        ):
+            try:
+                if usage.get(key) is not None:
+                    result[key] = max(0, int(usage[key]))
+            except (TypeError, ValueError):
+                continue
+        if "total_tokens" not in result and result:
+            result["total_tokens"] = (
+                result.get("input_tokens", 0) + result.get("output_tokens", 0)
+            )
+        return result
+
+    @staticmethod
+    def _merge_usage(usages: object) -> dict[str, int]:
+        totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "total_tokens": 0,
+        }
+        present = False
+        if usages is None:
+            return {}
+        for usage in usages:
+            if not isinstance(usage, dict):
+                continue
+            present = True
+            for key in totals:
+                try:
+                    totals[key] += max(0, int(usage.get(key) or 0))
+                except (TypeError, ValueError):
+                    continue
+        return totals if present else {}
+
+    def _activity_analysis_items(self, rows: list[dict]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                evaluations = self.database.rows(
+                    """SELECT ev.verdict,ev.summary,ev.next_step,s.name AS strategy
+                       FROM evaluations ev
+                       JOIN experiments e ON e.id=ev.experiment_id
+                       LEFT JOIN strategies s ON s.id=e.strategy_id
+                       WHERE ev.experiment_id=?
+                       ORDER BY ev.evaluated_at DESC,ev.id DESC LIMIT 1""",
+                    (row["experiment_id"],),
+                )
+            except Exception:
+                evaluations = []
+            evaluation = evaluations[0] if evaluations else {}
+            items.append({
+                "experiment_id": row.get("experiment_id"),
+                "strategy": evaluation.get("strategy") or row.get("strategy") or "unknown",
+                "verdict": evaluation.get("verdict") or "inconclusive",
+                "summary": evaluation.get("summary") or "",
+                "next_action": evaluation.get("next_step") or "",
+            })
+        return items
+
+    def _activity_strategy_for_experiment(self, experiment_id: str) -> str:
+        try:
+            rows = self.database.rows(
+                """SELECT s.name AS strategy FROM experiments e
+                   LEFT JOIN strategies s ON s.id=e.strategy_id WHERE e.id=?""",
+                (experiment_id,),
+            )
+        except Exception:
+            rows = []
+        return str(rows[0].get("strategy") or "unknown") if rows else "unknown"
 
     def _persist_run(self, request: dict[str, Any], result: dict[str, Any]) -> None:
         evidence = result.get("evidence")
@@ -1827,6 +2284,10 @@ class BatchSupervisor:
         rounds = 0
         self.database.repair_relative_retry_schedules()
         self._runtime("starting")
+        self._activity(
+            "research_started",
+            {"stage": "starting", "worker_id": self.worker_id},
+        )
         while True:
             result = self.run_round()
             rounds += 1

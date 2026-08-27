@@ -220,6 +220,27 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertEqual(kwargs["env"], {"SAFE": "1"})
 
     @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
+    def test_launch_exposes_compact_usage_for_activity_events(self, _which) -> None:
+        def runner(command, **kwargs):
+            usage_path = Path(command[command.index("--usage-file") + 1])
+            usage_path.write_text(json.dumps({
+                "input_tokens": 300,
+                "output_tokens": 169,
+                "cache_read_tokens": 20,
+            }))
+            return subprocess.CompletedProcess(
+                command, 0, '{"outcome":"finished","evidence":{}}', "",
+            )
+
+        result = launch(
+            {"work_item_id": "JOB-1"},
+            AgentLauncherConfig(Path("/tmp")), runner=runner,
+        )
+
+        self.assertEqual(result["usage"]["total_tokens"], 469)
+        self.assertEqual(result["usage"]["cache_read_tokens"], 20)
+
+    @patch("ats_lab.agent_launcher.shutil.which", return_value="/bin/executor")
     def test_prompt_travels_over_stdin_not_argv(self, _which) -> None:
         seen = {}
 

@@ -14,6 +14,44 @@ ats-lab loop status
 ats-lab loop stop
 ```
 
+For the attached operator display, use:
+
+```bash
+ats-lab start
+```
+
+This starts or resumes the supervisor, then follows durable activity events.
+Event rows stay on screen; one bottom line replaces `LIVE` and refreshes every
+second while waiting:
+
+```text
+PREFLIGHT: Docker OK · Jesse OK · Memory OK
+SYNTHESIS: Synthesising 25 new tests
+  => 01  NEW  MeanReversionStrategy · BTC-USDT · 1h
+      ↳ evaluating: mean reversion after volatility compression
+RUNNING (3/25): Backtest Complete · MeanReversionStrategy
+  trades=42 · net=+12.35% · sharpe=1.23 · max_dd=-4.50%
+  Jesse ↗
+ANALYSIS: Completed (24/24)
+  01  PASS  MeanReversionStrategy · lifecycle gates cleared
+└─ WAITING          · 4 hrs : 24 min (+55 sec) · (^ 469)
+```
+
+The footer shows total research duration, time since the last event, and the
+latest provider token usage when available. `RULE TEST`, `MONTE CARLO`, and
+`HPO` use the same run layout. HPO analysis remains under `ANALYSIS`.
+
+Optional file logging is configured in ignored `.ats-lab/config.toml`:
+
+```toml
+[logging]
+log_to_file = true
+log_dir = "{ats-lab}/logs/{date}_log"
+```
+
+Files contain plain event rows only: no ANSI colour, hyperlinks, or ticking
+footer. File failures do not stop research.
+
 `loop start` resumes an existing supervisor or launches one detached when none
 is alive. Output goes to ignored runtime file `.ats-lab/supervisor.log`.
 `loop stop` requests a graceful stop; it does not kill an executing batch.

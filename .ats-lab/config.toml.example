@@ -54,3 +54,9 @@ claim_timeout_seconds = 7200
 # independent jobs and create a long retry wave.
 execution_batch_size = 2
 active_ready_limit = 8
+
+[logging]
+# `ats-lab start` follows durable research events in the terminal.
+log_to_file = true
+# `{date}` is rendered as the local calendar date. `{ats-lab}` means `.ats-lab`.
+log_dir = "{ats-lab}/logs/{date}_log"

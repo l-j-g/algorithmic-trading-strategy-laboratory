@@ -354,6 +354,37 @@ def _read_usage(path: Path) -> dict[str, Any]:
         return {}
 
 
+def _usage_summary(usage: Mapping[str, Any]) -> dict[str, int] | None:
+    """Return compact provider usage safe to expose in the activity stream."""
+    tokens = usage.get("tokens")
+    nested = tokens if isinstance(tokens, Mapping) else {}
+
+    def number(*keys: str) -> int | None:
+        for key in keys:
+            value = usage.get(key, nested.get(key))
+            try:
+                if value is not None:
+                    return max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    input_tokens = number("input_tokens", "input")
+    output_tokens = number("output_tokens", "output")
+    cache_read_tokens = number("cache_read_tokens", "cache_read")
+    total_tokens = number("total_tokens", "total")
+    if total_tokens is None and (input_tokens is not None or output_tokens is not None):
+        total_tokens = (input_tokens or 0) + (output_tokens or 0)
+    if total_tokens is None and input_tokens is None and output_tokens is None:
+        return None
+    return {
+        "input_tokens": input_tokens or 0,
+        "output_tokens": output_tokens or 0,
+        "cache_read_tokens": cache_read_tokens or 0,
+        "total_tokens": total_tokens or 0,
+    }
+
+
 def _write_transport_telemetry(
     config: AgentLauncherConfig,
     *,
@@ -588,6 +619,10 @@ def launch(
             "outcome": "retry", "blocker_code": "invalid_executor_contract",
             "detail": contract_error,
         }
+    usage_summary = _usage_summary(usage)
+    if usage_summary:
+        result = dict(result)
+        result["usage"] = usage_summary
     return result
 
 

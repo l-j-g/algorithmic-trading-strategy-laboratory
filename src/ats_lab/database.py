@@ -406,6 +406,52 @@ class WorkflowDatabase(QueueMixin, HpoMixin, SynthesisMixin, EvidenceMixin):
             raise RuntimeError("operator control is not initialized")
         return rows[0]
 
+    def record_event(
+        self,
+        aggregate_type: str,
+        aggregate_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        occurred_at: str | None = None,
+    ) -> dict:
+        """Append one structured operator activity event."""
+        if not aggregate_type.strip():
+            raise ValueError("event aggregate_type is required")
+        if not aggregate_id.strip():
+            raise ValueError("event aggregate_id is required")
+        if not event_type.strip():
+            raise ValueError("event event_type is required")
+        timestamp = occurred_at or utc_now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """INSERT INTO events(
+                       aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                   ) VALUES (?,?,?,?,?)""",
+                (
+                    aggregate_type, aggregate_id, event_type,
+                    json.dumps(dict(payload or {}), sort_keys=True, default=str),
+                    timestamp,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM events WHERE id=?", (cursor.lastrowid,)
+            ).fetchone()
+            return dict(row)
+
+    def events_after(self, event_id: int = 0, *, limit: int = 100) -> list[dict]:
+        """Return bounded durable events after an inclusive display cursor."""
+        limit = max(1, min(int(limit), 5000))
+        return self.rows(
+            """SELECT id,aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+               FROM events WHERE id>? ORDER BY id ASC LIMIT ?""",
+            (max(0, int(event_id)), limit),
+        )
+
+    def latest_event_id(self) -> int:
+        rows = self.rows("SELECT COALESCE(MAX(id),0) AS id FROM events")
+        return int(rows[0]["id"]) if rows else 0
+
     def set_control_state(
         self, desired_state: str, *, updated_by: str = "operator",
     ) -> dict:

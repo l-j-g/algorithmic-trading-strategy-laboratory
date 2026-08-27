@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Mapping, TextIO
 
+from .activity_log import render_footer
 from .database import WorkflowDatabase
 from .humanize import human_time
 from .status import operator_status
@@ -187,6 +188,18 @@ def _fit_line(value: object, width: int) -> str:
     return text[:max(1, width - 1)] + "…"
 
 
+def _parse_monitor_time(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _metric(value: object, *, suffix: str = "", signed: bool = False) -> str:
     """Format one operator metric without leaking raw diagnostic payloads."""
     if value in (None, ""):
@@ -303,7 +316,7 @@ def _render_live_monitor(
         if timing else "idle"
     )
     width = width or shutil.get_terminal_size((120, 20)).columns
-    title = _fit_line(f"ATS LAB LIVE  {human_time(snapshot['checked_at'])}", width)
+    title = _fit_line("ATS LAB", width)
     status = _fit_line(
         f"STATUS {progress}  control={desired_value}  stage={phase_value} "
         f"heartbeat={_age(runtime.get('heartbeat_at'))}", width,
@@ -332,7 +345,7 @@ def _render_live_monitor(
             _paint(f"RECENT RESULTS  {len(completions)}", "bold", color),
             render_completion_table(completions, width=width, color=color),
         ])
-    lines.extend(["", _paint(f"LIVE  {len(snapshot.get('active_items', []))} jobs", "bold", color)])
+    lines.extend(["", _paint(f"ACTIVE  {len(snapshot.get('active_items', []))} jobs", "bold", color)])
     active = snapshot.get("active_items") or []
     if active:
         active_table = FittedTable(
@@ -351,6 +364,37 @@ def _render_live_monitor(
         )
     else:
         lines.append(_paint("(none)", "muted", color))
+    checked_at = _parse_monitor_time(snapshot.get("checked_at"))
+    started_at = _parse_monitor_time(runtime.get("started_at")) or checked_at
+    recent_events = snapshot.get("recent_events") or []
+    last_event = (
+        _parse_monitor_time(recent_events[0].get("occurred_at"))
+        if recent_events and isinstance(recent_events[0], Mapping)
+        else None
+    ) or started_at
+    stage_name = {
+        "starting": "STARTING",
+        "synthesizing": "SYNTHESIS",
+        "executing": "RUNNING",
+        "analyzing": "ANALYSIS",
+        "infrastructure_blocked": "BLOCKED",
+        "paused": "PAUSED",
+        "stopping": "STOPPING",
+        "stopped": "STOPPED",
+        "idle": "WAITING",
+    }.get(phase_value, phase_value.upper())
+    active_count = int(states.get("running", 0) or 0)
+    if stage_name == "RUNNING" and active_count:
+        stage_name = f"RUNNING {active_count}"
+    lines.append(render_footer(
+        stage_name,
+        total_seconds=(checked_at - started_at).total_seconds()
+        if checked_at and started_at else 0,
+        since_event_seconds=(checked_at - last_event).total_seconds()
+        if checked_at and last_event else 0,
+        color=color,
+        width=width,
+    ))
     return "\n".join(lines)
 
 

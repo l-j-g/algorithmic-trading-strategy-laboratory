@@ -11,10 +11,12 @@ START HERE
   ats-lab                         Show health, queue, memory, and next command
   ats-lab doctor                  Check Docker, Jesse, Memory, and workflow state
   ats-lab next                    Show one recommended next action
+  ats-lab start                   Start/resume research with attached activity display
   ats-lab tui                     Open color keyboard-driven operator UI
   ats-lab monitor --watch         Stream plain-text progress
 
 DAILY OPERATION
+  ats-lab start                   Start/resume and follow durable activity events
   ats-lab loop start              Start or resume canonical research loop
   ats-lab loop status             Show actual process and control state
   ats-lab loop pause              Pause loop without ending process

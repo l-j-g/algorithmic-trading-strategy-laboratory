@@ -6,6 +6,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from ats_lab.cli import COMMAND_HANDLERS, build_parser, discover_lab_repo, emit_progress, main
@@ -183,6 +184,20 @@ class CliEvidenceTests(unittest.TestCase):
 
         self.assertIn("LOOP RUNNING", output)
         self.assertIn("pid=123", output)
+
+    def test_start_attaches_activity_follower_after_starting_loop(self) -> None:
+        with (
+            patch("ats_lab.cli.SupervisorLoopControl") as lifecycle,
+            patch("ats_lab.cli.ActivityFollower") as follower,
+        ):
+            lifecycle.return_value.start.return_value = SimpleNamespace(
+                state="started", process_id=123,
+            )
+            output = self.invoke("start", "--interval", "0.1")
+
+        lifecycle.return_value.start.assert_called_once()
+        follower.return_value.run.assert_called_once_with()
+        self.assertEqual(output, "")
 
     def test_candidates_deduplicate_atomic_evidence_by_experiment(self) -> None:
         human = self.invoke("candidates")

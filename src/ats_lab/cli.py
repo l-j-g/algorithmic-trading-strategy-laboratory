@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .audit import build_audit, render_markdown
+from .activity_log import ActivityFollower, load_activity_log_config
 from .database import WorkflowDatabase
 from .hpo_routes import HpoRoutePlanner, default_hpo_routes, render_hpo_route_plan
 from .hpo import import_jesse_session_export, import_optuna_study
@@ -300,6 +301,12 @@ def build_parser() -> AtsLabArgumentParser:
         "status", help="Show compact workflow health and recommended next action."
     )
     status_parser.add_argument("--format", choices=("table", "json"), default="table")
+    start = sub.add_parser(
+        "start", help="Start or resume research and follow its activity stream."
+    )
+    start.add_argument("--idle-sleep", type=float, default=30.0)
+    start.add_argument("--retry-delay", type=float, default=60.0)
+    start.add_argument("--interval", type=float, default=1.0)
     monitor = sub.add_parser("monitor", help="Show human-readable terminal progress.")
     monitor.add_argument("--watch", action="store_true")
     monitor.add_argument("--interval", type=float, default=5.0)
@@ -859,6 +866,50 @@ def _run_monitor(context: CommandContext) -> int:
             watch_monitor(database, interval=args.interval)
         except KeyboardInterrupt:
             return 130
+    return 0
+
+
+def _run_start(context: CommandContext) -> int:
+    args = context.args
+    parser = context.parser
+    repo = context.repo
+    database = context.database
+    if args.idle_sleep < 0 or args.retry_delay < 0:
+        parser.error("start sleep values must be non-negative")
+    if args.interval <= 0:
+        parser.error("start --interval must be positive")
+    database.initialize()
+    cursor = database.latest_event_id()
+    lifecycle = SupervisorLoopControl(
+        database, repo,
+        idle_sleep=args.idle_sleep,
+        retry_delay=args.retry_delay,
+    )
+    result = lifecycle.start()
+    runtime = database.supervisor_runtime_status() or {}
+    if result.state == "already_running":
+        database.record_event(
+            "supervisor", "cli", "research_attached",
+            {"stage": "starting", "process_id": result.process_id},
+        )
+    follower = ActivityFollower(
+        database,
+        output=sys.stdout,
+        config=load_activity_log_config(repo),
+        cursor=cursor,
+        started_at=(
+            runtime.get("started_at")
+            if result.state == "already_running" else None
+        ),
+        interval=args.interval,
+    )
+    try:
+        follower.run()
+    except KeyboardInterrupt:
+        if sys.stdout.isatty():
+            print()
+        print("Detached; supervisor continues.", file=sys.stderr)
+        return 130
     return 0
 
 
@@ -1740,7 +1791,7 @@ def _run_dashboard(context: CommandContext) -> int:
 
 
 REPO_DISCOVERY_COMMANDS = frozenset({
-    "worker", "supervisor", "dashboard", "backend", "web", "status", "monitor", "control",
+    "worker", "supervisor", "dashboard", "backend", "web", "status", "start", "monitor", "control",
     "console", "recover-claims", "resolve-blocker", "requeue-evaluation",
     "recover-orphaned-replacements",
     "queue", "candidates", "evidence", "diagnostic-export",
@@ -1771,6 +1822,7 @@ COMMAND_HANDLERS: dict[str, Callable[[CommandContext], int]] = {
     "queue": _run_queue,
     "synthesis-status": _run_synthesis_status,
     "status": _run_status,
+    "start": _run_start,
     "monitor": _run_monitor,
     "tui": _run_tui,
     "loop": _run_loop,

@@ -133,10 +133,12 @@ class TerminalConsoleTests(unittest.TestCase):
                 monitor_snapshot(database), width=72, compact=True,
             )
 
-            self.assertIn("ATS LAB LIVE", rendered)
+            self.assertIn("ATS LAB", rendered)
+            self.assertNotIn("ATS LAB LIVE", rendered)
             self.assertIn("STATUS", rendered)
             self.assertIn("QUEUE", rendered)
-            self.assertIn("LIVE", rendered)
+            self.assertIn("ACTIVE", rendered)
+            self.assertIn("└─", rendered)
             self.assertIn("TestStrategy", rendered)
             self.assertNotIn("CANDIDATES", rendered)
             self.assertNotIn("NEXT   ", rendered)
@@ -154,7 +156,8 @@ class TerminalConsoleTests(unittest.TestCase):
 
             self.assertNotIn("\033[", plain)
             self.assertIn("\033[", colored)
-            self.assertIn("ATS LAB LIVE", colored)
+            self.assertIn("ATS LAB", colored)
+            self.assertNotIn("ATS LAB LIVE", colored)
 
     def test_console_watch_rejects_non_numeric_interval_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
