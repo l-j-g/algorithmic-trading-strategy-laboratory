@@ -43,6 +43,13 @@
         "timeframe": "4h"
       }
     ],
+    "KamaAdxPullback": [
+      {
+        "exchange": "$primary",
+        "symbol": "$primary",
+        "timeframe": "4h"
+      }
+    ],
     "RelativeStrengthRouteTrend": [
       {
         "exchange": "Binance Perpetual Futures",

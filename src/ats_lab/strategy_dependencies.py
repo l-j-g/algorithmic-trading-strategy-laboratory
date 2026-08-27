@@ -91,18 +91,21 @@ def required_data_routes(
     """
     routes = trusted_data_route_manifest().get(strategy_name, ())
     primary_exchanges = _primary_values(primary_routes, "exchange")
+    primary_symbols = _primary_values(primary_routes, "symbol")
     primary_timeframes = _primary_values(primary_routes, "timeframe")
     resolved: list[DataRouteSpec] = []
     for route in routes:
         exchanges = primary_exchanges if route["exchange"] == PRIMARY_ROUTE_VALUE else (route["exchange"],)
+        symbols = primary_symbols if route["symbol"] == PRIMARY_ROUTE_VALUE else (route["symbol"],)
         timeframes = primary_timeframes if route["timeframe"] == PRIMARY_ROUTE_VALUE else (route["timeframe"],)
         for exchange in exchanges:
-            for timeframe in timeframes:
-                candidate = DataRouteSpec(
-                    exchange=exchange, symbol=route["symbol"], timeframe=timeframe,
-                )
-                if candidate not in resolved:
-                    resolved.append(candidate)
+            for symbol in symbols:
+                for timeframe in timeframes:
+                    candidate = DataRouteSpec(
+                        exchange=exchange, symbol=symbol, timeframe=timeframe,
+                    )
+                    if candidate not in resolved:
+                        resolved.append(candidate)
     return tuple(resolved)
 
 
