@@ -11,6 +11,23 @@ from ats_lab.strategy_dependencies import (
 
 
 class StrategyDependencyTests(unittest.TestCase):
+    def test_kama_uses_same_symbol_higher_timeframe_route(self) -> None:
+        self.assertEqual(
+            required_data_routes(
+                "KamaAdxPullback",
+                [{
+                    "exchange": "Binance Perpetual Futures",
+                    "symbol": "ETH-USDT",
+                    "timeframe": "1h",
+                }],
+            ),
+            (DataRouteSpec(
+                exchange="Binance Perpetual Futures",
+                symbol="ETH-USDT",
+                timeframe="4h",
+            ),),
+        )
+
     def test_eth_btc_strategy_has_reviewed_btc_route(self) -> None:
         self.assertEqual(
             required_data_routes(
