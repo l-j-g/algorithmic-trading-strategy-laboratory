@@ -668,6 +668,45 @@ class QueueMixin:
                 raise ValueError(
                     "cannot repair data routes after durable execution evidence"
                 )
+            checkpoint = connection.execute(
+                """SELECT session_id,state FROM direct_execution_sessions
+                   WHERE work_item_id=?""",
+                (work_item_id,),
+            ).fetchone()
+            recovery = connection.execute(
+                """SELECT old_session_id,replacement_session_id
+                   FROM direct_execution_recoveries WHERE work_item_id=?""",
+                (work_item_id,),
+            ).fetchone()
+            if checkpoint is not None:
+                if recovery is not None:
+                    if (
+                        recovery["old_session_id"] != checkpoint["session_id"]
+                        or recovery["replacement_session_id"] is not None
+                    ):
+                        raise ValueError(
+                            "cannot repair data routes after replacement session creation"
+                        )
+                else:
+                    connection.execute(
+                        """INSERT INTO direct_execution_recoveries(
+                               work_item_id,old_session_id,old_state,reason,
+                               replacement_allowed,created_at,updated_at
+                           ) VALUES (?,?,?,?,1,?,?)""",
+                        (
+                            work_item_id, checkpoint["session_id"], checkpoint["state"],
+                            "data-route repair invalidated stale Jesse session",
+                            now, now,
+                        ),
+                    )
+                deleted = connection.execute(
+                    "DELETE FROM direct_execution_sessions WHERE work_item_id=?",
+                    (work_item_id,),
+                )
+                if deleted.rowcount != 1:
+                    raise RuntimeError(
+                        f"data-route repair checkpoint changed concurrently: {work_item_id}"
+                    )
             specification = json.loads(row["specification_json"] or "{}")
             if not isinstance(specification, dict):
                 raise ValueError("work item specification must be an object")
@@ -707,6 +746,9 @@ class QueueMixin:
                     "reason": reason,
                     "attempts_reset": 1,
                     "reopened_state": target_state,
+                    "invalidated_session_id": (
+                        checkpoint["session_id"] if checkpoint is not None else None
+                    ),
                 }, sort_keys=True), now),
             )
         promoted = self.promote_scheduled_runnable(active_limit)

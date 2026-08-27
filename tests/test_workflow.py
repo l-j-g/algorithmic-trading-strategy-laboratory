@@ -97,6 +97,17 @@ class WorkflowDatabaseTests(unittest.TestCase):
                 blocker_detail="missing auxiliary candles",
                 specification={"operation": "backtest"},
             ))
+            with database.connect() as connection:
+                connection.execute(
+                    """INSERT INTO direct_execution_sessions(
+                           work_item_id,experiment_id,session_id,
+                           request_fingerprint,state,created_at,updated_at
+                       ) VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        "JOB-1", "EXP-1", "stale-session", "old-fingerprint",
+                        "start_recovery_failed", "now", "now",
+                    ),
+                )
 
             result = database.repair_work_item_data_routes(
                 "JOB-1",
@@ -109,6 +120,19 @@ class WorkflowDatabaseTests(unittest.TestCase):
             )
 
             self.assertEqual(result["state"], "ready")
+            self.assertEqual(
+                database.rows(
+                    "SELECT COUNT(*) AS count FROM direct_execution_sessions "
+                    "WHERE work_item_id='JOB-1'"
+                )[0]["count"],
+                0,
+            )
+            recovery = database.rows(
+                """SELECT old_session_id,replacement_allowed
+                   FROM direct_execution_recoveries WHERE work_item_id='JOB-1'"""
+            )[0]
+            self.assertEqual(recovery["old_session_id"], "stale-session")
+            self.assertEqual(recovery["replacement_allowed"], 1)
             row = database.rows(
                 "SELECT attempts,blocker_code,specification_json FROM work_items "
                 "WHERE id='JOB-1'"

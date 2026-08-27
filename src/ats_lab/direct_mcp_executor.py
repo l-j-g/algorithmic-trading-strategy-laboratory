@@ -1979,6 +1979,11 @@ class DirectMcpDispatcher:
             "experiment_id": request.get("experiment_id"),
             "strategy_name": experiment.get("strategy_name"),
             "routes": experiment.get("routes"),
+            "data_routes": (
+                work_item.get("data_routes")
+                or experiment.get("data_routes")
+                or []
+            ),
             "session_exchange_config": DirectMcpDispatcher._session_exchange_config(
                 experiment,
             ),

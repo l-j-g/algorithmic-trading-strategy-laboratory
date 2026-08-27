@@ -1374,6 +1374,16 @@ class DirectMcpExecutorTests(unittest.TestCase):
                     DirectMcpDispatcher._fingerprint(mutated), baseline,
                 )
 
+        mutated = json.loads(json.dumps(request))
+        mutated["work_item"]["data_routes"] = [{
+            "exchange": "Binance Perpetual Futures",
+            "symbol": "BTC-USDT",
+            "timeframe": "4h",
+        }]
+        self.assertNotEqual(
+            DirectMcpDispatcher._fingerprint(mutated), baseline,
+        )
+
     def test_restart_resumes_polling_without_create_or_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["running", "running", "finished"]
