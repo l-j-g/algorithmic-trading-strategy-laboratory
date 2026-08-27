@@ -54,6 +54,10 @@ Compute-heavy behavior:
   eligible controlled improvements.
 - Planner lease prevents duplicate synthesis across workers. Invalid batches
   wait five minutes before retry.
+- In continuous mode, one background synthesis lane and one background
+  analysis lane keep refilling and evaluating while the main loop claims more
+  ready work. Each lane keeps one durable lease/future; analysis cohort fan-out
+  still honors `analysis_parallelism`.
 - Worker drains dependency-satisfied scheduled overflow as ready capacity opens,
   avoiding another synthesis context load between jobs in the cohort.
 - Up to eight jobs share one execution turn; up to six independent Jesse

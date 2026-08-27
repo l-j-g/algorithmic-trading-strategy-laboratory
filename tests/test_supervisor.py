@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
@@ -59,6 +61,91 @@ class BatchSupervisorTests(unittest.TestCase):
             self.assertEqual(before, database.rows(
                 "SELECT id,state,attempts FROM work_items ORDER BY id"
             ))
+
+    def test_background_synthesis_does_not_block_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            started = threading.Event()
+            release = threading.Event()
+            supervisor = BatchSupervisor(
+                database,
+                SequenceDispatcher([self.execution_result()]),
+                "batch-worker",
+                resource_policy=ResourcePolicy(
+                    execution_batch_size=8, synthesis_low_watermark=75,
+                ),
+            )
+            supervisor._background_synthesis_enabled = True
+            supervisor._reserve_cohort = lambda: {
+                "id": "COHORT-BACKGROUND",
+                "requested_count": 25,
+            }
+
+            def fake_synthesize(
+                _cohort: dict, *, recovered: int, promoted: int,
+                background: bool = False,
+            ) -> dict:
+                self.assertTrue(background)
+                started.set()
+                release.wait(timeout=2)
+                return {"status": "synthesized"}
+
+            supervisor._synthesize = fake_synthesize
+            began = time.perf_counter()
+            result = supervisor.run_round()
+            elapsed = time.perf_counter() - began
+
+            self.assertTrue(started.wait(timeout=1))
+            self.assertEqual(result["status"], "awaiting_analysis_cohort")
+            self.assertLess(elapsed, 1.0)
+            self.assertEqual(
+                supervisor._background_synthesis_detail(),
+                {"cohort_id": "COHORT-BACKGROUND", "status": "running"},
+            )
+            release.set()
+            supervisor._synthesis_future.result(timeout=2)
+            supervisor._shutdown_background_synthesis()
+
+    def test_background_analysis_does_not_block_next_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_analysis_database(tmp)
+            started = threading.Event()
+            release = threading.Event()
+            supervisor = BatchSupervisor(
+                database,
+                SequenceDispatcher([self.execution_result(range(1, 5))]),
+                "batch-worker",
+                resource_policy=ResourcePolicy(
+                    execution_batch_size=8, synthesis_low_watermark=0,
+                ),
+            )
+            supervisor._background_analysis_enabled = True
+
+            def fake_analyze(
+                _rows: list[dict], *, recovered: int, promoted: int,
+                background: bool = False,
+            ) -> dict:
+                self.assertTrue(background)
+                started.set()
+                release.wait(timeout=2)
+                return {"status": "batch_complete"}
+
+            supervisor._analyze_pending = fake_analyze
+            began = time.perf_counter()
+            result = supervisor.run_round()
+            elapsed = time.perf_counter() - began
+
+            self.assertTrue(started.wait(timeout=1))
+            self.assertEqual(result["status"], "analysis_started")
+            self.assertLess(elapsed, 1.0)
+            self.assertEqual(
+                supervisor._background_analysis_detail(),
+                {"batch_id": result["batch_id"], "status": "running"},
+            )
+            release.set()
+            supervisor._analysis_future.result(timeout=2)
+            supervisor._shutdown_background_analysis()
+
     def make_database(self, root: str) -> WorkflowDatabase:
         database = WorkflowDatabase(Path(root) / "workflow.sqlite3")
         database.initialize()

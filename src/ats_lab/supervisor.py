@@ -5,7 +5,7 @@ import json
 import os
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -111,6 +111,14 @@ class BatchSupervisor:
         self.started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self._last_preflight_signature: str | None = None
         self._last_attention_signature: str | None = None
+        self._background_synthesis_enabled = False
+        self._synthesis_executor: ThreadPoolExecutor | None = None
+        self._synthesis_future: Future[dict[str, Any]] | None = None
+        self._synthesis_cohort_id: str | None = None
+        self._background_analysis_enabled = False
+        self._analysis_executor: ThreadPoolExecutor | None = None
+        self._analysis_future: Future[dict[str, Any]] | None = None
+        self._analysis_batch_id: str | None = None
 
     def plan(self) -> dict[str, Any]:
         result = operator_status(self.database)
@@ -127,6 +135,180 @@ class BatchSupervisor:
             "synthesis_low_watermark": self.resource_policy.synthesis_low_watermark,
         }
         return result
+
+    def _background_synthesis_detail(self) -> dict[str, Any] | None:
+        future = self._synthesis_future
+        cohort_id = self._synthesis_cohort_id
+        if future is None or cohort_id is None:
+            return None
+        return {
+            "cohort_id": cohort_id,
+            "status": "completed" if future.done() else "running",
+        }
+
+    def _background_analysis_detail(self) -> dict[str, Any] | None:
+        future = self._analysis_future
+        batch_id = self._analysis_batch_id
+        if future is None or batch_id is None:
+            return None
+        return {
+            "batch_id": batch_id,
+            "status": "completed" if future.done() else "running",
+        }
+
+    def _poll_background_analysis(self) -> dict[str, Any] | None:
+        future = self._analysis_future
+        if future is None or not future.done():
+            return None
+        batch_id = self._analysis_batch_id
+        try:
+            result = future.result()
+        except Exception as error:
+            detail = str(error)
+            self._activity(
+                "analysis_failed",
+                {
+                    "stage": "analyzing",
+                    "batch_id": batch_id,
+                    "detail": detail,
+                },
+            )
+            result = {"status": "analysis_failed", "detail": detail}
+        self._analysis_future = None
+        self._analysis_batch_id = None
+        return result
+
+    def _start_background_analysis(
+        self,
+        rows: list[dict],
+        *,
+        recovered: int,
+        promoted: int,
+    ) -> dict[str, Any] | None:
+        """Start one analysis turn without holding up execution or synthesis."""
+        if not self._background_analysis_enabled:
+            return None
+        self._poll_background_analysis()
+        running = self._background_analysis_detail()
+        if running is not None and running["status"] == "running":
+            return running
+        if not rows:
+            return running
+        if self._analysis_executor is None:
+            self._analysis_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="ats-analysis",
+            )
+        self._analysis_batch_id = str(rows[0].get("batch_id") or "ANALYSIS")
+        self._analysis_future = self._analysis_executor.submit(
+            self._analyze_pending,
+            rows,
+            recovered=recovered,
+            promoted=promoted,
+            background=True,
+        )
+        return self._background_analysis_detail()
+
+    def _start_background_hpo_analysis(
+        self,
+        job: dict,
+        *,
+        recovered: int,
+        promoted: int,
+    ) -> dict[str, Any] | None:
+        if not self._background_analysis_enabled:
+            return None
+        if self._analysis_future is not None:
+            return self._background_analysis_detail()
+        if self._analysis_executor is None:
+            self._analysis_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="ats-analysis",
+            )
+        self._analysis_batch_id = str(job.get("cohort_id") or job["id"])
+        self._analysis_future = self._analysis_executor.submit(
+            self._analyze_hpo_job,
+            job,
+            recovered=recovered,
+            promoted=promoted,
+            background=True,
+        )
+        return self._background_analysis_detail()
+
+    def _poll_background_synthesis(self) -> dict[str, Any] | None:
+        future = self._synthesis_future
+        if future is None or not future.done():
+            return None
+        cohort_id = self._synthesis_cohort_id
+        try:
+            result = future.result()
+        except Exception as error:
+            detail = str(error)
+            if cohort_id:
+                self.database.fail_synthesis_cohort(cohort_id, detail)
+                self._activity(
+                    "synthesis_failed",
+                    {
+                        "stage": "synthesizing",
+                        "cohort_id": cohort_id,
+                        "detail": detail,
+                    },
+                )
+            result = {"status": "synthesis_failed", "detail": detail}
+        self._synthesis_future = None
+        self._synthesis_cohort_id = None
+        return result
+
+    def _start_background_synthesis(
+        self, *, recovered: int, promoted: int,
+    ) -> dict[str, Any] | None:
+        """Start one refill without holding up execution or analysis."""
+        if not self._background_synthesis_enabled:
+            return None
+        self._poll_background_synthesis()
+        running = self._background_synthesis_detail()
+        if running is not None and running["status"] == "running":
+            return running
+        cohort = self._reserve_cohort()
+        if cohort is None:
+            return None
+        if self._synthesis_executor is None:
+            self._synthesis_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="ats-synthesis",
+            )
+        self._synthesis_cohort_id = str(cohort["id"])
+        self._synthesis_future = self._synthesis_executor.submit(
+            self._synthesize,
+            cohort,
+            recovered=recovered,
+            promoted=promoted,
+            background=True,
+        )
+        return self._background_synthesis_detail()
+
+    def _shutdown_background_synthesis(self) -> None:
+        executor = self._synthesis_executor
+        self._synthesis_executor = None
+        self._background_synthesis_enabled = False
+        if executor is not None:
+            # Preserve graceful-stop semantics. A planning lease must not be
+            # abandoned while its worker may still activate the cohort.
+            executor.shutdown(wait=True, cancel_futures=True)
+        self._synthesis_future = None
+        self._synthesis_cohort_id = None
+
+    def _shutdown_background_analysis(self) -> None:
+        executor = self._analysis_executor
+        self._analysis_executor = None
+        self._background_analysis_enabled = False
+        if executor is not None:
+            # Preserve graceful-stop semantics. Analysis owns durable evidence
+            # transitions and must finish before the supervisor exits.
+            executor.shutdown(wait=True, cancel_futures=True)
+        self._analysis_future = None
+        self._analysis_batch_id = None
+
+    def _shutdown_background_workers(self) -> None:
+        self._shutdown_background_synthesis()
+        self._shutdown_background_analysis()
 
     def run_round(self) -> dict[str, Any]:
         self._runtime("checking")
@@ -150,12 +332,19 @@ class BatchSupervisor:
                 "operator": operator_status(self.database),
             }
 
+        # Consume completed background work before taking the next snapshot;
+        # otherwise the just-finished rows could be submitted a second time.
+        self._poll_background_analysis()
         pending = self.database.pending_batch_evaluation(self.worker_id)
         ready_for_analysis = self._analysis_ready_rows(pending)
+        background_analysis = self._start_background_analysis(
+            ready_for_analysis, recovered=0, promoted=0,
+        )
         if ready_for_analysis:
-            return self._analyze_pending(
-                ready_for_analysis, recovered=0, promoted=0,
-            )
+            if not self._background_analysis_enabled:
+                return self._analyze_pending(
+                    ready_for_analysis, recovered=0, promoted=0,
+                )
 
         if self.preflight is not None:
             infrastructure = self.preflight()
@@ -228,17 +417,23 @@ class BatchSupervisor:
             ]
             ready_failures = self._analysis_ready_rows(pending_failures)
             if ready_failures:
-                return self._analyze_pending(
-                    ready_failures, recovered=recovered, promoted=0,
-                )
-            return {
-                "status": "awaiting_analysis_cohort",
-                "batch_id": recovery_batch,
-                "pending_items": len(pending_failures),
-                "minimum_items": self.resource_policy.analysis_cohort_min,
-                "recovered": recovered,
-                "promoted": 0,
-            }
+                if self._background_analysis_enabled:
+                    background_analysis = self._start_background_analysis(
+                        ready_failures, recovered=recovered, promoted=0,
+                    )
+                else:
+                    return self._analyze_pending(
+                        ready_failures, recovered=recovered, promoted=0,
+                    )
+            if not self._background_analysis_enabled:
+                return {
+                    "status": "awaiting_analysis_cohort",
+                    "batch_id": recovery_batch,
+                    "pending_items": len(pending_failures),
+                    "minimum_items": self.resource_policy.analysis_cohort_min,
+                    "recovered": recovered,
+                    "promoted": 0,
+                }
         if hasattr(self.database, "reconcile_finished_hpo_work"):
             self.database.reconcile_finished_hpo_work()
         self._apply_default_hpo_routes()
@@ -250,15 +445,27 @@ class BatchSupervisor:
             self.resource_policy.active_ready_limit
         )
 
-        if hasattr(self.database, "claim_hpo_analysis"):
+        background_synthesis = self._start_background_synthesis(
+            recovered=recovered, promoted=promoted,
+        )
+
+        if (
+            hasattr(self.database, "claim_hpo_analysis")
+            and self._analysis_future is None
+        ):
             hpo_job = self.database.claim_hpo_analysis(
                 self.worker_id,
                 cohort_id=f"HPO-COHORT-{uuid.uuid4().hex[:12].upper()}",
             )
             if hpo_job:
-                return self._analyze_hpo_job(
-                    hpo_job, recovered=recovered, promoted=promoted,
-                )
+                if self._background_analysis_enabled:
+                    background_analysis = self._start_background_hpo_analysis(
+                        hpo_job, recovered=recovered, promoted=promoted,
+                    )
+                else:
+                    return self._analyze_hpo_job(
+                        hpo_job, recovered=recovered, promoted=promoted,
+                    )
 
         claimed = self.database.claim_batch(
             self.worker_id, self.resource_policy.execution_batch_size,
@@ -266,15 +473,23 @@ class BatchSupervisor:
         if claimed:
             return self._execute(claimed, recovered=recovered, promoted=promoted)
 
-        cohort = self._reserve_cohort()
+        if not self._background_synthesis_enabled:
+            cohort = self._reserve_cohort()
+        else:
+            cohort = None
         if cohort:
             return self._synthesize(
                 cohort, recovered=recovered, promoted=promoted,
             )
-        return {
+        result = {
             "status": "idle", "recovered": recovered, "promoted": promoted,
             "operator": operator_status(self.database),
         }
+        if background_synthesis is not None:
+            result["background_synthesis"] = background_synthesis
+        if background_analysis is not None:
+            result["background_analysis"] = background_analysis
+        return result
 
     def _apply_default_hpo_routes(self) -> list[str]:
         """Bootstrap only untouched scheduled HPO studies.
@@ -609,6 +824,18 @@ class BatchSupervisor:
                 "recovered": recovered,
                 "promoted": promoted,
             }
+        if self._background_analysis_enabled:
+            background_analysis = self._start_background_analysis(
+                ready_for_analysis, recovered=recovered, promoted=promoted,
+            )
+            return {
+                "status": "analysis_started",
+                "batch_id": batch_id,
+                "results": terminal,
+                "background_analysis": background_analysis,
+                "recovered": recovered,
+                "promoted": promoted,
+            }
         analysis = self._analyze_pending(
             ready_for_analysis, recovered=recovered, promoted=promoted,
         )
@@ -623,6 +850,7 @@ class BatchSupervisor:
         *,
         recovered: int,
         promoted: int,
+        background: bool = False,
     ) -> dict[str, Any]:
         """Partition ordinary and HPO work into disjoint 4-8 item cohorts."""
         cohorts = self._analysis_cohorts(rows)
@@ -634,15 +862,16 @@ class BatchSupervisor:
                 "batch_id": rows[0]["batch_id"] if rows else None,
             },
         )
-        self._runtime(
-            "analyzing",
-            batch_id=rows[0]["batch_id"] if rows else None,
-            detail={
-                "analyzer_state": "running",
-                "cohorts": len(cohorts),
-                "experiments": len(rows),
-            },
-        )
+        if not background:
+            self._runtime(
+                "analyzing",
+                batch_id=rows[0]["batch_id"] if rows else None,
+                detail={
+                    "analyzer_state": "running",
+                    "cohorts": len(cohorts),
+                    "experiments": len(rows),
+                },
+            )
         if self.resource_policy.analysis_parallelism > 1 and len(cohorts) > 1:
             with ThreadPoolExecutor(
                 max_workers=min(
@@ -695,6 +924,7 @@ class BatchSupervisor:
         *,
         recovered: int,
         promoted: int,
+        background: bool = False,
     ) -> dict[str, Any]:
         """Interpret one imported/completed HPO study using canonical evidence."""
         study_id = job["study_id"]
@@ -786,16 +1016,17 @@ class BatchSupervisor:
         payload_bytes = len(json.dumps(
             request, separators=(",", ":"), sort_keys=True,
         ).encode())
-        self._runtime(
-            "hpo_analysis",
-            detail={
-                "analyzer_state": "running",
-                "study_id": study_id,
-                "job_id": job["id"],
-                "attempt": job.get("attempts"),
-                "payload_bytes": payload_bytes,
-            },
-        )
+        if not background:
+            self._runtime(
+                "hpo_analysis",
+                detail={
+                    "analyzer_state": "running",
+                    "study_id": study_id,
+                    "job_id": job["id"],
+                    "attempt": job.get("attempts"),
+                    "payload_bytes": payload_bytes,
+                },
+            )
         work_item_id = payload["study"].get("hpo_work_item_id")
         if work_item_id:
             self._record_stage(
@@ -1597,6 +1828,7 @@ class BatchSupervisor:
         *,
         recovered: int,
         promoted: int,
+        background: bool = False,
     ) -> dict[str, Any]:
         self._activity(
             "synthesis_started",
@@ -1606,10 +1838,11 @@ class BatchSupervisor:
                 "requested": cohort["requested_count"],
             },
         )
-        self._runtime(
-            "synthesizing",
-            detail={"cohort_id": cohort["id"], "requested": cohort["requested_count"]},
-        )
+        if not background:
+            self._runtime(
+                "synthesizing",
+                detail={"cohort_id": cohort["id"], "requested": cohort["requested_count"]},
+            )
         context = build_batch_context(
             self.database, policy=self.resource_policy,
             memory_adapter=self.memory_adapter,
@@ -2362,6 +2595,8 @@ class BatchSupervisor:
         results: list[dict[str, Any]] = []
         rounds = 0
         self.database.repair_relative_retry_schedules()
+        self._background_synthesis_enabled = continuous
+        self._background_analysis_enabled = continuous
         self._runtime("starting")
         self._activity(
             "research_started",
@@ -2375,12 +2610,15 @@ class BatchSupervisor:
             if not continuous or max_rounds is not None:
                 results.append(result)
             if max_rounds is not None and rounds >= max_rounds:
+                self._shutdown_background_workers()
                 self._runtime("stopped", detail={"reason": "max_rounds"})
                 return results
             if not continuous:
+                self._shutdown_background_workers()
                 self._runtime("stopped", detail={"reason": "single_round"})
                 return results
             if result["status"] == "stop_requested":
+                self._shutdown_background_workers()
                 self._runtime("stopped", detail={"reason": "operator_request"})
                 return results
             if result["status"] == "paused":
@@ -2395,7 +2633,16 @@ class BatchSupervisor:
                     },
                 )
             else:
-                self._runtime("idle", detail={"last_status": result["status"]})
+                background = self._background_synthesis_detail()
+                analysis = self._background_analysis_detail()
+                self._runtime(
+                    "synthesizing" if background else "analyzing" if analysis else "idle",
+                    detail={
+                        "last_status": result["status"],
+                        **({"background_synthesis": background} if background else {}),
+                        **({"background_analysis": analysis} if analysis else {}),
+                    },
+                )
             if result["status"] in {
                 "idle", "paused", "analysis_failed", "synthesis_failed",
                 "awaiting_analysis_cohort",
