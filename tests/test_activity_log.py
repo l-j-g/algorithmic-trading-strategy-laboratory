@@ -79,7 +79,7 @@ class ActivityLogTests(unittest.TestCase):
             render_activity_event(analysis),
         )
 
-    def test_run_render_contains_metric_colours_and_jesse_link_fallback(self) -> None:
+    def test_run_render_contains_metrics_and_jesse_link_on_one_line(self) -> None:
         event = ActivityEvent(
             3, "supervisor", "worker", "run_completed", {
                 "operation": "backtest",
@@ -103,11 +103,47 @@ class ActivityLogTests(unittest.TestCase):
             }, "2026-08-27T00:02:00Z",
         )
         plain = render_activity_event(event, links=False)
-        self.assertIn("RUNNING (3/25): Backtest Complete · BreakoutTrendStrategy", plain)
-        self.assertIn("trades=42 · net=+12.35% · sharpe=1.23 · max_dd=-4.50%", plain)
-        self.assertIn("Jesse: http://127.0.0.1:9000/#/backtest/session", plain)
+        self.assertEqual(len(plain.splitlines()), 1)
+        self.assertIn(
+            "RUNNING (3/25): Backtest Complete · BreakoutTrendStrategy · "
+            "ETH-USDT · 4h · trades=42 · net=+12.35% · sharpe=1.23 · "
+            "max_dd=-4.50% · Jesse: http://127.0.0.1:9000/#/backtest/session",
+            plain,
+        )
         colored = render_activity_event(event, color=True)
         self.assertIn("\033[", colored)
+
+    def test_significance_render_contains_rule_metrics_on_one_line(self) -> None:
+        event = ActivityEvent(
+            5, "supervisor", "worker", "run_completed", {
+                "operation": "significance",
+                "completed": 2,
+                "total": 2,
+                "strategy": "AtrContractedVwapReversion",
+                "routes": [{
+                    "symbol": "SOL-USDT", "timeframe": "1h",
+                    "start_date": "2023-01-01", "finish_date": "2026-06-02",
+                }],
+                "metrics": {
+                    "observed_mean": 0.001234567890123,
+                    "annualized_return": 12.345678901234,
+                    "p_value": 0.031234567890123,
+                    "n_simulations": 5000,
+                    "n_observations": 1200,
+                },
+                "dashboard_url": "http://127.0.0.1:9000/#/significance-test/session",
+            }, "2026-08-27T00:02:00Z",
+        )
+        rendered = render_activity_event(event, links=False)
+        self.assertEqual(len(rendered.splitlines()), 1)
+        self.assertIn(
+            "RULE TEST (2/2): Rule Test Complete · AtrContractedVwapReversion · "
+            "SOL-USDT · 1h · 2023-01-01 → 2026-06-02 · "
+            "observed_mean=+0.001235 · annualized_return=+12.3457 · "
+            "p_value=0.0312 · n_simulations=5,000 · n_observations=1,200 · "
+            "Jesse: http://127.0.0.1:9000/#/significance-test/session",
+            rendered,
+        )
 
     def test_footer_has_total_gap_and_optional_token_meter_only(self) -> None:
         footer = render_footer(

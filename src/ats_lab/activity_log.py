@@ -337,30 +337,51 @@ def _metric_state(payload: Mapping[str, Any], name: str) -> str:
     return ""
 
 
-def _metric(payload: Mapping[str, Any], name: str, label: str, suffix: str = "") -> str:
+def _metric(
+    payload: Mapping[str, Any], name: str, label: str, suffix: str = "",
+    *, decimals: int = 2, signed: bool = False, integer: bool = False,
+    grouped: bool = False,
+) -> str:
     value = payload.get("metrics", {}).get(name) if isinstance(payload.get("metrics"), Mapping) else None
     if value in (None, ""):
         return f"{label}=—"
     try:
         number = float(value)
-        if name == "trade_count" and number.is_integer():
-            text = f"{int(number)}{suffix}"
+        if (name == "trade_count" or integer) and number.is_integer():
+            text = f"{int(number):,}" if grouped else f"{int(number)}"
+            text += suffix
         else:
-            text = f"{number:+.2f}{suffix}" if name == "net_profit_percentage" else f"{number:.2f}{suffix}"
+            sign = "+" if signed or name == "net_profit_percentage" else ""
+            text = f"{number:{sign}.{decimals}f}{suffix}"
     except (TypeError, ValueError):
         text = f"{value}{suffix}"
     return f"{label}={text}"
 
 
-def _metric_line(payload: Mapping[str, Any], *, color: bool) -> str:
+def _metric_line(
+    payload: Mapping[str, Any], *, color: bool, operation: str = "backtest",
+) -> str:
+    if operation == "significance":
+        fields = (
+            ("observed_mean", "observed_mean", "", 6, True, False, False),
+            ("annualized_return", "annualized_return", "", 4, True, False, False),
+            ("p_value", "p_value", "", 4, False, False, False),
+            ("n_simulations", "n_simulations", "", 0, False, True, True),
+            ("n_observations", "n_observations", "", 0, False, True, True),
+        )
+    else:
+        fields = (
+            ("trade_count", "trades", "", 2, False, False, False),
+            ("net_profit_percentage", "net", "%", 2, True, False, False),
+            ("sharpe_ratio", "sharpe", "", 2, False, False, False),
+            ("max_drawdown_percentage", "max_dd", "%", 2, False, False, False),
+        )
     parts = []
-    for name, label, suffix in (
-        ("trade_count", "trades", ""),
-        ("net_profit_percentage", "net", "%"),
-        ("sharpe_ratio", "sharpe", ""),
-        ("max_drawdown_percentage", "max_dd", "%"),
-    ):
-        value = _metric(payload, name, label, suffix)
+    for name, label, suffix, decimals, signed, integer, grouped in fields:
+        value = _metric(
+            payload, name, label, suffix, decimals=decimals, signed=signed,
+            integer=integer, grouped=grouped,
+        )
         state = _metric_state(payload, name)
         parts.append(_paint(value, state, color) if state else value)
     return " · ".join(parts)
@@ -410,25 +431,39 @@ def _event_lines(event: ActivityEvent, *, color: bool, links: bool) -> list[str]
     if event.event_type in {"run_started", "run_completed", "run_failed"}:
         stage = _stage_for_operation(payload.get("operation"))
         operation = str(payload.get("operation") or "backtest")
-        action = {
-            "run_started": "HPO started" if operation == "hpo" else "Backtest started",
-            "run_completed": "HPO Complete" if operation == "hpo" else "Backtest Complete",
-            "run_failed": "Failed",
-        }[event.event_type]
+        actions = {
+            "backtest": ("Backtest started", "Backtest Complete"),
+            "significance": ("Rule Test started", "Rule Test Complete"),
+            "monte_carlo": ("Monte Carlo started", "Monte Carlo Complete"),
+            "hpo": ("HPO started", "HPO Complete"),
+        }
+        action = (
+            "Failed" if event.event_type == "run_failed"
+            else actions.get(operation, actions["backtest"])[
+                event.event_type == "run_completed"
+            ]
+        )
         completed = payload.get("completed", 0)
         total = payload.get("total", 0)
         count = f" ({completed}/{total})" if total else ""
         style = "green" if event.event_type == "run_completed" else "red" if event.event_type == "run_failed" else "blue"
         lines = [_paint(f"{stage}{count}:", style, color) + f" {action} · {payload.get('strategy') or payload.get('strategy_name') or 'unknown'}"]
         route = _route_text(payload)
-        if route:
-            lines.append(f"  {route}")
         if event.event_type == "run_completed":
-            lines.append("  " + _metric_line(payload, color=color))
+            details = [payload.get("strategy") or payload.get("strategy_name") or "unknown"]
+            if route:
+                details.append(route)
+            details.append(_metric_line(payload, color=color, operation=operation))
             link = terminal_link("Jesse", payload.get("dashboard_url"), enabled=links)
             if link != "Jesse":
-                lines.append("  " + _paint(link, "blue", color))
-        elif event.event_type == "run_failed":
+                details.append(_paint(link, "blue", color))
+            return [
+                _paint(f"{stage}{count}:", style, color)
+                + f" {action} · " + " · ".join(str(detail) for detail in details)
+            ]
+        if route:
+            lines.append(f"  {route}")
+        if event.event_type == "run_failed":
             lines.append(f"  {_paint(str(payload.get('blocker_code') or 'execution failure'), 'red', color)} · {_compact(payload.get('detail') or '')}")
         description = _description(payload) if event.event_type == "run_started" else ""
         if description:

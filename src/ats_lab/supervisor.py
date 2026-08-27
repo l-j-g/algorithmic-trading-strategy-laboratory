@@ -1026,11 +1026,10 @@ class BatchSupervisor:
                 f"normalized evidence unavailable: {error}",
             )
 
-        # Lifecycle-only cohorts do not need another model turn.  Significance
-        # and cost-sensitivity verdicts are already determined by canonical
-        # evidence; asking Agent to restate them adds tokens without adding
-        # research judgment.  Keep mixed cohorts on the model path so an
-        # interpretation is still available for rows with unresolved gates.
+        # Canonical lifecycle verdicts and hard quality-gate failures do not
+        # need another model turn. Asking Agent to restate them adds tokens
+        # without adding research judgment. Keep missing-only evidence on the
+        # model path so an interpretation remains available when unresolved.
         deterministic = [
             payload for row in rows
             if (payload := self._deterministic_analysis_payload(row)) is not None
@@ -1208,8 +1207,13 @@ class BatchSupervisor:
             verdict = self._deterministic_verdict(evidence)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
-        if verdict is None:
+        if verdict is None and gates.failed:
+            verdict = Verdict.REJECT
+            finding_prefix = "Deterministic quality gate:"
+        elif verdict is None:
             return None
+        else:
+            finding_prefix = "Lifecycle gate:"
         next_action = {
             Verdict.PASS: "Continue to the next validation route.",
             Verdict.INCONCLUSIVE: "Collect missing evidence before promotion.",
@@ -1218,7 +1222,7 @@ class BatchSupervisor:
         return {
             "experiment_id": row["experiment_id"],
             "verdict": verdict.value,
-            "finding": f"Lifecycle gate: {verdict.value}. {gates.finding}",
+            "finding": f"{finding_prefix} {verdict.value}. {gates.finding}",
             "next_action": next_action,
             "metrics_summary": json.dumps(
                 self.analysis_input_builder.metrics_summary(row, evidence),

@@ -1570,6 +1570,40 @@ class BatchSupervisorTests(unittest.TestCase):
             )[0]["verdict"]
             self.assertEqual(verdict, "pass")
 
+    def test_failed_quality_metrics_skip_agent_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_analysis_database(tmp)
+            execution = self.execution_result(range(1, 5))
+            for item in execution.payload["results"]:
+                metrics = {
+                    "net_profit_percentage": -0.37,
+                    "sharpe_ratio": -0.03,
+                }
+                run = item["evidence"]["run"]
+                run["metrics"] = metrics
+                run["raw_result"]["metrics"] = metrics
+            dispatcher = SequenceDispatcher([execution])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            result = supervisor.run_round()
+
+            self.assertEqual(result["status"], "batch_complete")
+            self.assertEqual(len(dispatcher.requests), 1)
+            self.assertEqual(
+                result["cohorts"][0]["analysis_calls_avoided"], 1,
+            )
+            evaluations = database.rows(
+                "SELECT verdict,summary FROM evaluations ORDER BY id"
+            )
+            self.assertEqual([row["verdict"] for row in evaluations], ["reject"] * 4)
+            self.assertTrue(all(
+                "Deterministic quality gate: reject." in row["summary"]
+                for row in evaluations
+            ))
+
     def test_synthesis_over_generation_is_trimmed_by_lane_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             supervisor = BatchSupervisor(

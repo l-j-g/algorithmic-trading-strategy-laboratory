@@ -29,9 +29,8 @@ PREFLIGHT: Docker OK · Jesse OK · Memory OK
 SYNTHESIS: Synthesising 25 new tests
   => 01  NEW  MeanReversionStrategy · BTC-USDT · 1h
       ↳ evaluating: mean reversion after volatility compression
-RUNNING (3/25): Backtest Complete · MeanReversionStrategy
-  trades=42 · net=+12.35% · sharpe=1.23 · max_dd=-4.50%
-  Jesse ↗
+RUNNING (3/25): Backtest Complete · MeanReversionStrategy · BTC-USDT · 1h · 2023-01-01 → 2026-06-02 · trades=42 · net=+12.35% · sharpe=1.23 · max_dd=-4.50% · Jesse ↗
+RULE TEST (4/25): Rule Test Complete · AtrContractedVwapReversion · SOL-USDT · 1h · 2023-01-01 → 2026-06-02 · observed_mean=+0.001235 · annualized_return=+12.3457 · p_value=0.0312 · n_simulations=5,000 · n_observations=1,200 · Jesse ↗
 ANALYSIS: Completed (24/24)
   01  PASS  MeanReversionStrategy · lifecycle gates cleared
 └─ WAITING          · 4 hrs : 24 min (+55 sec) · (^ 469)
@@ -39,7 +38,11 @@ ANALYSIS: Completed (24/24)
 
 The footer shows total research duration, time since the last event, and the
 latest provider token usage when available. `RULE TEST`, `MONTE CARLO`, and
-`HPO` use the same run layout. HPO analysis remains under `ANALYSIS`.
+`HPO` use the same one-line run layout. Rule tests show observed mean,
+annualized return, p-value, simulation count, and observation count. HPO
+analysis remains under `ANALYSIS`. Completed runs with hard quality-gate
+failures receive a deterministic decision without an agent turn; missing-only
+evidence still enters analysis.
 
 Execution events from one bounded turn are compacted in the terminal. The
 `n/m` counter is that turn's progress; it is not the synthesis cohort size.
