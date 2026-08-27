@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "strategies": {
+    "BtcEthRelativeStrengthTrendLong": [
+      {
+        "exchange": "Binance Perpetual Futures",
+        "symbol": "ETH-USDT",
+        "timeframe": "1h"
+      }
+    ],
+    "CorrelatedTapeTrendBreakout": [
+      {
+        "exchange": "$primary",
+        "symbol": "ETH-USDT",
+        "timeframe": "$primary"
+      }
+    ],
+    "EthBtcRatioZscoreRevert": [
+      {
+        "exchange": "Binance Perpetual Futures",
+        "symbol": "BTC-USDT",
+        "timeframe": "1h"
+      }
+    ],
+    "EthBtcRelativeStrengthMomentum": [
+      {
+        "exchange": "$primary",
+        "symbol": "BTC-USDT",
+        "timeframe": "$primary"
+      }
+    ],
+    "EthLagsBtcCatchupLong": [
+      {
+        "exchange": "Binance Perpetual Futures",
+        "symbol": "BTC-USDT",
+        "timeframe": "1h"
+      }
+    ],
+    "LondonCloseExtensionFade": [
+      {
+        "exchange": "Binance Perpetual Futures",
+        "symbol": "BTC-USDT",
+        "timeframe": "4h"
+      }
+    ],
+    "RelativeStrengthRouteTrend": [
+      {
+        "exchange": "Binance Perpetual Futures",
+        "symbol": "BTC-USDT",
+        "timeframe": "1h"
+      }
+    ]
+  }
+}

@@ -21,6 +21,7 @@ from .database import WorkflowDatabase
 from .models import utc_now
 from .resources import ResourcePolicy
 from .session_recovery import SessionRecoveryPolicy
+from .strategy_dependencies import data_route_dicts, merge_data_routes
 from .strategy_contracts import StrategyContractValidator
 from .worker import DispatchResult, Dispatcher
 
@@ -45,6 +46,10 @@ JESSE_RESULT_STATUSES = frozenset(
 )
 ROUTE_FIELDS = ("exchange", "symbol", "timeframe", "start_date", "finish_date")
 RAW_RESULT_KEYS = {"session_id", "status", "metrics"}
+MISSING_DATA_ROUTE_MARKERS = (
+    "data route is required but missing",
+    "route not found",
+)
 MISSING_SESSION_MARKERS = ("session", "not found")
 
 
@@ -165,6 +170,11 @@ def _execution_error(
     if isinstance(nested, str) and nested.strip():
         return nested.strip()
     return None
+
+
+def _is_missing_data_route_error(detail: str | None) -> bool:
+    normalized = str(detail or "").casefold()
+    return any(marker in normalized for marker in MISSING_DATA_ROUTE_MARKERS)
 
 
 def _evidence_flags(
@@ -362,6 +372,44 @@ def execution_request_violations(request: Any) -> list[str]:
             work_item.get("data_routes"), "work_item.data_routes",
         ))
     return violations
+
+
+def _request_data_routes(request: dict[str, Any]) -> list[dict[str, str]]:
+    """Return the union of both metadata levels and trusted dependencies."""
+    experiment = request.get("experiment")
+    work_item = request.get("work_item")
+    if not isinstance(experiment, dict):
+        return []
+    work_item = work_item if isinstance(work_item, dict) else {}
+    routes = merge_data_routes(
+        str(experiment.get("strategy_name") or ""),
+        experiment.get("routes") if isinstance(experiment.get("routes"), list) else (),
+        experiment.get("data_routes"),
+        work_item.get("data_routes"),
+    )
+    return data_route_dicts(routes)
+
+
+def _normalize_request_data_routes(request: dict[str, Any]) -> dict[str, Any]:
+    """Materialize route dependencies before contract validation and MCP calls."""
+    if not isinstance(request, dict):
+        raise ValueError("execution request must be an object")
+    experiment = request.get("experiment")
+    if not isinstance(experiment, dict):
+        return request
+    work_item = request.get("work_item")
+    normalized = dict(request)
+    normalized_experiment = dict(experiment)
+    normalized_work_item = dict(work_item) if isinstance(work_item, dict) else work_item
+    normalized["experiment"] = normalized_experiment
+    if isinstance(normalized_work_item, dict):
+        normalized["work_item"] = normalized_work_item
+    routes = _request_data_routes(normalized)
+    if routes:
+        normalized_experiment["data_routes"] = routes
+        if isinstance(normalized_work_item, dict):
+            normalized_work_item["data_routes"] = routes
+    return normalized
 
 
 def execution_result_violations(view: Any) -> list[str]:
@@ -695,12 +743,32 @@ class DirectMcpDispatcher:
     def dispatch(self, request: dict[str, Any]) -> DispatchResult:
         if not self.config.enabled or request.get("task_type") != "execute_batch":
             return self._fallback(request)
-        requests = request.get("requests")
-        if not isinstance(requests, list):
+        raw_requests = request.get("requests")
+        if not isinstance(raw_requests, list):
             return DispatchResult(
                 outcome="retry", blocker_code="invalid_direct_batch",
                 detail="execute_batch requires requests array",
             )
+        requests: list[dict[str, Any]] = []
+        normalization_results: list[dict[str, Any]] = []
+        for item in raw_requests:
+            if not isinstance(item, dict):
+                normalization_results.append({
+                    "work_item_id": None,
+                    "outcome": "blocked",
+                    "blocker_code": "invalid_data_routes",
+                    "detail": "execution request item must be an object",
+                })
+                continue
+            try:
+                requests.append(_normalize_request_data_routes(item))
+            except (TypeError, ValueError) as error:
+                normalization_results.append({
+                    "work_item_id": item.get("work_item_id"),
+                    "outcome": "blocked",
+                    "blocker_code": "invalid_data_routes",
+                    "detail": str(error)[:1000],
+                })
         direct: list[dict[str, Any]] = []
         delegated: list[dict[str, Any]] = []
         for item in requests:
@@ -708,7 +776,7 @@ class DirectMcpDispatcher:
                 direct.append(item)
             else:
                 delegated.append(item)
-        results: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = list(normalization_results)
         contract_valid: list[dict[str, Any]] = []
         for item in direct:
             issues = self.contract_validator.validate_request(item)
@@ -739,7 +807,10 @@ class DirectMcpDispatcher:
                     "Jesse MCP. Enforce entry notional <=95% available_margin * "
                     "session_leverage; if fixed L_max is declared, session_leverage "
                     "must not exceed it and L_max is not an HPO parameter. "
-                    "Return prepared_work_item_ids. Never return strategy source."
+                    "Inspect all get_candles dependencies and preserve the supplied "
+                    "data_routes contract; data_routes are non-trading routes, not "
+                    "extra trading routes. Return prepared_work_item_ids. Never "
+                    "return strategy source."
                 ),
                 "requests": [self._preparation_request(item) for item in preparation],
             })
@@ -1009,15 +1080,18 @@ class DirectMcpDispatcher:
                         "Jesse session terminal status "
                         f"{classification.public_status}"
                     )
+                    blocker_code = (
+                        "missing_data_route"
+                        if _is_missing_data_route_error(detail)
+                        else f"jesse_execution_{classification.public_status}"
+                    )
                     self._save_checkpoint(
                         work_item_id, experiment_id, session_id, fingerprint,
                         "terminal_failure", error=detail,
                     )
                     return self._record_and_return(
                         client, work_item_id, polls, "blocked",
-                        blocker_code=(
-                            f"jesse_execution_{classification.public_status}"
-                        ),
+                        blocker_code=blocker_code,
                         detail=detail,
                     )
                 if classification.state == "malformed_session":
@@ -1234,11 +1308,7 @@ class DirectMcpDispatcher:
             self._shared_route_window(request["experiment"], "backtest")
         )
         work_item = request.get("work_item", {})
-        experiment_data_routes = request["experiment"].get("data_routes", [])
-        work_data_routes = work_item.get("data_routes", [])
-        data_routes = work_data_routes or experiment_data_routes or []
-        if not isinstance(data_routes, list):
-            raise ValueError("data_routes must be a list")
+        data_routes = _request_data_routes(request)
         session_config = self._session_exchange_config(request["experiment"])
         draft = client.call_tool("create_backtest_draft", {
             "exchange": exchange,
@@ -1265,11 +1335,7 @@ class DirectMcpDispatcher:
         )
         work_item = request.get("work_item", {})
         parameters = work_item.get("parameters") or {}
-        experiment_data_routes = request["experiment"].get("data_routes", [])
-        work_data_routes = work_item.get("data_routes", [])
-        data_routes = work_data_routes or experiment_data_routes or []
-        if not isinstance(data_routes, list):
-            raise ValueError("data_routes must be a list")
+        data_routes = _request_data_routes(request)
         n_simulations = parameters.get("n_simulations")
         if n_simulations is None:
             raise ValueError(
@@ -1957,7 +2023,7 @@ class DirectMcpDispatcher:
             key: experiment.get(key) for key in (
                 "strategy_name", "hypothesis", "edge_thesis", "archetype",
                 "target_regime", "failure_regime", "entry_rule", "change_scope",
-                "sizing_model",
+                "sizing_model", "data_routes",
             ) if experiment.get(key) is not None
         }
         return {
@@ -1979,11 +2045,7 @@ class DirectMcpDispatcher:
             "experiment_id": request.get("experiment_id"),
             "strategy_name": experiment.get("strategy_name"),
             "routes": experiment.get("routes"),
-            "data_routes": (
-                work_item.get("data_routes")
-                or experiment.get("data_routes")
-                or []
-            ),
+            "data_routes": DirectMcpDispatcher._request_data_routes_for_fingerprint(request),
             "session_exchange_config": DirectMcpDispatcher._session_exchange_config(
                 experiment,
             ),
@@ -1995,6 +2057,11 @@ class DirectMcpDispatcher:
         return hashlib.sha256(json.dumps(
             material, separators=(",", ":"), sort_keys=True,
         ).encode()).hexdigest()
+
+    @staticmethod
+    def _request_data_routes_for_fingerprint(request: dict[str, Any]) -> list[dict[str, str]]:
+        """Keep fingerprints sensitive to every explicit and trusted route."""
+        return _request_data_routes(request)
 
     def _fallback(self, request: dict[str, Any]) -> DispatchResult:
         if self.fallback is None:

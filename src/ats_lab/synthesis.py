@@ -4,13 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from .contracts import load_json
 from .database import WorkflowDatabase
 from .models import DataRouteSpec, ExperimentSpec, ExperimentType, GateSpec, RouteSpec, WorkItem, WorkState
+from .strategy_dependencies import data_route_dicts, merge_data_routes
 
 
 ENTRY_CHANGE_SCOPES = {"new_entry", "entry_changed"}
@@ -269,12 +270,54 @@ def _set_state(database: WorkflowDatabase, work_item_id: str, state: WorkState) 
         )
 
 
+def _inherited_data_routes(
+    database: WorkflowDatabase, source_experiment_id: str | None,
+) -> tuple[DataRouteSpec, ...]:
+    """Read auxiliary routes from a revision parent without guessing from prose."""
+    if not source_experiment_id:
+        return ()
+    rows = database.rows(
+        "SELECT specification_json FROM experiments WHERE id=?",
+        (source_experiment_id,),
+    )
+    if not rows:
+        return ()
+    payload = json.loads(rows[0]["specification_json"] or "{}")
+    routes = payload.get("data_routes", [])
+    if routes is None:
+        return ()
+    if not isinstance(routes, list):
+        raise ValueError(
+            f"source experiment data_routes must be an array: {source_experiment_id}"
+        )
+    try:
+        return tuple(DataRouteSpec(**route) for route in routes)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"source experiment data_routes are invalid: {source_experiment_id}"
+        ) from error
+
+
+def _effective_data_routes(
+    database: WorkflowDatabase, request: SynthesisRequest,
+) -> tuple[DataRouteSpec, ...]:
+    """Union explicit, inherited, and reviewed strategy dependency routes."""
+    primary_routes = [asdict(route) for route in request.routes]
+    return merge_data_routes(
+        request.strategy_name,
+        primary_routes,
+        _inherited_data_routes(database, request.source_experiment_id),
+        request.data_routes,
+    )
+
+
 def synthesize(
     database: WorkflowDatabase, request: SynthesisRequest, *, source_path: str = "",
     release_ready: bool = True,
 ) -> dict[str, Any]:
     """Create or reconcile significance and baseline jobs for one research idea."""
     database.initialize()
+    data_routes = _effective_data_routes(database, request)
     fingerprint = request.entry_fingerprint
     stem = f"{_slug(request.strategy_name)}-{request.job_fingerprint[:8].upper()}"
     significance_id = f"{stem}-SIG"
@@ -315,7 +358,7 @@ def synthesize(
             archetype=request.archetype, target_regime=request.target_regime,
             failure_regime=request.failure_regime,
             routes=request.routes,
-            data_routes=request.data_routes,
+            data_routes=data_routes,
             success_gates=(GateSpec("p_value", "<", 0.05),),
             failure_gates=(GateSpec("p_value", ">", 0.10),),
             parent_experiment_id=request.source_experiment_id, source_path=source_path,
@@ -329,7 +372,7 @@ def synthesize(
                                              "entry_rule": lineage,
                                              "data_routes": [
                                                  route.__dict__
-                                                 for route in request.data_routes
+                                                 for route in data_routes
                                              ]},
         ))
 
@@ -354,7 +397,7 @@ def synthesize(
         hypothesis=request.hypothesis, archetype=request.archetype,
         target_regime=request.target_regime, failure_regime=request.failure_regime,
         routes=request.routes,
-        data_routes=request.data_routes,
+        data_routes=data_routes,
         parent_experiment_id=significance_id if needs_significance else request.source_experiment_id,
         source_path=source_path,
     )
@@ -366,7 +409,7 @@ def synthesize(
         specification={
             "operation": "backtest", "entry_rule": lineage,
             "gate_decision": decision,
-            "data_routes": [route.__dict__ for route in request.data_routes],
+            "data_routes": data_route_dicts(data_routes),
         },
     ))
     _set_state(database, baseline_id, baseline_state)

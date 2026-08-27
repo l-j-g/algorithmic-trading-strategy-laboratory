@@ -115,7 +115,7 @@ class FakeMcpHandler(BaseHTTPRequestHandler):
                     "metrics": self.server.metrics if status == "finished" else {},  # type: ignore[attr-defined]
                 }
                 if status == "stopped":
-                    session["exception"] = "mechanical failure"
+                    session["exception"] = self.server.terminal_exception  # type: ignore[attr-defined]
                 result = {"data": {"session": session}, "error": None}
             elif name == "get_significance_test_session":
                 poll = self.server.poll_count  # type: ignore[attr-defined]
@@ -175,6 +175,7 @@ class FakeMcpServer:
         self.http.statuses = statuses
         self.http.deleted_sessions = []
         self.http.missing_sessions = set()
+        self.http.terminal_exception = "mechanical failure"
         self.http.metrics = {
             "net_profit_percentage": 12.345678901234,
             "route_runs": [
@@ -831,6 +832,56 @@ class DirectMcpExecutorTests(unittest.TestCase):
                 request["requests"][0]["work_item"]["data_routes"],
             )
 
+    def test_trusted_strategy_dependency_is_sent_as_data_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["finished"]
+        ) as server:
+            dispatcher, _database = self.make_dispatcher(tmp, server)
+            request = batch_request()
+            request["requests"][0]["experiment"]["strategy_name"] = (
+                "EthBtcRatioZscoreRevert"
+            )
+            request["requests"][0]["experiment"]["routes"] = [ROUTES[1]]
+            result = dispatcher.dispatch(request)
+            self.assertEqual(result.payload["results"][0]["outcome"], "finished")
+            create_args = next(
+                args for name, args in server.http.tool_calls
+                if name == "create_backtest_draft"
+            )
+            self.assertEqual(json.loads(create_args["data_routes"]), [{
+                "exchange": "Binance Perpetual Futures",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+            }])
+
+    def test_experiment_and_work_item_data_routes_are_unioned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["finished"]
+        ) as server:
+            dispatcher, _database = self.make_dispatcher(tmp, server)
+            request = batch_request()
+            item = request["requests"][0]
+            item["experiment"]["data_routes"] = [{
+                "exchange": "Binance Perpetual Futures",
+                "symbol": "BTC-USDT",
+                "timeframe": "4h",
+            }]
+            item["work_item"]["data_routes"] = [{
+                "exchange": "Binance Perpetual Futures",
+                "symbol": "ETH-USDT",
+                "timeframe": "1h",
+            }]
+            result = dispatcher.dispatch(request)
+            self.assertEqual(result.payload["results"][0]["outcome"], "finished")
+            create_args = next(
+                args for name, args in server.http.tool_calls
+                if name == "create_backtest_draft"
+            )
+            self.assertEqual(json.loads(create_args["data_routes"]), [
+                item["experiment"]["data_routes"][0],
+                item["work_item"]["data_routes"][0],
+            ])
+
     def test_missing_persisted_session_gets_one_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
             ["running", "finished"]
@@ -1419,6 +1470,17 @@ class DirectMcpExecutorTests(unittest.TestCase):
             timed_out = dispatcher.dispatch(batch_request()).payload["results"][0]
             self.assertEqual(timed_out["outcome"], "retry")
             self.assertEqual(timed_out["blocker_code"], "jesse_execution_deferred")
+
+    def test_missing_data_route_is_operator_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["stopped"]) as server:
+            server.http.terminal_exception = (
+                "RouteNotFound: Data route is required but missing: "
+                "symbol='BTC-USDT', timeframe='1m'"
+            )
+            dispatcher, _database = self.make_dispatcher(tmp, server)
+            result = dispatcher.dispatch(batch_request()).payload["results"][0]
+            self.assertEqual(result["outcome"], "blocked")
+            self.assertEqual(result["blocker_code"], "missing_data_route")
 
     def test_active_poll_slice_is_deferred_without_strategy_attempt_charge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(["running"]) as server:

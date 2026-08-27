@@ -36,7 +36,7 @@ INFRASTRUCTURE_FAILURE_CODES = frozenset({
 
 OPERATOR_FAILURE_CODES = frozenset({
     "requirements_pending", "direct_request_changed",
-    "credential_required", "operator_input_required",
+    "credential_required", "operator_input_required", "missing_data_route",
 })
 
 LEGACY_ANALYZABLE_BLOCKERS = frozenset({

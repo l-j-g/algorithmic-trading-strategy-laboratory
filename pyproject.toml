@@ -32,4 +32,4 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-ats_lab = ["schema.sql", "schemas/*.json"]
+ats_lab = ["schema.sql", "schemas/*.json", "data/*.json"]

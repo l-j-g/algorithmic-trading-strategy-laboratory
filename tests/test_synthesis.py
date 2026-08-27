@@ -123,6 +123,53 @@ class SynthesisTests(unittest.TestCase):
                 [DATA_ROUTE.__dict__],
             )
 
+    def test_trusted_strategy_dependency_is_persisted_without_agent_metadata(self) -> None:
+        request = SynthesisRequest(
+            strategy_name="EthBtcRatioZscoreRevert",
+            hypothesis="ETH/BTC ratio reverts.",
+            entry_rule="Ratio z-score reversal",
+            change_scope="new_entry",
+            routes=(RouteSpec(
+                exchange="Binance Perpetual Futures", symbol="ETH-USDT",
+                timeframe="1h", start_date="2024-01-01", finish_date="2025-12-31",
+            ),),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            result = synthesize(database, request)
+            expected = [{
+                "exchange": "Binance Perpetual Futures",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+            }]
+            significance = database.execution_request(result["significance_job"])
+            baseline = database.execution_request(result["baseline_job"])
+            self.assertEqual(significance["experiment"]["data_routes"], expected)
+            self.assertEqual(significance["work_item"]["data_routes"], expected)
+            self.assertEqual(baseline["experiment"]["data_routes"], expected)
+
+    def test_revision_inherits_parent_data_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            database.initialize()
+            database.upsert_experiment(ExperimentSpec(
+                id="EXP-SRC", strategy_name="TrendPullback",
+                data_routes=(DATA_ROUTE,),
+            ))
+            request = SynthesisRequest(
+                strategy_name="TrendPullback", hypothesis="Trend pullbacks continue.",
+                entry_rule="EMA trend AND RSI pullback reclaim", change_scope="exit_only",
+                routes=(ROUTE,), action="revise", source_experiment_id="EXP-SRC",
+                controlled_change="Tighten the time exit.",
+            )
+            result = synthesize(database, request)
+            baseline = database.execution_request(result["baseline_job"])
+            self.assertEqual(baseline["experiment"]["data_routes"], [DATA_ROUTE.__dict__])
+            self.assertEqual(
+                baseline["work_item"]["data_routes"],
+                [DATA_ROUTE.__dict__],
+            )
+
     def make_request(self, scope: str = "new_entry") -> SynthesisRequest:
         return SynthesisRequest(
             strategy_name="TrendPullback", hypothesis="Trend pullbacks continue.",

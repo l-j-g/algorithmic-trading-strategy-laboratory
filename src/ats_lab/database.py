@@ -27,6 +27,7 @@ from .models import (
     utc_now,
 )
 from .retry_schedule import resolve_retry_after
+from .strategy_dependencies import data_route_dicts, merge_data_routes
 
 
 
@@ -567,6 +568,17 @@ class WorkflowDatabase(QueueMixin, HpoMixin, SynthesisMixin, EvidenceMixin):
                 raise KeyError(f"unknown work item: {work_item_id}")
             experiment = json.loads(row["experiment_json"])
             work_item = json.loads(row["specification_json"])
+            effective_data_routes = merge_data_routes(
+                str(experiment.get("strategy_name") or ""),
+                experiment.get("routes")
+                if isinstance(experiment.get("routes"), list) else (),
+                experiment.get("data_routes"),
+                work_item.get("data_routes"),
+            )
+            if effective_data_routes:
+                route_dicts = data_route_dicts(effective_data_routes)
+                experiment["data_routes"] = route_dicts
+                work_item["data_routes"] = route_dicts
             request = {
                 "schema_version": 1,
                 "work_item_id": row["work_item_id"],
