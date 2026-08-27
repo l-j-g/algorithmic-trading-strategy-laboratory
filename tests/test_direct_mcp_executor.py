@@ -589,6 +589,36 @@ class DirectMcpExecutorTests(unittest.TestCase):
             significance_request()["requests"][0],
         ), [])
 
+    def test_significance_validator_requires_one_primary_route(self) -> None:
+        item = significance_request()["requests"][0]
+        item["experiment"]["routes"] = ROUTES
+        violations = execution_request_violations(item)
+        self.assertIn(
+            "significance requires exactly one primary trading route; "
+            "run one test per symbol/timeframe",
+            violations,
+        )
+
+    def test_multi_route_significance_is_blocked_before_mcp(self) -> None:
+        request = significance_request()
+        request["requests"][0]["experiment"]["routes"] = ROUTES
+        with tempfile.TemporaryDirectory() as tmp, FakeMcpServer(
+            ["running", "finished"]
+        ) as server:
+            dispatcher, _database = self.make_dispatcher(
+                tmp, server, work_id="JOB-SIG", experiment_id="EXP-SIG",
+                specification={
+                    "operation": "significance",
+                    "parameters": {"n_simulations": 5000},
+                },
+            )
+            result = dispatcher.dispatch(request)
+            item = result.payload["results"][0]
+            self.assertEqual(item["outcome"], "blocked")
+            self.assertEqual(item["blocker_code"], "strategy_contract_invalid")
+            self.assertIn("exactly one primary trading route", item["detail"])
+            self.assertEqual(server.http.tool_calls, [])
+
     def test_execution_request_validator_reports_schema_violations(self) -> None:
         item = batch_request()["requests"][0]
         item["schema_version"] = 2
@@ -635,7 +665,7 @@ class DirectMcpExecutorTests(unittest.TestCase):
         self.assertIn("experiment.success_gates[4] must be an object", violations)
         self.assertIn("experiment.failure_gates must be an array", violations)
 
-    def test_dispatch_retries_schema_invalid_request_without_mcp_traffic(self) -> None:
+    def test_dispatch_blocks_schema_invalid_request_without_mcp_traffic(self) -> None:
         request = batch_request()
         route = dict(request["requests"][0]["experiment"]["routes"][0])
         del route["finish_date"]
@@ -646,8 +676,8 @@ class DirectMcpExecutorTests(unittest.TestCase):
             dispatcher, _ = self.make_dispatcher(tmp, server)
             result = dispatcher.dispatch(request)
         item_result = result.payload["results"][0]
-        self.assertEqual(item_result["outcome"], "retry")
-        self.assertEqual(item_result["blocker_code"], "direct_mcp_error")
+        self.assertEqual(item_result["outcome"], "blocked")
+        self.assertEqual(item_result["blocker_code"], "strategy_contract_invalid")
         self.assertIn(
             "jesse-execution-request schema violation", item_result["detail"],
         )

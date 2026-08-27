@@ -46,8 +46,10 @@ they are not parsed at runtime. The direct mechanical executor enforces
 hand-rolled stdlib validators derived from them
 (`ats_lab.direct_mcp_executor.execution_request_violations` and
 `execution_result_violations`). Request-shape violations are raised as
-`McpError` before any MCP session is opened, so they surface through the
-existing retryable harness-error funnel. Result-shape violations at the
+`strategy_contract_invalid` before any MCP session is opened. Significance
+requests are limited to one primary trading route; a multi-route baseline must
+fan out one significance job per route, while auxiliary candles remain in
+`data_routes`. Result-shape violations at the
 persist boundary downgrade the item to a terminal `invalid_execution_result`
 block instead of emitting run evidence; `raw_result` keeps exactly
 `session_id`, `status`, and `metrics`, matching the supervisor persistence

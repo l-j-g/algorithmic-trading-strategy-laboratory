@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from ats_lab.database import WorkflowDatabase
-from ats_lab.models import DataRouteSpec, ExperimentSpec, RouteSpec, RunResult, RunStatus
+from ats_lab.models import (
+    DataRouteSpec, ExperimentSpec, RouteSpec, RunResult, RunStatus, WorkState,
+)
 from ats_lab.synthesis import (
     SynthesisRequest,
     benjamini_hochberg,
@@ -189,7 +191,7 @@ class SynthesisTests(unittest.TestCase):
             self.assertEqual(significance["experiment"]["routes"], [ROUTE.__dict__])
             self.assertEqual(significance["work_item"]["parameters"]["n_simulations"], 2000)
 
-    def test_significance_sweeps_all_requested_routes(self) -> None:
+    def test_significance_fans_out_one_primary_route_per_rule_test(self) -> None:
         second_route = RouteSpec(
             exchange="Binance Perpetual Futures", symbol="ETH-USDT", timeframe="1h",
             start_date=ROUTE.start_date, finish_date=ROUTE.finish_date,
@@ -202,10 +204,72 @@ class SynthesisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
             result = synthesize(database, request)
-            significance = database.execution_request(result["significance_job"])
+            self.assertIsNone(result["significance_job"])
+            self.assertEqual(len(result["significance_jobs"]), 2)
+            significance_routes = [
+                database.execution_request(job)["experiment"]["routes"]
+                for job in result["significance_jobs"]
+            ]
+            self.assertEqual(significance_routes, [[ROUTE.__dict__], [second_route.__dict__]])
+            baseline = database.execution_request(result["baseline_job"])
             self.assertEqual(
-                significance["experiment"]["routes"],
+                baseline["experiment"]["routes"],
                 [ROUTE.__dict__, second_route.__dict__],
+            )
+            self.assertEqual(
+                database.rows(
+                    "SELECT dependencies_json FROM work_items WHERE id=?",
+                    (result["baseline_job"],),
+                )[0]["dependencies_json"],
+                json.dumps(result["significance_jobs"]),
+            )
+
+    def test_multi_route_significance_waits_for_every_primary_route(self) -> None:
+        second_route = RouteSpec(
+            exchange="Binance Perpetual Futures", symbol="ETH-USDT", timeframe="1h",
+            start_date=ROUTE.start_date, finish_date=ROUTE.finish_date,
+        )
+        request = SynthesisRequest(
+            strategy_name="TrendPullback", hypothesis="Trend pullbacks continue.",
+            entry_rule="EMA trend AND RSI pullback reclaim", change_scope="new_entry",
+            routes=(ROUTE, second_route), random_seed=42,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            database = WorkflowDatabase(Path(tmp) / "lab.sqlite3")
+            result = synthesize(database, request)
+            first_id, second_id = result["significance_jobs"]
+            database.add_run(RunResult(
+                id="rst-btc", experiment_id=first_id, work_item_id=first_id,
+                session_id="rst-btc", status=RunStatus.FINISHED,
+                metrics={"p_value": 0.01}, finished_at="2026-01-01T00:00:00Z",
+            ))
+            database.transition_work_item(
+                first_id, WorkState.FINISHED, allowed_from=(WorkState.READY,),
+            )
+            database.reconcile_significance_gate(first_id, 0.01, active_limit=10)
+            self.assertEqual(
+                database.rows(
+                    "SELECT state FROM work_items WHERE id=?",
+                    (result["baseline_job"],),
+                )[0]["state"],
+                "scheduled",
+            )
+
+            database.add_run(RunResult(
+                id="rst-eth", experiment_id=second_id, work_item_id=second_id,
+                session_id="rst-eth", status=RunStatus.FINISHED,
+                metrics={"p_value": 0.02}, finished_at="2026-01-02T00:00:00Z",
+            ))
+            database.transition_work_item(
+                second_id, WorkState.FINISHED, allowed_from=(WorkState.SCHEDULED,),
+            )
+            database.reconcile_significance_gate(second_id, 0.02, active_limit=10)
+            self.assertEqual(
+                database.rows(
+                    "SELECT state FROM work_items WHERE id=?",
+                    (result["baseline_job"],),
+                )[0]["state"],
+                "ready",
             )
 
     def test_job_fingerprint_ignores_hypothesis_prose(self) -> None:
@@ -377,6 +441,17 @@ class SynthesisTests(unittest.TestCase):
             metrics={"p_value": p_value},
             finished_at=f"2026-01-0{slot + 1}T00:00:00Z",
         ))
+        state = database.rows(
+            "SELECT state FROM work_items WHERE id=?",
+            (member["significance_job"],),
+        )[0]["state"]
+        if state != WorkState.FINISHED.value:
+            database.transition_work_item(
+                member["significance_job"], WorkState.FINISHED,
+                allowed_from=(
+                    WorkState.READY, WorkState.SCHEDULED, WorkState.RUNNING,
+                ),
+            )
 
     def test_cohort_significance_gated_by_bh_fdr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,7 +9,9 @@ from .evidence import NormalizedEvidence
 from .models import Verdict
 
 
-FAILURE_VERDICTS = frozenset({Verdict.REJECT, Verdict.REVISE})
+FAILURE_VERDICTS = frozenset({
+    Verdict.INFRASTRUCTURE_FAILURE, Verdict.REJECT, Verdict.REVISE,
+})
 
 
 @dataclass(frozen=True)
@@ -66,5 +68,6 @@ class ExecutionAnalysisInputBuilder:
     ) -> None:
         if row.get("run_status") != "finished" and verdict not in FAILURE_VERDICTS:
             raise ValueError(
-                "failed execution verdict must be revise or reject"
+                "failed execution verdict must be infrastructure_failure, "
+                "revise, or reject"
             )

@@ -347,7 +347,17 @@ def execution_request_violations(request: Any) -> list[str]:
     else:
         if not _text(experiment.get("strategy_name")):
             violations.append("experiment.strategy_name must be non-empty text")
-        violations.extend(_route_violations(experiment.get("routes")))
+        routes = experiment.get("routes")
+        violations.extend(_route_violations(routes))
+        operation = (
+            work_item.get("operation")
+            if isinstance(work_item, dict) else None
+        )
+        if operation == "significance" and isinstance(routes, list) and len(routes) != 1:
+            violations.append(
+                "significance requires exactly one primary trading route; "
+                "run one test per symbol/timeframe"
+            )
         violations.extend(_data_route_violations(
             experiment.get("data_routes"), "experiment.data_routes",
         ))
@@ -985,9 +995,13 @@ class DirectMcpDispatcher:
         try:
             violations = execution_request_violations(request)
             if violations:
-                raise McpError(
-                    "jesse-execution-request schema violation: "
-                    + "; ".join(violations)
+                return self._record_and_return(
+                    client, work_item_id, polls, "blocked",
+                    blocker_code="strategy_contract_invalid",
+                    detail=(
+                        "jesse-execution-request schema violation: "
+                        + "; ".join(violations)
+                    )[:1000],
                 )
             client.initialize()
             fingerprint = self._fingerprint(request)
@@ -1350,6 +1364,12 @@ class DirectMcpDispatcher:
         return str(session_id)
 
     def _create_significance(self, client: McpClient, request: dict[str, Any]) -> str:
+        routes = request.get("experiment", {}).get("routes")
+        if not isinstance(routes, list) or len(routes) != 1:
+            raise ValueError(
+                "significance requires exactly one primary trading route; "
+                "run one test per symbol/timeframe"
+            )
         exchange, start_date, finish_date, mcp_routes = (
             self._shared_route_window(request["experiment"], "significance test")
         )

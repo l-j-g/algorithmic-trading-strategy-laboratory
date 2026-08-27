@@ -1250,15 +1250,23 @@ class BatchSupervisor:
         revision_codes = {
             "missing_exit_framework",
             "source_strategy_not_found",
+            "jesse_execution_stopped",
         }
-        verdict = (
-            Verdict.REVISE if code in revision_codes else Verdict.REJECT
-        )
-        next_action = (
-            "Apply one bounded harness or strategy correction, then rerun."
-            if verdict is Verdict.REVISE
-            else "Discard terminal failure; no performance evidence supports promotion."
-        )
+        if code in INFRASTRUCTURE_FAILURE_CODES:
+            verdict = Verdict.INFRASTRUCTURE_FAILURE
+            next_action = (
+                "Repair the execution infrastructure or Jesse session, then "
+                "rerun; this result is not strategy evidence."
+            )
+        elif code in revision_codes:
+            verdict = Verdict.REVISE
+            next_action = "Apply one bounded harness or strategy correction, then rerun."
+        else:
+            # A stopped execution has no performance evidence. Keep it on the
+            # correction path rather than teaching the research loop that the
+            # untested strategy itself was rejected.
+            verdict = Verdict.REVISE
+            next_action = "Diagnose the terminal execution failure, correct one bounded issue, then rerun."
         return {
             "experiment_id": row["experiment_id"],
             "verdict": verdict.value,
@@ -1651,10 +1659,8 @@ class BatchSupervisor:
             chains = []
             for generated in synthesis["generated"]:
                 work_item_ids = [
-                    item_id for item_id in (
-                        generated.get("significance_job"),
-                        generated["baseline_job"],
-                    ) if item_id
+                    *generated.get("significance_jobs", []),
+                    generated["baseline_job"],
                 ]
                 chains.append({
                     "slot": generated["cohort_slot"],

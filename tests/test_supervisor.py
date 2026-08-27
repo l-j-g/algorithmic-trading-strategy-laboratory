@@ -1354,8 +1354,28 @@ class BatchSupervisorTests(unittest.TestCase):
                 database.rows(
                     "SELECT verdict,COUNT(*) count FROM evaluations GROUP BY verdict"
                 ),
-                [{"verdict": "reject", "count": 2}],
+                [{"verdict": "revise", "count": 2}],
             )
+
+    def test_terminal_infrastructure_failure_is_not_strategy_reject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp)
+            supervisor = BatchSupervisor(
+                database, SequenceDispatcher([]), "batch-worker",
+            )
+            payload = supervisor._deterministic_failure_analysis_payload({
+                "experiment_id": "EXP-1",
+                "run_status": "stopped",
+                "error_json": json.dumps({
+                    "kind": "strategy_or_harness",
+                    "code": "malformed_jesse_session",
+                    "detail": "session response lacks execution state",
+                }),
+            })
+
+            self.assertIsNotNone(payload)
+            self.assertEqual(payload["verdict"], "infrastructure_failure")
+            self.assertIn("not strategy evidence", payload["next_action"])
 
     def test_analyzer_infrastructure_failure_backs_off_pending_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1434,7 +1454,7 @@ class BatchSupervisorTests(unittest.TestCase):
             self.assertTrue(all(row["state"] == "finished" for row in items))
             self.assertTrue(all(row["blocker_code"] is None for row in items))
             self.assertEqual(evaluations, [
-                {"experiment_id": "EXP-1", "verdict": "reject"},
+                {"experiment_id": "EXP-1", "verdict": "revise"},
                 {"experiment_id": "EXP-2", "verdict": "revise"},
             ])
             self.assertEqual(dispatcher.requests, [])

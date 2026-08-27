@@ -213,8 +213,8 @@ fallback with an explicit configured anchor date (config field; document
 default + pinning guidance).
 
 ### D9 · MIN-02 + MIN-14 · synthesis rigor
-synthesis.py:272: significance across ALL routes (worst-case max-p,
-mirroring supervisor.py:1625-1656 conservatism), not routes[0].
+synthesis.py: significance is one Jesse Rule Test per primary route; the
+dependent baseline releases only after every route-specific gate passes.
 synthesis.py:68-73: job_fingerprint excludes hypothesis prose (canonical
 entry rule + structural fields only).
 

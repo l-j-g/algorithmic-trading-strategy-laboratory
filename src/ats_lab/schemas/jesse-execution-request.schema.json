@@ -17,6 +17,10 @@
     "success_gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}},
     "failure_gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}}
   },
+  "allOf": [{
+    "if": {"properties": {"operation": {"const": "significance"}}},
+    "then": {"properties": {"routes": {"maxItems": 1}}}
+  }],
   "$defs": {
     "route": {
       "type": "object",
