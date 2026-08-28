@@ -1279,6 +1279,46 @@ class BatchSupervisorTests(unittest.TestCase):
                 database.supervisor_runtime_status()["phase"], "stopped",
             )
 
+    def test_startup_recovers_claims_left_by_previous_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_analysis_database(tmp)
+            with database.connect() as connection:
+                connection.execute(
+                    """UPDATE work_items SET state='running',claimed_by=?,
+                       claimed_at=? WHERE id='JOB-1'""",
+                    (
+                        "batch-worker",
+                        "2000-01-01T00:00:00Z",
+                    ),
+                )
+            dispatcher = SequenceDispatcher([
+                self.execution_result(range(1, 5)),
+                self.analysis_result(range(1, 5)),
+            ])
+            supervisor = BatchSupervisor(
+                database, dispatcher, "batch-worker",
+                resource_policy=ResourcePolicy(synthesis_low_watermark=0),
+            )
+
+            results = supervisor.run(continuous=False, idle_sleep=0)
+
+            self.assertEqual(results[0]["status"], "batch_complete")
+            self.assertEqual(results[0]["recovered"], 1)
+            self.assertEqual(
+                database.rows(
+                    "SELECT state FROM work_items WHERE id='JOB-1'"
+                )[0]["state"],
+                "finished",
+            )
+            self.assertEqual(
+                database.rows(
+                    """SELECT COUNT(*) AS count FROM events
+                       WHERE aggregate_id='JOB-1' AND event_type='state_changed'
+                         AND payload_json LIKE '%abandoned_claim%'"""
+                )[0]["count"],
+                1,
+            )
+
     def test_stop_request_precedes_pending_batch_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp)

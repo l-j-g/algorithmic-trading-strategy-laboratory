@@ -1117,14 +1117,37 @@ class QueueMixin:
 
     def recover_abandoned_claims(self, worker_id: str, claimed_before: str) -> int:
         """Recover claims owned by an earlier process using the same worker ID."""
-        now = utc_now()
         with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT id FROM work_items
+                   WHERE state='running' AND claimed_by=? AND claimed_at<?
+                     AND COALESCE(blocker_code,'')!='awaiting_batch_evaluation'
+                   ORDER BY claimed_at,id""",
+                (worker_id, claimed_before),
+            ).fetchall()
+            if not rows:
+                return 0
+            now = utc_now()
+            ids = [row["id"] for row in rows]
+            placeholders = ",".join("?" for _ in ids)
             cursor = connection.execute(
-                """UPDATE work_items SET state='ready', claimed_by=NULL, claimed_at=NULL,
+                f"""UPDATE work_items SET state='ready', claimed_by=NULL, claimed_at=NULL,
                    blocker_code='abandoned_claim', blocker_detail='worker restarted after claim',
-                   updated_at=? WHERE state='running' AND claimed_by=? AND claimed_at < ?""",
-                (now, worker_id, claimed_before),
+                   updated_at=? WHERE state='running' AND id IN ({placeholders})""",
+                (now, *ids),
             )
+            for work_item_id in ids:
+                connection.execute(
+                    """INSERT INTO events(
+                           aggregate_type,aggregate_id,event_type,payload_json,occurred_at
+                       ) VALUES ('work_item',?,'state_changed',?,?)""",
+                    (work_item_id, json.dumps({
+                        "from": "running",
+                        "to": "ready",
+                        "reason": "abandoned_claim",
+                        "worker_id": worker_id,
+                    }, sort_keys=True), now),
+                )
             return cursor.rowcount
 
     @staticmethod

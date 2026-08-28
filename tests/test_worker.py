@@ -239,6 +239,28 @@ class WorkerTests(unittest.TestCase):
             result = Worker(database, FakeDispatcher(self.finished()), "worker-1").run_once()
             self.assertEqual(result["status"], "finished")
 
+    def test_worker_restart_preserves_claim_waiting_for_batch_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_database(tmp, WorkState.RUNNING)
+            with database.connect() as connection:
+                connection.execute(
+                    """UPDATE work_items SET claimed_by='worker-1',
+                       claimed_at='2000-01-01T00:00:00Z',
+                       blocker_code='awaiting_batch_evaluation'
+                       WHERE id='JOB-1'"""
+                )
+
+            result = Worker(
+                database, FakeDispatcher(self.finished()), "worker-1",
+            ).run_once()
+
+            self.assertEqual(result["status"], "idle")
+            row = database.rows(
+                "SELECT state,blocker_code FROM work_items WHERE id='JOB-1'"
+            )[0]
+            self.assertEqual(row["state"], "running")
+            self.assertEqual(row["blocker_code"], "awaiting_batch_evaluation")
+
     def test_unbounded_continuous_worker_streams_idle_without_accumulating(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_database(tmp, WorkState.ARCHIVED)

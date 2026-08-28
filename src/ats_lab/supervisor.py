@@ -119,6 +119,7 @@ class BatchSupervisor:
         self._analysis_executor: ThreadPoolExecutor | None = None
         self._analysis_future: Future[dict[str, Any]] | None = None
         self._analysis_batch_id: str | None = None
+        self._startup_recovered_claims = 0
 
     def plan(self) -> dict[str, Any]:
         result = operator_status(self.database)
@@ -2597,6 +2598,9 @@ class BatchSupervisor:
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         rounds = 0
+        self._startup_recovered_claims = self.database.recover_abandoned_claims(
+            self.worker_id, self.started_at,
+        )
         self.database.repair_relative_retry_schedules()
         self._background_synthesis_enabled = continuous
         self._background_analysis_enabled = continuous
@@ -2607,6 +2611,12 @@ class BatchSupervisor:
         )
         while True:
             result = self.run_round()
+            if self._startup_recovered_claims:
+                result["recovered"] = (
+                    int(result.get("recovered", 0))
+                    + self._startup_recovered_claims
+                )
+                self._startup_recovered_claims = 0
             rounds += 1
             if on_result:
                 on_result(result)
